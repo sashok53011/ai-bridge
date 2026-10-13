@@ -4,7 +4,9 @@ from core.catalogue import (
     STATUS_ACTIVE,
     STATUS_DEAD,
     STATUS_DISABLED,
+    next_priority,
     normalize,
+    propose,
     reconcile,
     view,
     with_local_enabled,
@@ -142,3 +144,80 @@ class TestWithLocalEnabled:
         result = with_local_enabled(listed, [])
         assert [entry["id"] for entry in result] == ["ollama"]
         assert result[0]["enabled"] is False
+
+
+class TestPropose:
+    def test_a_full_entry_comes_back_ready(self) -> None:
+        entry, error = propose(
+            {
+                "name": "Мой LM Studio",
+                "url": "http://192.168.0.5:1234/v1",
+                "model": "qwen3-8b",
+                "loginUrl": "http://192.168.0.5:1234",
+            }
+        )
+        assert error == ""
+        assert entry is not None
+        assert entry["name"] == "Мой LM Studio"
+        assert entry["url"] == "http://192.168.0.5:1234/v1"
+        assert entry["model"] == "qwen3-8b"
+        # Предложение — всегда от автора и всегда рабочее по умолчанию.
+        assert entry["origin"] == "user"
+        assert entry["status"] == STATUS_ACTIVE
+
+    def test_the_id_is_made_from_the_name(self) -> None:
+        entry, _ = propose({"name": "My LM Studio", "url": "http://x/v1", "model": "m"})
+        assert entry is not None and entry["id"] == "my-lm-studio"
+
+    def test_a_russian_name_gets_a_readable_id(self) -> None:
+        entry, _ = propose({"name": "Мой Ollama", "url": "http://x/v1", "model": "m"})
+        assert entry is not None and entry["id"] == "moy-ollama"
+
+    def test_an_explicit_id_wins(self) -> None:
+        entry, _ = propose({"id": "home.llm", "name": "Дом", "url": "http://x/v1", "model": "m"})
+        assert entry is not None and entry["id"] == "home.llm"
+
+    def test_a_missing_name_is_refused(self) -> None:
+        entry, error = propose({"url": "http://x/v1", "model": "m"})
+        assert entry is None and "имя" in error
+
+    def test_a_missing_url_is_refused_because_the_server_would_drop_it(self) -> None:
+        entry, error = propose({"name": "X", "model": "m"})
+        assert entry is None and "адрес" in error
+
+    def test_a_url_without_a_scheme_is_refused(self) -> None:
+        entry, error = propose({"name": "X", "url": "localhost:11434/v1", "model": "m"})
+        assert entry is None and "http" in error
+
+    def test_a_missing_model_is_refused_because_the_server_would_drop_it(self) -> None:
+        entry, error = propose({"name": "X", "url": "http://x/v1"})
+        assert entry is None and "модель" in error
+
+    def test_an_unusable_id_is_refused(self) -> None:
+        entry, error = propose({"id": "плохой id!", "name": "X", "url": "http://x/v1", "model": "m"})
+        assert entry is None and "id" in error
+
+    def test_non_dict_input_is_not_a_crash(self) -> None:
+        entry, error = propose("просто строка")
+        assert entry is None and error
+
+
+class TestSlug:
+    def test_punctuation_collapses_to_one_dash(self) -> None:
+        from core.catalogue import _slug
+
+        assert _slug("Qwen 3:8B (local)") == "qwen-3-8b-local"
+
+    def test_an_unusable_name_leaves_nothing(self) -> None:
+        from core.catalogue import _slug
+
+        assert _slug("!!!") == ""
+
+
+class TestNextPriority:
+    def test_the_first_provider_goes_after_the_last(self) -> None:
+        assert next_priority([]) == 1
+        assert next_priority([_entry(fallbackPriority=6)]) == 7
+
+    def test_a_garbage_priority_does_not_crash(self) -> None:
+        assert next_priority([_entry(fallbackPriority="много")]) == 1

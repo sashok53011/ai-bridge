@@ -118,6 +118,24 @@ class PocketBase:
         body = self._request("PUT", "/api/ai-config", json=payload)
         return self._parse_config(body)
 
+    def push_catalogue(self, providers: list[dict]) -> tuple[list[dict], str, bool, dict[str, bool]]:
+        """Отправляет каталог целиком — только для суперпользо­вателя.
+
+        Это тот же PUT, которым пользуется веб-панель администратора.
+        Осторожно: **чего нет в списке, уходит в корзину** (восстановимо).
+        Поэтому сюда отправляют видимый каталог целиком плюс новую
+        запись, а не одно изменение.
+        """
+        if not getattr(self, "_can_edit", False):
+            raise ServerError("каталог целиком меняет только суперпользо­ватель")
+
+        payload = {
+            "version": 2,
+            "providers": [_sync_shape(entry) for entry in providers],
+        }
+        body = self._request("PUT", "/api/ai-config", json=payload)
+        return self._parse_config(body)
+
     def _parse_config(self, body: dict) -> tuple[list[dict], str, bool, dict[str, bool]]:
         raw = body.get("providers")
         providers = [entry for entry in (normalize(item) for item in raw or []) if entry]

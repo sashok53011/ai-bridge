@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import re
+
 STATUS_ACTIVE = "active"
 STATUS_DEAD = "dead"
 STATUS_DISABLED = "disabled_for_all"
@@ -143,7 +145,116 @@ def reconcile(local: list[dict], remote: list[dict]) -> list[dict]:
     )
 
 
+def propose(raw: object) -> tuple[dict | None, str]:
+    """Новое предложение провайдера: (запись, "") или (None, причина).
+
+    Повторяет требования сервера: записи нужны имя, адрес и модель —
+    без них сервер молча отбрасывает заявку. ``id`` берётся из данных
+    или составляет имени; чужие id не трогаем — это чужие записи.
+    """
+    if not isinstance(raw, dict):
+        return None, "ожидались данные записи"
+
+    name = _text(raw.get("name"))
+    if not name:
+        return None, "нужно имя — без него запись никому не понятна"
+
+    url = _text(raw.get("url"))
+    if not url:
+        return None, "без адреса сервер отбросит запись"
+    if not url.startswith(("http://", "https://")):
+        return None, "адрес должен начинаться с http:// или https://"
+
+    model = _text(raw.get("model"))
+    if not model:
+        return None, "нужна модель — без неё сервер отбросит запись"
+
+    provider_id = _text(raw.get("id"))
+    if not provider_id:
+        provider_id = _slug(name)
+        if not provider_id:
+            return None, f"не получилось составить id из имени «{name}» — укажите --id"
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", provider_id):
+        return None, f"id «{provider_id}» подходит не весь: нужны буквы, цифры, точка, дефис"
+
+    entry = normalize(
+        {
+            "id": provider_id,
+            "name": name,
+            "url": url,
+            "model": model,
+            "fallbackPriority": raw.get("fallbackPriority"),
+            "loginUrl": raw.get("loginUrl"),
+            "getApiKeyUrl": raw.get("getApiKeyUrl"),
+            "status": STATUS_ACTIVE,
+            # Предложение всегда идёт от автора; админ публикует его позже.
+            "origin": "user",
+        }
+    )
+    assert entry is not None  # id и адрес уже проверены
+    return entry, ""
+
+
+def _slug(name: str) -> str:
+    """Читаемый id из имени: «Мой Ollama» -> «my-ollama» (сервер любит ASCII)."""
+    lowered = name.lower()
+    # Транслитерация основных букв, чтобы у русских имён остался осмысленный id.
+    table = str.maketrans(
+        {"а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
+         "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+         "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+         "ф": "f", "х": "h", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "sch",
+         "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya"}
+    )
+    transliterated = lowered.translate(table)
+    slug = re.sub(r"[^a-z0-9]+", "-", transliterated).strip("-")
+    return slug[:64].strip("-")
+
+
+def next_priority(entries: list[dict]) -> int:
+    """Следующий свободный приоритет — как в веб-панели: в конец списка."""
+    top = max(((_int(entry.get("fallbackPriority"), 0) for entry in entries)), default=0)
+    return top + 1
+
+
 def with_local_enabled(listed: list[dict], local: list[dict]) -> list[dict]:
+    """Каталог глазами устройства: что отдал сервер плюс то, что человек
+    включил сам и чего каталог больше не отдаёт.
+
+    ``listed`` — свежий каталог с сервера (с переключателями), ``local`` —
+    последний сохранённый на устройстве список. Два правила:
+
+    * **включённое человеком не удаляется никогда** — запись, которой нет
+      в каталоге, но которую человек включил, остаётся, пока он сам её
+      не выключит;
+    * **флаг с устройства сильнее серверного** — решение, принятое на этом
+      устройстве (хоть включением, хоть выключением), переживает синхронизацию;
+      флаги сервера нужны только тем записям, которых устройство ещё не знало.
+
+    Данные (адрес, модель) всегда берутся из ``listed``: каталог новее снапшота.
+    """
+    local_by_id = {entry["id"]: entry for entry in local}
+    seen: set[str] = set()
+    result: list[dict] = []
+
+    for entry in listed:
+        seen.add(entry["id"])
+        copy = local_by_id.get(entry["id"])
+        if copy is not None and "enabled" in copy:
+            enabled = bool(copy["enabled"])
+        else:
+            enabled = bool(entry.get("enabled"))
+        result.append({**entry, "enabled": enabled})
+
+    # Включённое человеком переживает исчезновение из каталога.
+    for entry in local:
+        if entry["id"] not in seen and entry.get("enabled"):
+            result.append({**entry, "enabled": True})
+
+    return sorted(
+        result,
+        key=lambda entry: (entry.get("fallbackPriority", 0), entry["name"]),
+    )
     """Каталог глазами устройства: что отдал сервер плюс то, что человек
     включил сам и чего каталог больше не отдаёт.
 

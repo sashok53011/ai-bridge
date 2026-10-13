@@ -26,7 +26,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.check import judge
-from core.catalogue import STATUS_DEAD, STATUS_DISABLED, view, with_local_enabled
+from core.catalogue import (
+    STATUS_DEAD,
+    STATUS_DISABLED,
+    next_priority,
+    propose,
+    view,
+    with_local_enabled,
+)
 from core.progress import PullTracker, describe
 from core.stats import format_stats, for_line, for_provider
 from providers.client import (
@@ -381,6 +388,85 @@ def _serve(
     return run_server(entries, KeyStore(), host=host, port=port, timeout=timeout)
 
 
+def _add_provider(
+    server: PocketBase,
+    wanted: list[dict],
+    *,
+    name: str,
+    url: str,
+    model: str,
+    provider_id: str = "",
+    priority: int | None = None,
+    login_url: str = "",
+    key_url: str = "",
+    key: str = "",
+    can_edit: bool,
+) -> int:
+    """«Добавить провайдера»: обычный пользователь добавляет предложение,
+    суперпользо­ватель — запись в каталог для всех.
+
+    Предложение видят только автор и администратор (он же — публикатор).
+    Ключ, если дали, остаётся на устройстве — на сервер он не уходит.
+    """
+    raw: dict = {"name": name, "url": url, "model": model}
+    if provider_id:
+        raw["id"] = provider_id
+    if priority is not None:
+        raw["fallbackPriority"] = priority
+    if login_url:
+        raw["loginUrl"] = login_url
+    if key_url:
+        raw["getApiKeyUrl"] = key_url
+
+    entry, error = propose(raw)
+    if entry is None:
+        print(error, file=sys.stderr)
+        return 2
+
+    # Свой id должен быть свободен: чужую запись мы не трогаем.
+    if any(existing["id"] == entry["id"] for existing in wanted):
+        print(
+            f"id «{entry['id']}» уже занят — укажите свой через --id",
+            file=sys.stderr,
+        )
+        return 2
+
+    if priority is None:
+        entry["fallbackPriority"] = next_priority(wanted)
+
+    # Автору своё сразу нужно: включаем и показываем с пометкой «ваш».
+    entry = {**entry, "enabled": True, "mine": True}
+    if can_edit:
+        # Админ публикует сразу: без пометки «предложение».
+        entry["origin"] = "admin"
+        entry["mine"] = False
+
+    merged = [*wanted, entry]
+    Snapshot().save(merged)
+    if key:
+        KeyStore().set(entry["id"], key)
+
+    try:
+        if can_edit:
+            server.push_catalogue(merged)
+            print(f"{entry['name']}: добавлено в каталог — видят все")
+        else:
+            server.save_flags(merged)
+            print(f"{entry['name']}: предложение отправлено — видят только вы и администратор")
+    except ServerError as exc:
+        print(
+            f"на сервер не ушло ({exc}) — запись сохранена на устройстве",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(f"id: {entry['id']} · модель: {entry['model']}")
+    if key:
+        print("ключ сохранён на устройстве")
+    print(f"проверить: uv run python app.py --check {entry['id']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_console()
     parser = argparse.ArgumentParser(description="AI-приставка: каталог AI-провайдеров")
@@ -411,6 +497,43 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         metavar="ID",
         help="выключить провайдеров (например: --disable ollama)",
+    )
+    parser.add_argument(
+        "--add",
+        nargs=3,
+        metavar=("ИМЯ", "АДРЕС", "МОДЕЛЬ"),
+        help="добавить провайдера: обычному — предложение, админу — в каталог",
+    )
+    parser.add_argument(
+        "--id",
+        default="",
+        metavar="ID",
+        help="свой id для --add (по умолчанию — составляется из имени)",
+    )
+    parser.add_argument(
+        "--priority",
+        type=int,
+        default=None,
+        metavar="N",
+        help="приоритет для --add (по умолчанию — следующий свободный)",
+    )
+    parser.add_argument(
+        "--login-url",
+        default="",
+        metavar="URL",
+        help="страница логина для --add",
+    )
+    parser.add_argument(
+        "--key-url",
+        default="",
+        metavar="URL",
+        help="где получить API-ключ, для --add",
+    )
+    parser.add_argument(
+        "--key",
+        default="",
+        metavar="КЛЮЧ",
+        help="API-ключ для --add: останется на устройстве, на сервер не уйдёт",
     )
     parser.add_argument(
         "--serve",
@@ -462,6 +585,22 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.disable:
                 return _set_enabled(server, wanted, args.disable, enabled=False, can_edit=can_edit)
+
+            if args.add:
+                name, url, model = args.add
+                return _add_provider(
+                    server,
+                    wanted,
+                    name=name,
+                    url=url,
+                    model=model,
+                    provider_id=args.id,
+                    priority=args.priority,
+                    login_url=args.login_url,
+                    key_url=args.key_url,
+                    key=args.key,
+                    can_edit=can_edit,
+                )
 
             if args.serve:
                 return _serve(
