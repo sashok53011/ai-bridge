@@ -19,8 +19,16 @@ uv run python app.py --check ollama         # проверить провайд�
 uv run python app.py --pull ollama          # скачать модель (Ctrl+C — отмена)
 uv run python app.py --enable ollama openai # включить провайдеров
 uv run python app.py --disable ollama       # выключить
+uv run python app.py --add "Мой LMS" http://127.0.0.1:1234/v1 qwen3-8b
+uv run python app.py --remove moy-lms       # убрать: админу — в корзину, человеку — своё
 uv run python app.py --serve                # локальный HTTP-сервис на :8080
 ```
+
+`--add` делает разное в зависимости от входа: обычный пользователь
+отправляет **предложение** (видят только он и администратор), админ
+добавляет запись в каталог для всех. Ключ (`--key`) остаётся на
+устройстве. id составляется из имени («Мой LMS» → `moy-lms`) или
+задаётся через `--id`; приоритет по умолчанию — следующий свободный.
 
 В Git Bash (или другом sh) то же самое, но иначе — и `cd` пишется
 через слэши (`cd /e/android/ai-bridge`):
