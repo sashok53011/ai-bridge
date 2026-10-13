@@ -17,6 +17,14 @@ class ServerError(RuntimeError):
     """Сервер недоступен или ответил отказом."""
 
 
+class NeedsKeyError(ServerError):
+    """Провайдер ждёт ключ.
+
+    401/403 при отсутствующем ключе — не поломка, а просьба ввести ключ;
+    поломка — это 401 при уже введённом ключе (обычный ServerError).
+    """
+
+
 class PocketBase:
     """Клиент сервера каталога: вход, список провайдеров, статистика.
 
@@ -24,9 +32,15 @@ class PocketBase:
     ключи API провайдеров на сервер не уходят вообще.
     """
 
-    def __init__(self, base_url: str, *, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 20.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
-        self._http = httpx.Client(base_url=self.base_url, timeout=timeout)
+        self._http = httpx.Client(base_url=self.base_url, timeout=timeout, transport=transport)
         self._token = ""
         self.user_id = ""
         self.user_name = ""
@@ -34,10 +48,26 @@ class PocketBase:
     # ------------------------------------------------------------- сеанс
 
     def login(self, email: str, password: str) -> None:
-        """Вход под обычным пользователем каталога."""
+        """Вход в сервер каталога.
+
+        Пробуются обе коллекции: обычные люди живут в ``users``, а
+        суперпользо­ватель PocketBase (>= 0.23) — в ``_superusers``,
+        и попытка входа админа через ``users`` даёт HTTP 400. Если не
+        вышло ни там, ни там — в ошибке остаются обе причины.
+        """
+        failures = []
+        for collection in ("users", "_superusers"):
+            try:
+                self._auth(email, password, collection=collection)
+                return
+            except ServerError as exc:
+                failures.append(f"{collection}: {exc}")
+        raise ServerError(" ; ".join(failures))
+
+    def _auth(self, email: str, password: str, *, collection: str) -> None:
         self._request(
             "POST",
-            "/api/collections/users/auth-with-password",
+            f"/api/collections/{collection}/auth-with-password",
             json={"identity": email, "password": password},
             auth=False,
         )
@@ -125,7 +155,7 @@ class PocketBase:
             raise ServerError(f"сервер недоступен: {exc}") from exc
 
         if response.status_code >= 400:
-            raise ServerError(f"{method} {path} -> HTTP {response.status_code}")
+            raise ServerError(_failure(method, path, response.status_code, _json_or_none(response)))
 
         body = response.json() if response.content else {}
         # Токен приходит вместе с ответом на вход — запоминаем сразу, даже
@@ -158,17 +188,35 @@ class Provider:
         self._http = httpx.Client(timeout=timeout)
 
     def fetch_models(self, api_key: str = "") -> list[dict[str, Any]]:
-        """Список моделей; для локальных серверов ключ не нужен."""
+        """Список моделей; для локальных серверов ключ не нужен.
+
+        401/403 без ключа — NeedsKeyError (введите ключ, не поломка);
+        тот же отказ с ключом — обычный ServerError.
+        """
         from core.models import extract_models
 
-        response = self._http.get(
-            f"{self.openai_base}/models",
-            headers=_auth_headers(api_key),
-        )
-        if response.status_code in (401, 403) and not api_key:
-            raise ServerError("без ключа провайдер отвечает 401 — введите ключ")
-        response.raise_for_status()
-        return [{"name": name} for name in extract_models(response.json())]
+        try:
+            response = self._http.get(
+                f"{self.openai_base}/models",
+                headers=_auth_headers(api_key),
+            )
+        except httpx.HTTPError as exc:
+            raise ServerError(f"провайдер недоступен: {exc}") from exc
+
+        if response.status_code in (401, 403):
+            if not api_key:
+                raise NeedsKeyError("без ключа провайдер отвечает 401 — введите ключ")
+            raise ServerError(f"ключ не принят: HTTP {response.status_code}")
+
+        if response.status_code >= 400:
+            raise ServerError(f"провайдер ответил HTTP {response.status_code}")
+
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise ServerError("провайдер ответил не-JSON на список моделей") from exc
+
+        return [{"name": name} for name in extract_models(payload)]
 
     def pull_model(self, model: str, *, api_key: str = "", timeout: float = 180.0):
         """Генератор событий прогресса: POST /api/pull (Ollama).
@@ -196,6 +244,29 @@ class Provider:
                     event: ProgressEvent | None = parse_line(line)
                     if event is not None:
                         yield event
+
+
+def _failure(method: str, path: str, status_code: int, payload: object) -> str:
+    """Причина отказа сервера: статус и его собственное сообщение.
+
+    PocketBase в ответах отдаёт ``{"message": "..."}`` — без него диагностика
+    сводится к голому «HTTP 400», из-за чего настоящая причина («Failed to
+    authenticate», «не найдено») теряется.
+    """
+    text = f"{method} {path} -> HTTP {status_code}"
+    if isinstance(payload, dict):
+        message = str(payload.get("message") or "").strip()
+        if message:
+            text += f": {message}"
+    return text
+
+
+def _json_or_none(response: httpx.Response) -> object:
+    """JSON из ответа, если это JSON; промежуточный прокси может вернуть HTML."""
+    try:
+        return response.json()
+    except ValueError:
+        return None
 
 
 def _auth_headers(api_key: str) -> dict[str, str]:

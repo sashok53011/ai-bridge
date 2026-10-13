@@ -55,6 +55,61 @@ def format_stats(stats: object, *, now: datetime | None = None) -> str | None:
     return f"{label} · {moment:%d.%m %H:%M}"
 
 
+def for_provider(payload: object, provider_id: str) -> dict[str, dict]:
+    """Счётчики всех моделей провайдера: {имя модели: {...}}.
+
+    ``payload`` — сырой ответ сервера ``GET /api/ai-stats``; всё, что не
+    похоже на счётчики, отбрасывается — каталог честнее без статистики,
+    чем с мусором.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    entry = payload.get(provider_id)
+    if not isinstance(entry, dict):
+        return {}
+    models = entry.get("models")
+    if not isinstance(models, dict):
+        return {}
+    return {str(name): value for name, value in models.items() if isinstance(value, dict)}
+
+
+def totals(models: dict[str, dict]) -> dict:
+    """Сумма по всем моделям — сколько человек смогли пользоваться
+    провайдером целиком; время берётся самое свежее из моделей."""
+    ok = 0
+    fail = 0
+    last_moment: datetime | None = None
+    last_status = ""
+
+    for value in models.values():
+        ok += int(value.get("usersOk") or value.get("ok") or 0)
+        fail += int(value.get("usersFail") or value.get("fail") or 0)
+        moment = _parse_when(value.get("last"))
+        if moment is not None and (last_moment is None or moment > last_moment):
+            last_moment = moment
+            last_status = str(value.get("lastStatus") or "")
+
+    total: dict = {"ok": ok, "fail": fail, "usersOk": ok, "usersFail": fail}
+    if last_moment is not None:
+        total["last"] = last_moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        total["lastStatus"] = last_status
+    return total
+
+
+def for_line(payload: object, provider_id: str, configured: str = "") -> dict | None:
+    """Счётчик для строки каталога: настроенная модель, иначе сумма.
+
+    Человеку важнее его модель; у провайдера без настройки — общая картина.
+    """
+    models = for_provider(payload, provider_id)
+    if not models:
+        return None
+    current = models.get(configured)
+    if configured and isinstance(current, dict):
+        return current
+    return totals(models)
+
+
 def merge_report(current: dict | None, *, ok: bool, when: datetime) -> dict:
     """Новый отчёт поверх старого: счётчики растут, последнее — свежее.
 

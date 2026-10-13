@@ -2,7 +2,14 @@
 
 from datetime import datetime, timezone
 
-from core.stats import format_stats, has_data, merge_report
+from core.stats import (
+    format_stats,
+    for_line,
+    for_provider,
+    has_data,
+    merge_report,
+    totals,
+)
 
 
 def _stats(**kwargs) -> dict:
@@ -83,3 +90,66 @@ class TestClockEdgeCases:
         now = datetime(2026, 10, 13, 12, 0, tzinfo=timezone.utc)
         stale = _stats(last="2026-10-05T09:15:00Z")  # восемь дней назад
         assert format_stats(stale, now=now) == "3 (1) · 05.10"
+
+
+class TestForProvider:
+    def test_counters_come_per_model(self) -> None:
+        payload = {"ollama": {"version": 1, "models": {"llama3.2": _stats()}}}
+        assert for_provider(payload, "ollama") == {"llama3.2": _stats()}
+
+    def test_a_foreign_or_broken_payload_gives_nothing(self) -> None:
+        assert for_provider({}, "ollama") == {}
+        assert for_provider({"ollama": {"models": "да"}}, "ollama") == {}
+        assert for_provider(None, "ollama") == {}
+        assert for_provider("мусор", "ollama") == {}
+
+
+class TestTotals:
+    def test_sums_every_model_and_keeps_the_freshest_moment(self) -> None:
+        models = {
+            "llama3.2": _stats(ok=1, usersOk=1, fail=2, usersFail=2, last="2026-10-12T21:00:00Z"),
+            "qwen3": _stats(ok=4, usersOk=4, fail=0, usersFail=0, last="2026-10-13T09:00:00Z"),
+        }
+        total = totals(models)
+        assert total["usersOk"] == 5
+        assert total["usersFail"] == 2
+        assert total["last"] == "2026-10-13T09:00:00Z"
+
+    def test_no_moment_at_all_leaves_the_time_out(self) -> None:
+        total = totals({"llama3.2": _stats(ok=1, usersOk=1, fail=0, usersFail=0, last="")})
+        assert "last" not in total
+        assert format_stats(total) == "1"
+
+
+class TestForLine:
+    def test_the_configured_model_wins(self) -> None:
+        payload = {
+            "ollama": {
+                "models": {
+                    "llama3.2": _stats(ok=1, usersOk=1, fail=0, usersFail=0),
+                    "qwen3": _stats(ok=9, usersOk=9, fail=1, usersFail=1),
+                }
+            }
+        }
+        counter = for_line(payload, "ollama", "qwen3")
+        assert counter is not None and counter["usersOk"] == 9
+
+    def test_without_a_configured_model_the_total_shows(self) -> None:
+        payload = {
+            "ollama": {
+                "models": {
+                    "llama3.2": _stats(ok=1, usersOk=1, fail=0, usersFail=0),
+                    "qwen3": _stats(ok=4, usersOk=4, fail=0, usersFail=0),
+                }
+            }
+        }
+        counter = for_line(payload, "ollama")
+        assert counter is not None and counter["usersOk"] == 5
+
+    def test_an_unlisted_configured_model_falls_back_to_the_total(self) -> None:
+        payload = {"ollama": {"models": {"llama3.2": _stats()}}}
+        counter = for_line(payload, "ollama", "gpt-4o")
+        assert counter is not None and counter["usersOk"] == 3
+
+    def test_no_reports_means_nothing_to_show(self) -> None:
+        assert for_line({}, "ollama", "llama3.2") is None

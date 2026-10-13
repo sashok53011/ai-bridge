@@ -6,8 +6,9 @@
 
 Запуск:
 
-    uv run python app.py                 # каталог с сервера
-    uv run python app.py --models ollama # модели одного провайдера
+    uv run python app.py                  # каталог с сервера и статистика
+    uv run python app.py --models ollama  # модели одного провайдера
+    uv run python app.py --check ollama   # проверить провайдера и отчитаться
 
 Логин и пароль берутся из переменных AI_BRIDGE_EMAIL / AI_BRIDGE_PASSWORD
 (или полей email/password в config.toml). В репозиторий они не попадают.
@@ -19,10 +20,18 @@ import argparse
 import os
 import sys
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 
-from core.catalogue import STATUS_ACTIVE, STATUS_DEAD, STATUS_DISABLED, view
-from providers.client import PocketBase, Provider, ServerError
+from core.check import judge
+from core.catalogue import STATUS_DEAD, STATUS_DISABLED, view
+from core.stats import format_stats, for_line, for_provider
+from providers.client import (
+    NeedsKeyError,
+    PocketBase,
+    Provider,
+    ServerError,
+)
 from storage.keys import KeyStore
 
 _MARKS = {
@@ -50,15 +59,35 @@ def load_settings() -> dict:
     return settings
 
 
-def _print_catalogue(providers: list[dict], *, updated: str, can_edit: bool) -> None:
+def _print_catalogue(
+    providers: list[dict],
+    *,
+    updated: str,
+    can_edit: bool,
+    stats: dict | None = None,
+) -> None:
     if not providers:
         print("каталог пуст")
         return
 
-    width = max(len(entry["name"]) for entry in providers)
+    now = datetime.now(timezone.utc)
+    rows: list[tuple[str, str, str, str]] = []
     for entry in providers:
+        counter = for_line(stats or {}, entry["id"], entry.get("model", ""))
+        label = format_stats(counter, now=now) or ""
         mark = _MARKS.get(entry["status"], "")
-        print(f"{entry['name']:<{width}}  {mark:<9} {entry['url']}")
+        rows.append((entry["name"], mark, label, entry["url"]))
+
+    name_width = max(len(name) for name, _, _, _ in rows)
+    mark_width = max(len(mark) for _, mark, _, _ in rows)
+    label_width = max(len(label) for _, _, label, _ in rows)
+
+    # Статистика — наверху строки: сколько человек смогли пользоваться.
+    for name, mark, label, url in rows:
+        print(
+            f"{name:<{name_width}}  {mark:<{mark_width}}  "
+            f"{label:<{label_width}}  {url}"
+        )
 
     role = "суперпользо­ватель" if can_edit else "обычный пользователь"
     print()
@@ -83,6 +112,78 @@ def _print_models(server_url: str, provider: dict, key: str) -> int:
     return 0
 
 
+def _check_provider(server: PocketBase, provider: dict, key: str) -> int:
+    """«Кнопка проверки»: список моделей, итог и рост счётчика.
+
+    Ключ остаётся на устройстве: на сервер уходит только итог проверки,
+    как и записано в правиле продукта.
+    """
+    if provider.get("status") == STATUS_DEAD:
+        # Правило продукта: помечена неработающей — пользоваться можно,
+        # но проверять нельзя.
+        print(f"{provider['name']}: помечена неработающей — проверять нельзя")
+        return 2
+
+    models: list[str] | None = None
+    error = ""
+    needs_key = False
+
+    try:
+        models = [entry["name"] for entry in Provider(provider["url"]).fetch_models(key)]
+    except NeedsKeyError:
+        needs_key = True
+    except ServerError as exc:
+        error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - показать причину важнее, чем тип исключения
+        error = f"не получилось связаться ({exc})"
+
+    outcome = judge(
+        models,
+        configured=provider.get("model", ""),
+        error=error,
+        needs_key=needs_key,
+    )
+
+    if outcome["ok"]:
+        detail = f"модель {outcome['model']}" if outcome["model"] else "модели есть"
+        print(f"{provider['name']}: работает · {detail}")
+    else:
+        print(f"{provider['name']}: {outcome['error']}")
+
+    if not outcome["report"]:
+        # Нужен ключ — введём его и проверим снова; отчёт не растёт.
+        return 3
+
+    try:
+        server.report_stats(
+            provider_id=provider["id"],
+            model=outcome["model"],
+            ok=outcome["ok"],
+            error=outcome["error"],
+        )
+    except ServerError as exc:
+        print(f"отчёт не отправился: {exc}", file=sys.stderr)
+        return 1
+
+    print("отчёт отправлен")
+    _print_community_counter(server, provider["id"], outcome["model"])
+    return 0 if outcome["ok"] else 1
+
+
+def _print_community_counter(server: PocketBase, provider_id: str, model: str) -> None:
+    """Свежий счётчик сообщества после отчёта: сколько человек смогли.
+
+    Если статистика не пришла — не беда: отчёт уже отправлен.
+    """
+    try:
+        counters = for_provider(server.fetch_stats(), provider_id)
+    except ServerError:
+        return
+    label = format_stats(counters.get(model))
+    if label:
+        print(f"счётчик сообщества: {label}")
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_console()
     parser = argparse.ArgumentParser(description="AI-приставка: каталог AI-провайдеров")
@@ -90,6 +191,11 @@ def main(argv: list[str] | None = None) -> int:
         "--models",
         metavar="ID",
         help="показать модели одного провайдера (например: ollama)",
+    )
+    parser.add_argument(
+        "--check",
+        metavar="ID",
+        help="проверить провайдера и отправить отчёт статистики (например: ollama)",
     )
     args = parser.parse_args(argv)
 
@@ -107,22 +213,40 @@ def main(argv: list[str] | None = None) -> int:
         with PocketBase(str(settings["server"])) as server:
             server.login(email, password)
             providers, updated, can_edit = server.fetch_catalogue()
+            wanted = view(
+                providers,
+                flags={},
+                viewer_id=server.user_id,
+                is_superuser=can_edit,
+            )
+
+            if args.models:
+                target = next((entry for entry in wanted if entry["id"] == args.models), None)
+                if target is None:
+                    print(f"провайдер «{args.models}» в каталоге не найден", file=sys.stderr)
+                    return 2
+                keys = KeyStore()
+                return _print_models(str(settings["server"]), target, keys.get(target["id"]))
+
+            if args.check:
+                target = next((entry for entry in wanted if entry["id"] == args.check), None)
+                if target is None:
+                    print(f"провайдер «{args.check}» в каталоге не найден", file=sys.stderr)
+                    return 2
+                keys = KeyStore()
+                return _check_provider(server, target, keys.get(target["id"]))
+
+            # Статистика — украшение каталога; без неё каталог всё так же честен.
+            try:
+                stats = server.fetch_stats()
+            except ServerError:
+                stats = None
+
+            _print_catalogue(wanted, updated=updated, can_edit=can_edit, stats=stats)
+            return 0
     except ServerError as exc:
         print(f"сервер: {exc}", file=sys.stderr)
         return 1
-
-    if args.models:
-        wanted = view(providers, flags={}, viewer_id=server.user_id, is_superuser=can_edit)
-        target = next((entry for entry in wanted if entry["id"] == args.models), None)
-        if target is None:
-            print(f"провайдер «{args.models}» в каталоге не найден", file=sys.stderr)
-            return 2
-        keys = KeyStore()
-        return _print_models(str(settings["server"]), target, keys.get(target["id"]))
-
-    listed = view(providers, flags={}, viewer_id=server.user_id, is_superuser=can_edit)
-    _print_catalogue(listed, updated=updated, can_edit=can_edit)
-    return 0
 
 
 if __name__ == "__main__":
