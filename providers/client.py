@@ -44,6 +44,8 @@ class PocketBase:
         self._token = ""
         self.user_id = ""
         self.user_name = ""
+        # Запоминается с каталога: суперпользо­вателю флаги не отправляем.
+        self._can_edit = False
 
     # ------------------------------------------------------------- сеанс
 
@@ -81,30 +83,52 @@ class PocketBase:
 
     # ----------------------------------------------------------- каталог
 
-    def fetch_catalogue(self) -> tuple[list[dict], str, bool]:
-        """Каталог с сервера: (провайдеры, время обновления, canEdit).
+    def fetch_catalogue(self) -> tuple[list[dict], str, bool, dict[str, bool]]:
+        """Каталог с сервера: (провайдеры, обновление, canEdit, флаги).
 
-        Провайдеры уже приведены к виду, который понимает ядро —
-        мусорные записи отброшены.
+        Флаги — «включён/выключён» глазами сервера для этого пользователя;
+        у суперпользо­вателя их нет вовсе (сервер хранит только каталог),
+        тогда обычному пользователю они помогают на новом устройстве.
         """
-        body = self._request("GET", "/api/ai-config")
+        return self._parse_config(self._request("GET", "/api/ai-config"))
+
+    def save_flags(self, providers: list[dict]) -> tuple[list[dict], str, bool, dict[str, bool]]:
+        """Отправляет переключатели вместе со списком и берёт ответ сервера.
+
+        Шлётся **весь** видимый список с полными записями: сервер хранит
+        флаги целиком (неотправленное стёрлось бы), а незнакомые записи
+        превращаются в предложения этого пользователя. Выжившие записи,
+        которых каталог больше не отдаёт, уходят тем же способом — так
+        они переживают на сервере и подхватываются с другого устройства.
+
+        Осторожно: для суперпользо­вателя этот PUT заменяет каталог —
+        поэтому здесь есть защита, а вызывающий код передаёт
+        ``can_edit`` из каталога.
+        """
+        if getattr(self, "_can_edit", False):
+            raise ServerError(
+                "отправка переключателей суперпользо­вателем заменила бы каталог — "
+                "отменено"
+            )
+
+        payload = {
+            "version": 2,
+            "providers": [_sync_shape(entry) for entry in providers],
+        }
+        body = self._request("PUT", "/api/ai-config", json=payload)
+        return self._parse_config(body)
+
+    def _parse_config(self, body: dict) -> tuple[list[dict], str, bool, dict[str, bool]]:
         raw = body.get("providers")
         providers = [entry for entry in (normalize(item) for item in raw or []) if entry]
-        return providers, str(body.get("updated") or ""), bool(body.get("canEdit"))
-
-    def save_flags(self, providers: list[dict]) -> list[dict]:
-        """Отправляет переключатели и получает каталог обратно.
-
-        Обычному пользователю сервер хранит только включённые записи,
-        остальное приходит тем же каталогом.
-        """
-        body = self._request(
-            "PUT",
-            "/api/ai-config",
-            json={"providers": [{"id": p["id"], "enabled": bool(p.get("enabled"))} for p in providers]},
-        )
-        raw = body.get("providers")
-        return [entry for entry in (normalize(item) for item in raw or []) if entry]
+        flags = {
+            str(item.get("id")): item.get("enabled") is True
+            for item in raw or []
+            if isinstance(item, dict) and item.get("id")
+        }
+        can_edit = bool(body.get("canEdit"))
+        self._can_edit = can_edit
+        return providers, str(body.get("updated") or ""), can_edit, flags
 
     # -------------------------------------------------------- статистика
 
@@ -267,6 +291,30 @@ def _json_or_none(response: httpx.Response) -> object:
         return response.json()
     except ValueError:
         return None
+
+
+def _sync_shape(entry: dict) -> dict:
+    """Форма записи для PUT /api/ai-config — только известные серверу поля.
+
+    Ключ сюда не попадает по построению: его в записи нормализованного
+    каталога нет вовсе, а своё поле добавлять нельзя — сервер бы его всё
+    равно отбросил sanitize(), но слать секрет зря не стоит.
+    """
+    return {
+        "id": entry.get("id", ""),
+        "name": entry.get("name", ""),
+        "enabled": bool(entry.get("enabled")),
+        "url": entry.get("url", ""),
+        "model": entry.get("model", ""),
+        "fallbackPriority": int(entry.get("fallbackPriority") or 0),
+        "loginUrl": entry.get("loginUrl", ""),
+        "getApiKeyUrl": entry.get("getApiKeyUrl", ""),
+        "logoUrl": entry.get("logoUrl", ""),
+        "logoAsset": entry.get("logoAsset", ""),
+        "status": entry.get("status", "active"),
+        "origin": entry.get("origin", "admin"),
+        "authorName": entry.get("authorName", ""),
+    }
 
 
 def _auth_headers(api_key: str) -> dict[str, str]:

@@ -141,3 +141,43 @@ def reconcile(local: list[dict], remote: list[dict]) -> list[dict]:
         result,
         key=lambda entry: (entry.get("fallbackPriority", 0), entry["name"]),
     )
+
+
+def with_local_enabled(listed: list[dict], local: list[dict]) -> list[dict]:
+    """Каталог глазами устройства: что отдал сервер плюс то, что человек
+    включил сам и чего каталог больше не отдаёт.
+
+    ``listed`` — свежий каталог с сервера (с переключателями), ``local`` —
+    последний сохранённый на устройстве список. Два правила:
+
+    * **включённое человеком не удаляется никогда** — запись, которой нет
+      в каталоге, но которую человек включил, остаётся, пока он сам её
+      не выключит;
+    * **флаг с устройства сильнее серверного** — решение, принятое на этом
+      устройстве (хоть включением, хоть выключением), переживает синхронизацию;
+      флаги сервера нужны только тем записям, которых устройство ещё не знало.
+
+    Данные (адрес, модель) всегда берутся из ``listed``: каталог новее снапшота.
+    """
+    local_by_id = {entry["id"]: entry for entry in local}
+    seen: set[str] = set()
+    result: list[dict] = []
+
+    for entry in listed:
+        seen.add(entry["id"])
+        copy = local_by_id.get(entry["id"])
+        if copy is not None and "enabled" in copy:
+            enabled = bool(copy["enabled"])
+        else:
+            enabled = bool(entry.get("enabled"))
+        result.append({**entry, "enabled": enabled})
+
+    # Включённое человеком переживает исчезновение из каталога.
+    for entry in local:
+        if entry["id"] not in seen and entry.get("enabled"):
+            result.append({**entry, "enabled": True})
+
+    return sorted(
+        result,
+        key=lambda entry: (entry.get("fallbackPriority", 0), entry["name"]),
+    )

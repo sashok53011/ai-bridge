@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.check import judge
-from core.catalogue import STATUS_DEAD, STATUS_DISABLED, view
+from core.catalogue import STATUS_DEAD, STATUS_DISABLED, view, with_local_enabled
 from core.progress import PullTracker, describe
 from core.stats import format_stats, for_line, for_provider
 from providers.client import (
@@ -35,6 +35,7 @@ from providers.client import (
     ServerError,
 )
 from storage.keys import KeyStore
+from storage.snapshot import Snapshot
 
 _MARKS = {
     STATUS_DEAD: "[нераб.]",
@@ -78,6 +79,8 @@ def _print_catalogue(
         counter = for_line(stats or {}, entry["id"], entry.get("model", ""))
         label = format_stats(counter, now=now) or ""
         mark = _MARKS.get(entry["status"], "")
+        if entry.get("enabled"):
+            mark = f"{mark} [вкл]" if mark else "[вкл]"
         rows.append((entry["name"], mark, label, entry["url"]))
 
     name_width = max(len(name) for name, _, _, _ in rows)
@@ -249,6 +252,82 @@ def _pull_model(provider: dict, model: str, key: str, *, timeout: float = 180.0)
     return 0
 
 
+def _merge_and_store(
+    server: PocketBase,
+    providers: list[dict],
+    *,
+    can_edit: bool,
+    server_flags: dict[str, bool],
+) -> list[dict]:
+    """Сводит каталог с локальным снапшотом и сохраняет итог.
+
+    Флаги: локальное решение сильнее серверного (устройство могло
+    переключить офлайн), серверные помогают на новом устройстве.
+    Включённое человеком запись не удаляется никогда — даже если каталог
+    её больше не отдаёт.
+    """
+    local = Snapshot().load()
+    flags = {
+        **server_flags,
+        **{entry["id"]: bool(entry.get("enabled")) for entry in local},
+    }
+    listed = view(providers, flags=flags, viewer_id=server.user_id, is_superuser=can_edit)
+    wanted = with_local_enabled(listed, local)
+    Snapshot().save(wanted)
+    return wanted
+
+
+def _set_enabled(
+    server: PocketBase,
+    wanted: list[dict],
+    ids: list[str],
+    *,
+    enabled: bool,
+    can_edit: bool,
+) -> int:
+    """«Тумблер»: включает или выключает провайдеров.
+
+    Локально решение применяется сразу; на сервер уходит только для
+    обычного пользователя — у суперпользо­вателя сервер флаги не хранит
+    (PUT заменил бы каталог, а флагов в каталоге нет вовсе).
+    """
+    by_id = {entry["id"]: entry for entry in wanted}
+    unknown = [provider_id for provider_id in ids if provider_id not in by_id]
+    if unknown:
+        print(
+            f"не найдено: {', '.join(unknown)} — возможно, запись скрыта "
+            "(помечена неработающей и не включалась)",
+            file=sys.stderr,
+        )
+        return 2
+
+    merged = [
+        {**entry, "enabled": enabled if entry["id"] in ids else bool(entry.get("enabled"))}
+        for entry in wanted
+    ]
+    Snapshot().save(merged)
+
+    word = "включён" if enabled else "выключен"
+    for provider_id in ids:
+        print(f"{by_id[provider_id]['name']}: {word}")
+
+    if can_edit:
+        print("переключатель сохранён на устройстве: у суперпользо­вателя сервер флаги не хранит")
+        return 0
+
+    try:
+        server.save_flags(merged)
+    except ServerError as exc:
+        print(
+            f"на сервер не ушло ({exc}) — переключатель сохранён на устройстве",
+            file=sys.stderr,
+        )
+        return 1
+
+    print("переключатели отправлены на сервер")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_console()
     parser = argparse.ArgumentParser(description="AI-приставка: каталог AI-провайдеров")
@@ -267,6 +346,18 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         metavar="ID [MODEL]",
         help="скачать модель в локальный сервер (например: ollama llama3.2)",
+    )
+    parser.add_argument(
+        "--enable",
+        nargs="+",
+        metavar="ID",
+        help="включить провайдеров (например: --enable ollama openai)",
+    )
+    parser.add_argument(
+        "--disable",
+        nargs="+",
+        metavar="ID",
+        help="выключить провайдеров (например: --disable ollama)",
     )
     parser.add_argument(
         "--timeout",
@@ -290,13 +381,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with PocketBase(str(settings["server"])) as server:
             server.login(email, password)
-            providers, updated, can_edit = server.fetch_catalogue()
-            wanted = view(
-                providers,
-                flags={},
-                viewer_id=server.user_id,
-                is_superuser=can_edit,
+            providers, updated, can_edit, server_flags = server.fetch_catalogue()
+            wanted = _merge_and_store(
+                server, providers, can_edit=can_edit, server_flags=server_flags
             )
+
+            if args.enable:
+                return _set_enabled(server, wanted, args.enable, enabled=True, can_edit=can_edit)
+
+            if args.disable:
+                return _set_enabled(server, wanted, args.disable, enabled=False, can_edit=can_edit)
 
             if args.models:
                 target = _find_target(wanted, args.models)

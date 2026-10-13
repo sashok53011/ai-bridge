@@ -7,6 +7,7 @@ from core.catalogue import (
     normalize,
     reconcile,
     view,
+    with_local_enabled,
 )
 
 
@@ -108,3 +109,36 @@ class TestReconcile:
             "fast",
             "slow",
         ]
+
+
+class TestWithLocalEnabled:
+    def test_an_enabled_entry_outlives_the_catalogue(self) -> None:
+        """Правило продукта: человек включил сам — выключает сам."""
+        listed = [_entry(id="openai", name="OpenAI", url="https://api.openai.com/v1")]
+        local = [_entry(enabled=True), _entry(id="openai", name="OpenAI", url="https://api.openai.com/v1")]
+        result = with_local_enabled(listed, local)
+        assert [entry["id"] for entry in result] == ["ollama", "openai"]
+
+    def test_a_disabled_vanished_entry_stays_gone(self) -> None:
+        listed = [_entry(id="openai", name="OpenAI", url="https://api.openai.com/v1")]
+        local = [_entry(enabled=False)]
+        assert [entry["id"] for entry in with_local_enabled(listed, local)] == ["openai"]
+
+    def test_the_catalogue_copy_wins_over_the_local_one(self) -> None:
+        """Запись на месте: живые данные каталога новее снапшота."""
+        listed = [_entry(url="http://new-host:11434/v1", enabled=True)]
+        local = [_entry(url="http://old-host:11434/v1", enabled=True)]
+        result = with_local_enabled(listed, local)
+        assert [entry["url"] for entry in result] == ["http://new-host:11434/v1"]
+
+    def test_an_enabled_entry_keeps_its_mark(self) -> None:
+        listed = [_entry()]
+        local = [_entry(enabled=True)]
+        result = with_local_enabled(listed, local)
+        assert result[0]["enabled"] is True
+
+    def test_empty_local_makes_every_flag_explicit(self) -> None:
+        listed = [_entry()]
+        result = with_local_enabled(listed, [])
+        assert [entry["id"] for entry in result] == ["ollama"]
+        assert result[0]["enabled"] is False
