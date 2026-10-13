@@ -9,7 +9,7 @@ Flutter-приложением; это приложение — Python: без �
 
 ## Запуск
 
-```bash
+```powershell
 uv sync                                     # зависимости
 $env:AI_BRIDGE_EMAIL = "..."                # PowerShell
 $env:AI_BRIDGE_PASSWORD = "..."
@@ -18,8 +18,18 @@ uv run python app.py --models ollama        # модели одного пров
 uv run python app.py --check ollama         # проверить провайдера и отчитаться
 ```
 
+В Git Bash (или другом sh) то же самое, но иначе — и `cd` пишется
+через слэши (`cd /e/android/ai-bridge`):
+
+```bash
+export AI_BRIDGE_EMAIL="..."
+export AI_BRIDGE_PASSWORD="..."
+uv run python app.py
+```
+
 Пароль можно положить в `config.toml` (копия `config.example.toml`) —
-этот файл в репозиторий не попадает.
+тогда export не нужен, и запуск работает из любого шелла; этот файл
+в репозиторий не попадает.
 
 ## Проверки
 
