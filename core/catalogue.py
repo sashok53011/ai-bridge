@@ -211,6 +211,23 @@ def _slug(name: str) -> str:
     return slug[:64].strip("-")
 
 
+def can_remove(entry: object, *, is_superuser: bool) -> bool:
+    """Можно ли убрать запись из этого каталога.
+
+    Суперпользо­ватель убирает любую запись — она уходит в корзину и
+    восстановима. Обычный пользователь убирает только своё предложение:
+    запись каталога сервер не удалит (он её сохранит), и команда
+    солгала бы человеку, сказав «удалено».
+    """
+    if is_superuser:
+        return True
+    return (
+        isinstance(entry, dict)
+        and entry.get("origin") == "user"
+        and bool(entry.get("mine"))
+    )
+
+
 def next_priority(entries: list[dict]) -> int:
     """Следующий свободный приоритет — как в веб-панели: в конец списка."""
     top = max(((_int(entry.get("fallbackPriority"), 0) for entry in entries)), default=0)

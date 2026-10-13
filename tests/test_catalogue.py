@@ -214,6 +214,25 @@ class TestSlug:
         assert _slug("!!!") == ""
 
 
+class TestCanRemove:
+    def test_the_superuser_removes_anything(self) -> None:
+        from core.catalogue import can_remove
+
+        assert can_remove(_entry(origin="admin"), is_superuser=True) is True
+
+    def test_a_user_removes_only_their_own_proposal(self) -> None:
+        from core.catalogue import can_remove
+
+        assert can_remove(_entry(origin="user", mine=True), is_superuser=False) is True
+
+    def test_a_user_cannot_remove_a_catalogue_entry(self) -> None:
+        """Сервер бы его сохранил — команда не должна солгать «удалено»."""
+        from core.catalogue import can_remove
+
+        assert can_remove(_entry(origin="admin"), is_superuser=False) is False
+        assert can_remove(_entry(origin="user", mine=False), is_superuser=False) is False
+
+
 class TestNextPriority:
     def test_the_first_provider_goes_after_the_last(self) -> None:
         assert next_priority([]) == 1

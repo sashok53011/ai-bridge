@@ -29,6 +29,7 @@ from core.check import judge
 from core.catalogue import (
     STATUS_DEAD,
     STATUS_DISABLED,
+    can_remove,
     next_priority,
     propose,
     view,
@@ -388,9 +389,63 @@ def _serve(
     return run_server(entries, KeyStore(), host=host, port=port, timeout=timeout)
 
 
+def _remove_provider(
+    server: PocketBase,
+    wanted: list[dict],
+    providers: list[dict],
+    provider_id: str,
+    *,
+    can_edit: bool,
+) -> int:
+    """«Убрать провайдера»: админ — из каталога в корзину, человек — своё предложение.
+
+    Запись каталога обычный пользователь убрать не может — сервер бы её
+    сохранил, а команда соврала бы. Чужое трогать нельзя: это правило
+    продукта, а не экономия.
+    """
+    by_id = {entry["id"]: entry for entry in wanted}
+    target = by_id.get(provider_id)
+    if target is None:
+        print(f"не найдено: {provider_id}", file=sys.stderr)
+        return 2
+
+    if not can_remove(target, is_superuser=can_edit):
+        print(
+            f"«{target['name']}» — запись каталога, убрать её может только "
+            "администратор; выключить можно: --disable",
+            file=sys.stderr,
+        )
+        return 2
+
+    remaining = [entry for entry in wanted if entry["id"] != provider_id]
+    Snapshot().save(remaining)
+    KeyStore().delete(provider_id)
+
+    try:
+        if can_edit:
+            # Каталог целиком, без убранной записи: сервер отправит её
+            # в корзину — восстановимо из веб-панели.
+            server.push_catalogue(
+                [entry for entry in providers if entry["id"] != provider_id]
+            )
+            print(f"{target['name']}: убрано из каталога (в корзине, восстановимо)")
+        else:
+            server.save_flags(remaining)
+            print(f"{target['name']}: предложение убрано")
+    except ServerError as exc:
+        print(
+            f"на сервер не ушло ({exc}) — на устройстве запись убрана",
+            file=sys.stderr,
+        )
+        return 1
+
+    return 0
+
+
 def _add_provider(
     server: PocketBase,
     wanted: list[dict],
+    providers: list[dict],
     *,
     name: str,
     url: str,
@@ -407,6 +462,11 @@ def _add_provider(
 
     Предложение видят только автор и администратор (он же — публикатор).
     Ключ, если дали, остаётся на устройстве — на сервер он не уходит.
+
+    Суперпользо­вателю каталог отправляется целиком (его PUT заменяет
+    каталог), но из **серверного** списка, а не из локального слияния:
+    локальные «выжившие» записи в каталог не попадают — они живут только
+    на устройстве.
     """
     raw: dict = {"name": name, "url": url, "model": model}
     if provider_id:
@@ -432,7 +492,7 @@ def _add_provider(
         return 2
 
     if priority is None:
-        entry["fallbackPriority"] = next_priority(wanted)
+        entry["fallbackPriority"] = next_priority(providers)
 
     # Автору своё сразу нужно: включаем и показываем с пометкой «ваш».
     entry = {**entry, "enabled": True, "mine": True}
@@ -448,7 +508,9 @@ def _add_provider(
 
     try:
         if can_edit:
-            server.push_catalogue(merged)
+            # В каталог уходит серверный список + новая запись, без
+            # локальных выживших — они не должны просочиться в каталог.
+            server.push_catalogue([*providers, entry])
             print(f"{entry['name']}: добавлено в каталог — видят все")
         else:
             server.save_flags(merged)
@@ -503,6 +565,11 @@ def main(argv: list[str] | None = None) -> int:
         nargs=3,
         metavar=("ИМЯ", "АДРЕС", "МОДЕЛЬ"),
         help="добавить провайдера: обычному — предложение, админу — в каталог",
+    )
+    parser.add_argument(
+        "--remove",
+        metavar="ID",
+        help="убрать провайдера: админу — из каталога в корзину, человеку — своё предложение",
     )
     parser.add_argument(
         "--id",
@@ -591,6 +658,7 @@ def main(argv: list[str] | None = None) -> int:
                 return _add_provider(
                     server,
                     wanted,
+                    providers,
                     name=name,
                     url=url,
                     model=model,
@@ -600,6 +668,11 @@ def main(argv: list[str] | None = None) -> int:
                     key_url=args.key_url,
                     key=args.key,
                     can_edit=can_edit,
+                )
+
+            if args.remove:
+                return _remove_provider(
+                    server, wanted, providers, args.remove, can_edit=can_edit
                 )
 
             if args.serve:
