@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
@@ -29,6 +30,26 @@ _NO_MODELS = {"object": "list", "data": []}
 def _error_body(message: str, *, kind: str = "invalid_request_error", code: str | None = None) -> bytes:
     """Ошибка в формате, который понимают OpenAI-клиенты."""
     payload = {"error": {"message": message, "type": kind, "param": None, "code": code}}
+    return json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+
+def _with_model(body: bytes, model: str) -> bytes:
+    """Подставляет отроутенную модель в тело запроса.
+
+    Клиент мог попросить «ollama/qwen3» (выбор провайдера) или не назвать
+    модель вовсе — провайдеру в обоих случаях говорят по-человечески, что
+    грузить. Тело, которое не разобрать как JSON, уходит как есть:
+    отклонит уже провайдер, и это честнее, чем молча переписывать.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return body
+    if not isinstance(payload, dict):
+        return body
+    if payload.get("model") == model:
+        return body
+    payload["model"] = model
     return json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
 
@@ -90,7 +111,10 @@ class Gateway:
             client = self._provider_factory(entry["url"], timeout=self._timeout)
             try:
                 response = client.forward_chat(
-                    body, api_key=key, timeout=self._timeout, stream=True
+                    _with_model(body, attempt["model"]),
+                    api_key=key,
+                    timeout=self._timeout,
+                    stream=True,
                 )
             except ServerError as exc:
                 last_problem = f"{entry['name']}: {exc}"
@@ -130,6 +154,19 @@ class _Handler(BaseHTTPRequestHandler):
     # контекст, и чужие слова. Видно только кто, куда и с каким итогом.
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"http: {self.address_string()} {fmt % args}")
+
+    def handle_error(self, request, client_address) -> None:
+        """Оборвавшийся клиент — не ошибка.
+
+        Для стриминга это штатно: человек жмёт Esc, приложение закрывает
+        вкладку. Traceback в консоль — шум, который пугает больше любой
+        поломки. Настоящие ошибки (например, битый запрос) всё равно
+        видны по строке доступа.
+        """
+        exc_info = sys.exc_info()
+        if exc_info and isinstance(exc_info[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
 
     @property
     def gateway(self) -> Gateway:

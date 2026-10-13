@@ -124,6 +124,45 @@ class TestChatEndpoint:
         # Тело дошло нетронутым — любые поля клиента важны.
         assert json.loads(sent.content) == {"model": "gpt-4o-mini", "messages": [{"role": "user", "content": "привет"}]}
 
+    def test_the_provider_gets_the_resolved_model_not_the_alias(self, harness) -> None:
+        """«ollama/qwen3:0.6b» — это просьба к ollama; сама модель в теле
+        должна стать чистой, иначе провайдер её не найдёт."""
+        h = harness([_entry()], {"http://ollama.test": self._ok()})
+        payload = json.dumps({"model": "ollama/qwen3:0.6b", "messages": []})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=payload)
+
+        assert response.status_code == 200
+        sent = json.loads(h.seen[0].content)
+        assert sent["model"] == "qwen3:0.6b"
+        # Остальные поля клиента не тронуты.
+        assert sent["messages"] == []
+
+    def test_an_unnamed_model_gets_the_provider_default(self, harness) -> None:
+        """Клиент не назвал модель — провайдеру говорят, какую подставить."""
+        h = harness([_entry()], {"http://ollama.test": self._ok()})
+        payload = json.dumps({"messages": [{"role": "user", "content": "привет"}]})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=payload)
+
+        assert response.status_code == 200
+        sent = json.loads(h.seen[0].content)
+        assert sent["model"] == "llama3.2"
+        assert sent["messages"] == [{"role": "user", "content": "привет"}]
+
+    def test_a_body_that_is_not_json_reaches_the_provider_as_is(self, harness) -> None:
+        """Разобрать нечего — честная пересылка; отклонит уже провайдер."""
+        h = harness([_entry()], {"http://ollama.test": self._ok()})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                content="{просто текст".encode("utf-8"),
+                headers={"content-type": "application/json"},
+            )
+
+        assert response.status_code == 200
+        assert h.seen[0].content == "{просто текст".encode("utf-8")
+
     def test_a_failing_provider_falls_back_to_the_next(self, harness) -> None:
         """Клиент попросил llama3.2 — уступает только тот, кто её и обслуживает."""
         def broken(request: httpx.Request) -> httpx.Response:
