@@ -206,10 +206,16 @@ class Provider:
     Ollama — в корне сервера (``/api/pull``). Поэтому запоминаем оба.
     """
 
-    def __init__(self, url: str, *, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout: float = 20.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
         self.openai_base = url.strip().rstrip("/")
         self.root = _root_url(url)
-        self._http = httpx.Client(timeout=timeout)
+        self._http = httpx.Client(timeout=timeout, transport=transport)
 
     def fetch_models(self, api_key: str = "") -> list[dict[str, Any]]:
         """Список моделей; для локальных серверов ключ не нужен.
@@ -268,6 +274,32 @@ class Provider:
                     event: ProgressEvent | None = parse_line(line)
                     if event is not None:
                         yield event
+
+    def forward_chat(
+        self,
+        body: bytes,
+        *,
+        api_key: str = "",
+        timeout: float = 600.0,
+        stream: bool = True,
+    ) -> httpx.Response:
+        """Проксирует POST /chat/completions — тело и поток как есть.
+
+        Это сердце приставки: приложение шлёт запрос сюда, а приставка
+        доставляет его провайдеру, подставив свой ключ. Тело не разбирается —
+        любые поля клиента (temperature, tools, …) уходят провайдеру
+        нетронутыми. Вызывающий обязан закрыть ответ.
+        """
+        request = self._http.build_request(
+            "POST",
+            f"{self.openai_base}/chat/completions",
+            content=body,
+            headers={"Content-Type": "application/json", **_auth_headers(api_key)},
+        )
+        try:
+            return self._http.send(request, stream=stream)
+        except httpx.HTTPError as exc:
+            raise ServerError(f"провайдер недоступен: {exc}") from exc
 
 
 def _failure(method: str, path: str, status_code: int, payload: object) -> str:

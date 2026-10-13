@@ -10,6 +10,7 @@
     uv run python app.py --models ollama  # модели одного провайдера
     uv run python app.py --check ollama   # проверить провайдера и отчитаться
     uv run python app.py --pull ollama    # скачать модель в локальный сервер
+    uv run python app.py --serve          # открыть локальный HTTP-сервис
 
 Логин и пароль берутся из переменных AI_BRIDGE_EMAIL / AI_BRIDGE_PASSWORD
 (или полей email/password в config.toml). В репозиторий они не попадают.
@@ -328,6 +329,58 @@ def _set_enabled(
     return 0
 
 
+def _serve(
+    server: PocketBase,
+    providers: list[dict],
+    *,
+    can_edit: bool,
+    server_flags: dict[str, bool],
+    host: str,
+    port: int,
+    timeout: float,
+) -> int:
+    """Запускает локальный HTTP-сервис: другие приложения ходят в приставку.
+
+    Каталог обновляется в фоне (раз в 5 минут), а переключатели читаются
+    из снапшота на каждый запрос — `--enable/--disable` подхватывается
+    сразу, без перезапуска сервиса.
+    """
+    import threading
+    import time
+
+    from service.gateway import serve as run_server
+
+    state = {"providers": providers, "server_flags": server_flags}
+
+    def refresh_loop() -> None:
+        while True:
+            time.sleep(300)
+            try:
+                fresh, _, _, flags = server.fetch_catalogue()
+                state["providers"] = fresh
+                state["server_flags"] = flags
+            except ServerError as exc:
+                # Каталог — украшение; без него работают включённые записи.
+                print(f"каталог не обновился: {exc}", file=sys.stderr)
+
+    def entries() -> list[dict]:
+        local = Snapshot().load()
+        flags = {
+            **state["server_flags"],
+            **{entry["id"]: bool(entry.get("enabled")) for entry in local},
+        }
+        listed = view(
+            state["providers"],
+            flags=flags,
+            viewer_id=server.user_id,
+            is_superuser=can_edit,
+        )
+        return with_local_enabled(listed, local)
+
+    threading.Thread(target=refresh_loop, daemon=True).start()
+    return run_server(entries, KeyStore(), host=host, port=port, timeout=timeout)
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_console()
     parser = argparse.ArgumentParser(description="AI-приставка: каталог AI-провайдеров")
@@ -358,6 +411,24 @@ def main(argv: list[str] | None = None) -> int:
         nargs="+",
         metavar="ID",
         help="выключить провайдеров (например: --disable ollama)",
+    )
+    parser.add_argument(
+        "--serve",
+        action="store_true",
+        help="запустить локальный HTTP-сервис (OpenAI-совместимый)",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        metavar="АДРЕС",
+        help="адрес локального сервиса, по умолчанию 127.0.0.1",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        metavar="ПОРТ",
+        help="порт локального сервиса, по умолчанию 8080",
     )
     parser.add_argument(
         "--timeout",
@@ -391,6 +462,17 @@ def main(argv: list[str] | None = None) -> int:
 
             if args.disable:
                 return _set_enabled(server, wanted, args.disable, enabled=False, can_edit=can_edit)
+
+            if args.serve:
+                return _serve(
+                    server,
+                    providers,
+                    can_edit=can_edit,
+                    server_flags=server_flags,
+                    host=args.host,
+                    port=args.port,
+                    timeout=args.timeout,
+                )
 
             if args.models:
                 target = _find_target(wanted, args.models)
