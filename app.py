@@ -9,6 +9,7 @@
     uv run python app.py                  # каталог с сервера и статистика
     uv run python app.py --models ollama  # модели одного провайдера
     uv run python app.py --check ollama   # проверить провайдера и отчитаться
+    uv run python app.py --pull ollama    # скачать модель в локальный сервер
 
 Логин и пароль берутся из переменных AI_BRIDGE_EMAIL / AI_BRIDGE_PASSWORD
 (или полей email/password в config.toml). В репозиторий они не попадают.
@@ -25,6 +26,7 @@ from pathlib import Path
 
 from core.check import judge
 from core.catalogue import STATUS_DEAD, STATUS_DISABLED, view
+from core.progress import PullTracker, describe
 from core.stats import format_stats, for_line, for_provider
 from providers.client import (
     NeedsKeyError,
@@ -92,6 +94,14 @@ def _print_catalogue(
     role = "суперпользо­ватель" if can_edit else "обычный пользователь"
     print()
     print(f"Всего: {len(providers)} · обновлён: {updated or '—'} · вы вошли как {role}")
+
+
+def _find_target(providers: list[dict], provider_id: str) -> dict | None:
+    """Одна запись каталога по id; жалуется сам, если не нашлось."""
+    target = next((entry for entry in providers if entry["id"] == provider_id), None)
+    if target is None:
+        print(f"провайдер «{provider_id}» в каталоге не найден", file=sys.stderr)
+    return target
 
 
 def _print_models(server_url: str, provider: dict, key: str) -> int:
@@ -184,6 +194,61 @@ def _print_community_counter(server: PocketBase, provider_id: str, model: str) -
         print(f"счётчик сообщества: {label}")
 
 
+def _pull_model(provider: dict, model: str, key: str, *, timeout: float = 180.0) -> int:
+    """«Кнопка загрузки»: качает модель в локальный сервер (Ollama).
+
+    Большую модель грузится минутами, поэтому человек должен видеть ход
+    и иметь возможность остановить — Ctrl+C не ломает ничего: поток
+    закрывается, сервер остаётся целым.
+    """
+    if provider.get("status") == STATUS_DEAD:
+        print(f"{provider['name']}: помечена неработающей — загрузка недоступна")
+        return 2
+
+    print(f"{provider['name']}: загружаю {model} (остановить — Ctrl+C)")
+    tracker = PullTracker()
+    tty = bool(getattr(sys.stdout, "isatty", lambda: False)())
+    last_line = ""
+
+    try:
+        for event in Provider(provider["url"]).pull_model(model, api_key=key, timeout=timeout):
+            snapshot = tracker.add(event)
+            line = describe(snapshot)
+            if not line or line == last_line:
+                continue
+            if tty:
+                # Одна строка, которая обновляется на месте.
+                sys.stdout.write(f"\r{line}{' ' * max(0, len(last_line) - len(line))}")
+                sys.stdout.flush()
+            else:
+                print(line)
+            last_line = line
+    except KeyboardInterrupt:
+        if tty and last_line:
+            sys.stdout.write("\n")
+        print("остановлено вручную")
+        return 130
+    except ServerError as exc:
+        if tty and last_line:
+            sys.stdout.write("\n")
+        print(f"{provider['name']}: {exc}")
+        return 1
+
+    if tty and last_line:
+        sys.stdout.write("\n")
+
+    snapshot = tracker.snapshot()
+    if snapshot.error:
+        print(f"{provider['name']}: {snapshot.error}")
+        return 1
+    if not snapshot.done:
+        print(f"{provider['name']}: сервер не подтвердил успех")
+        return 1
+
+    print(f"{provider['name']}: {model} готова")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_console()
     parser = argparse.ArgumentParser(description="AI-приставка: каталог AI-провайдеров")
@@ -196,6 +261,19 @@ def main(argv: list[str] | None = None) -> int:
         "--check",
         metavar="ID",
         help="проверить провайдера и отправить отчёт статистики (например: ollama)",
+    )
+    parser.add_argument(
+        "--pull",
+        nargs="+",
+        metavar="ID [MODEL]",
+        help="скачать модель в локальный сервер (например: ollama llama3.2)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=180.0,
+        metavar="СЕК",
+        help="таймаут запроса к провайдеру, по умолчанию 180",
     )
     args = parser.parse_args(argv)
 
@@ -221,20 +299,34 @@ def main(argv: list[str] | None = None) -> int:
             )
 
             if args.models:
-                target = next((entry for entry in wanted if entry["id"] == args.models), None)
+                target = _find_target(wanted, args.models)
                 if target is None:
-                    print(f"провайдер «{args.models}» в каталоге не найден", file=sys.stderr)
                     return 2
                 keys = KeyStore()
                 return _print_models(str(settings["server"]), target, keys.get(target["id"]))
 
             if args.check:
-                target = next((entry for entry in wanted if entry["id"] == args.check), None)
+                target = _find_target(wanted, args.check)
                 if target is None:
-                    print(f"провайдер «{args.check}» в каталоге не найден", file=sys.stderr)
                     return 2
                 keys = KeyStore()
                 return _check_provider(server, target, keys.get(target["id"]))
+
+            if args.pull:
+                provider_id = args.pull[0]
+                target = _find_target(wanted, provider_id)
+                if target is None:
+                    return 2
+                model = args.pull[1] if len(args.pull) > 1 else target["model"]
+                if not model:
+                    print(
+                        f"у провайдера «{provider_id}» не настроена модель — "
+                        "назовите её явно: --pull ollama llama3.2",
+                        file=sys.stderr,
+                    )
+                    return 2
+                keys = KeyStore()
+                return _pull_model(target, model, keys.get(target["id"]), timeout=args.timeout)
 
             # Статистика — украшение каталога; без неё каталог всё так же честен.
             try:

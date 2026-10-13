@@ -27,6 +27,106 @@ class ProgressEvent:
     #: сервер подтвердил успех
     done: bool = False
 
+    #: слой, к которому относятся байты (у Ollama — digest); бывает пустым
+    digest: str | None = None
+
+    #: байты слоя, если сервер их назвал
+    total: float | None = None
+    completed: float | None = None
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """Общий вид загрузки: сколько скачано всего и что сейчас происходит."""
+
+    status: str = ""
+
+    #: доля по всем слоям (0..1); 1.0, когда сервер сказал «успех»
+    fraction: float | None = None
+
+    completed_bytes: float | None = None
+    total_bytes: float | None = None
+
+    error: str | None = None
+    done: bool = False
+
+
+class PullTracker:
+    """Собирает поток событий в общий прогресс по всем слоям.
+
+    Ollama шлёт байты по слоям и часто перемежает их; у события есть
+    ``digest`` слоя. Поэтому суммируем **по слоям**, а не по событиям —
+    иначе проценты прыгают туда-сюда и человек не понимает, сколько ждать.
+    """
+
+    def __init__(self) -> None:
+        self._layers: dict[str, tuple[float, float]] = {}
+        self._status = ""
+        self._error: str | None = None
+        self._done = False
+
+    def add(self, event: ProgressEvent) -> Snapshot:
+        """Принимает событие и отдаёт свежий общий вид."""
+        if event.status:
+            self._status = event.status
+        if event.error:
+            self._error = event.error
+        if event.done:
+            self._done = True
+
+        if event.total is not None and event.completed is not None:
+            # Последнее известное состояние слоя; digest склеивает события
+            # одного слоя, а без него сервер считается по одному слою.
+            self._layers[event.digest or ""] = (event.total, event.completed)
+
+        return self.snapshot()
+
+    def snapshot(self) -> Snapshot:
+        total = sum(total for total, _ in self._layers.values()) or None
+        completed = sum(done for _, done in self._layers.values()) or None
+
+        fraction: float | None = None
+        if self._done:
+            fraction = 1.0
+        elif total:
+            fraction = min(1.0, max(0.0, (completed or 0.0) / total))
+
+        return Snapshot(
+            status=self._status,
+            fraction=fraction,
+            completed_bytes=completed,
+            total_bytes=total,
+            error=self._error,
+            done=self._done,
+        )
+
+
+_UNITS = ("Б", "КБ", "МБ", "ГБ", "ТБ")
+
+
+def human_bytes(count: float) -> str:
+    """«5.2 ГБ» или «312 МБ» — байты сами по себе человеку ни о чём не говорят."""
+    value = float(count)
+    for unit in _UNITS:
+        if abs(value) < 1024 or unit == _UNITS[-1]:
+            if unit == "Б":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} {_UNITS[-1]}"  # недостижимо, но типchecker должен быть спокоен
+
+
+def describe(snapshot: Snapshot) -> str:
+    """Одна строка прогресса для человека: «45% · 5.2/14.0 ГБ · downloading»."""
+    parts: list[str] = []
+    if snapshot.fraction is not None:
+        parts.append(f"{snapshot.fraction * 100:.0f}%")
+    if snapshot.total_bytes and snapshot.completed_bytes is not None:
+        parts.append(f"{human_bytes(snapshot.completed_bytes)}/{human_bytes(snapshot.total_bytes)}")
+    if snapshot.status:
+        parts.append(snapshot.status)
+    return " · ".join(parts)
+
 
 def parse_line(line: str) -> ProgressEvent | None:
     """Разбирает одну строку потока; пустота и мусор пропускаются (None)."""
@@ -43,24 +143,29 @@ def parse_line(line: str) -> ProgressEvent | None:
 
     status = str(data.get("status") or "").strip()
 
+    raw_total = data.get("total")
+    raw_completed = data.get("completed")
+    total = float(raw_total) if isinstance(raw_total, (int, float)) else None
+    completed = float(raw_completed) if isinstance(raw_completed, (int, float)) else None
+
     fraction = None
-    total = data.get("total")
-    completed = data.get("completed")
-    if (
-        isinstance(total, (int, float))
-        and isinstance(completed, (int, float))
-        and total > 0
-    ):
+    if total is not None and completed is not None and total > 0:
         fraction = min(1.0, max(0.0, completed / total))
 
     raw_error = data.get("error")
     error = str(raw_error).strip() if raw_error else None
+
+    raw_digest = data.get("digest")
+    digest = str(raw_digest).strip() if raw_digest else None
 
     return ProgressEvent(
         status=status,
         fraction=fraction,
         error=error,
         done=status == "success" and not error,
+        digest=digest,
+        total=total,
+        completed=completed,
     )
 
 
