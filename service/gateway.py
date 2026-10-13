@@ -161,7 +161,7 @@ class _Server(ThreadingHTTPServer):
         """
         exc_info = sys.exc_info()
         if exc_info and isinstance(exc_info[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
-            print(f"http: {self._failed_address(client_address)}: клиент оборвал связь")
+            print(f"http: {self._failed_address(client_address)}: клиент оборвал связь", flush=True)
             return
         super().handle_error(request, client_address)
 
@@ -178,8 +178,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     # Ни тела запроса, ни ответа в журнал — там могут быть и длинный
     # контекст, и чужие слова. Видно только кто, куда и с каким итогом.
+    # flush=True: службу часто запускают в пайп или фон, и без сброса
+    # буфера журнал появляется только при остановке.
     def log_message(self, fmt: str, *args: object) -> None:
-        print(f"http: {self.address_string()} {fmt % args}")
+        print(f"http: {self.address_string()} {fmt % args}", flush=True)
 
     @property
     def gateway(self) -> Gateway:
@@ -276,7 +278,7 @@ def serve(
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]
 
-    print(f"приставка слушает http://{host}:{port}/v1 (остановить — Ctrl+C)")
+    print(f"приставка слушает http://{host}:{port}/v1 (остановить — Ctrl+C)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
