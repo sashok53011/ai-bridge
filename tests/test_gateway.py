@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from providers.client import Provider
-from service.gateway import Gateway, ThreadingHTTPServer, _Handler
+from service.gateway import Gateway, _Handler, _Server
 from storage.keys import KeyStore
 
 
@@ -49,7 +49,7 @@ class _Harness:
             return Provider(url, transport=httpx.MockTransport(handler), **kwargs)
 
         self.gateway = Gateway(lambda: entries, provider_keys, provider_factory=factory)
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self.server = _Server(("127.0.0.1", 0), _Handler)
         self.server.gateway = self.gateway
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -249,6 +249,47 @@ class TestChatEndpoint:
 
         assert response.status_code == 502
         assert "Ollama" in response.json()["error"]["message"]
+
+
+class TestServerErrors:
+    """socketserver зовёт handle_error на СЕРВЕРЕ, не на обработчике."""
+
+    def test_a_reset_client_leaves_no_traceback(self, capsys) -> None:
+        server = _Server(("127.0.0.1", 0), _Handler)
+
+        def provoke() -> None:
+            try:
+                raise ConnectionResetError("[WinError 10054] connection reset")
+            except ConnectionResetError:
+                server.handle_error(None, ("127.0.0.1", 55555))
+
+        try:
+            provoke()
+        finally:
+            server.server_close()
+
+        captured = capsys.readouterr()
+        assert "Traceback" not in captured.err
+        assert "Exception occurred" not in captured.err
+
+    def test_a_real_failure_still_reaches_stderr(self, capsys) -> None:
+        """Глушить можно только обрыв связи — поломка обязана быть видна."""
+        server = _Server(("127.0.0.1", 0), _Handler)
+
+        def provoke() -> None:
+            try:
+                raise ValueError("настоящая поломка")
+            except ValueError:
+                server.handle_error(None, ("127.0.0.1", 55555))
+
+        try:
+            provoke()
+        finally:
+            server.server_close()
+
+        captured = capsys.readouterr()
+        assert "ValueError" in captured.err
+        assert "настоящая поломка" in captured.err
 
 
 class TestStreaming:

@@ -144,6 +144,32 @@ class Gateway:
         return 502, "application/json", [_error_body(message, kind="api_error", code="upstream_failed")], ""
 
 
+class _Server(ThreadingHTTPServer):
+    """HTTP-сервис приставки: несколько потоков и спокойствие в консоли.
+
+    ``socketserver`` зовёт ``handle_error`` на сервере (не на обработчике),
+    поэтому подавление шума живёт именно здесь.
+    """
+
+    def handle_error(self, request, client_address) -> None:
+        """Оборвавшийся клиент — не ошибка.
+
+        Для стриминга это штатно: человек жмёт Esc, приложение закрывает
+        вкладку. Traceback в консоль — шум, который пугает больше любой
+        поломки. Настоящие ошибки (например, битый запрос) всё равно
+        видны по строке доступа и в суперклассе.
+        """
+        exc_info = sys.exc_info()
+        if exc_info and isinstance(exc_info[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
+            print(f"http: {self._failed_address(client_address)}: клиент оборвал связь")
+            return
+        super().handle_error(request, client_address)
+
+    @staticmethod
+    def _failed_address(client_address) -> str:
+        return client_address[0] if client_address else "?"
+
+
 class _Handler(BaseHTTPRequestHandler):
     """Один поток на соединение: ThreadingHTTPServer раздаёт их щедро."""
 
@@ -154,19 +180,6 @@ class _Handler(BaseHTTPRequestHandler):
     # контекст, и чужие слова. Видно только кто, куда и с каким итогом.
     def log_message(self, fmt: str, *args: object) -> None:
         print(f"http: {self.address_string()} {fmt % args}")
-
-    def handle_error(self, request, client_address) -> None:
-        """Оборвавшийся клиент — не ошибка.
-
-        Для стриминга это штатно: человек жмёт Esc, приложение закрывает
-        вкладку. Traceback в консоль — шум, который пугает больше любой
-        поломки. Настоящие ошибки (например, битый запрос) всё равно
-        видны по строке доступа.
-        """
-        exc_info = sys.exc_info()
-        if exc_info and isinstance(exc_info[1], (ConnectionResetError, BrokenPipeError, TimeoutError)):
-            return
-        super().handle_error(request, client_address)
 
     @property
     def gateway(self) -> Gateway:
@@ -260,7 +273,7 @@ def serve(
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода."""
     gateway = Gateway(entries_provider, keys, timeout=timeout)
-    server = ThreadingHTTPServer((host, port), _Handler)
+    server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]
 
     print(f"приставка слушает http://{host}:{port}/v1 (остановить — Ctrl+C)")
