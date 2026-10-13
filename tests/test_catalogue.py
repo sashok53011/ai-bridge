@@ -1,0 +1,110 @@
+"""Правила каталога: нормализация, кому что показывать, синхронизация."""
+
+from core.catalogue import (
+    STATUS_ACTIVE,
+    STATUS_DEAD,
+    STATUS_DISABLED,
+    normalize,
+    reconcile,
+    view,
+)
+
+
+def _entry(**kwargs) -> dict:
+    base = {
+        "id": "ollama",
+        "name": "Ollama",
+        "url": "http://localhost:11434/v1",
+        "model": "llama3.2",
+        "status": STATUS_ACTIVE,
+        "origin": "admin",
+    }
+    base.update(kwargs)
+    return base
+
+
+class TestNormalize:
+    def test_keeps_what_matters(self) -> None:
+        entry = normalize(_entry(fallbackPriority="7", name="  Ollama "))
+        assert entry is not None
+        assert entry["id"] == "ollama"
+        assert entry["name"] == "Ollama"
+        assert entry["fallbackPriority"] == 7
+
+    def test_drops_entries_without_id_or_url(self) -> None:
+        assert normalize({"name": "без адреса"}) is None
+        assert normalize({"id": "x", "url": "   "}) is None
+        assert normalize("мусор") is None
+        assert normalize(None) is None
+
+    def test_unknown_status_becomes_active(self) -> None:
+        entry = normalize(_entry(status="какой-то статус"))
+        assert entry is not None
+        assert entry["status"] == STATUS_ACTIVE
+
+
+class TestView:
+    def test_dead_is_hidden_until_switched_on(self) -> None:
+        catalogue = [_entry(status=STATUS_DEAD)]
+        assert view(catalogue, flags={}) == []
+        # Включённое показывается с пометкой, чтобы человек мог выключить.
+        shown = view(catalogue, flags={"ollama": True})
+        assert shown[0]["enabled"] is True
+
+    def test_disabled_for_all_is_hidden_until_switched_on(self) -> None:
+        catalogue = [_entry(status=STATUS_DISABLED)]
+        assert view(catalogue, flags={}) == []
+        assert view(catalogue, flags={"ollama": True})[0]["enabled"] is True
+
+    def test_superuser_sees_everything(self) -> None:
+        catalogue = [
+            _entry(status=STATUS_DEAD),
+            _entry(id="other", url="https://x.example/v1"),
+        ]
+        assert len(view(catalogue, flags={}, is_superuser=True)) == 2
+
+    def test_a_proposal_is_only_visible_to_its_author(self) -> None:
+        catalogue = [_entry(id="mine", origin="user", authorId="user-1")]
+        assert view(catalogue, flags={}, viewer_id="user-1")[0]["mine"] is True
+        assert view(catalogue, flags={}, viewer_id="user-2") == []
+        assert view(catalogue, flags={}, is_superuser=True)[0]["mine"] is False
+
+
+class TestReconcile:
+    def test_switched_on_entries_survive_any_catalogue(self) -> None:
+        """Главное правило: включённое человеком не удаляется никогда."""
+        local = [_entry(enabled=True)]
+        result = reconcile(local, remote=[])
+        assert [entry["id"] for entry in result] == ["ollama"]
+        assert result[0]["enabled"] is True
+
+    def test_switched_off_follow_the_catalogue(self) -> None:
+        local = [_entry(enabled=False)]
+        assert reconcile(local, remote=[]) == []
+
+        remote = [_entry(url="http://10.0.0.2:11434/v1")]
+        result = reconcile(local, remote=remote)
+        assert result[0]["url"] == "http://10.0.0.2:11434/v1"
+        assert result[0]["enabled"] is False
+
+    def test_marked_entries_go_away_for_users_who_left_them_off(self) -> None:
+        local = [_entry(enabled=False)]
+        remote = [_entry(status=STATUS_DEAD)]
+        assert reconcile(local, remote=remote) == []
+
+    def test_a_marked_entry_stays_for_the_one_who_enabled_it(self) -> None:
+        local = [_entry(enabled=True)]
+        remote = [_entry(status=STATUS_DISABLED)]
+        result = reconcile(local, remote=remote)
+        assert [entry["id"] for entry in result] == ["ollama"]
+
+    def test_priority_decides_the_order(self) -> None:
+        local: list[dict] = []
+        remote = [
+            _entry(id="slow", url="https://s.example/v1", fallbackPriority=5),
+            _entry(id="fast", url="https://f.example/v1", fallbackPriority=1),
+        ]
+        assert [entry["id"] for entry in reconcile(local, remote=remote)] == [
+            "fast",
+            "slow",
+        ]
