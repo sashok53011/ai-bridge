@@ -1,0 +1,29 @@
+[Unit]
+Description=AI-приставка: локальный OpenAI-совместимый шлюз каталога провайдеров
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-bridge
+Group=ai-bridge
+WorkingDirectory=/opt/ai-bridge
+# Данные приложения (ключи, токен, снапшот) — в отдельном каталоге,
+# а не в домашней папке: служебный пользователь без home не нужен.
+Environment=AI_BRIDGE_HOME=/var/lib/ai-bridge
+# Секреты (логин каталога) — только в этом файле, chmod 600.
+# Знак «-» перед путём: файла может не быть, тогда читается config.toml.
+EnvironmentFile=-/etc/ai-bridge.env
+ExecStart=/opt/ai-bridge/.venv/bin/python app.py --serve --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=10
+
+# Приставке нужны только её данные и сеть.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ai-bridge
+
+[Install]
+WantedBy=multi-user.target
