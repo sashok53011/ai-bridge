@@ -247,6 +247,12 @@ JavaScript; чужие Host (DNS-rebinding) и Origin (страница-обма
 моделей Ollama с префиксом `ollama/…`); чат через шлюз с токеном → 200,
 модель подставлена чисто. 401 провайдера уходит в фолбэк.
 
+Доступ извне проверен вживую (`--host 0.0.0.0`): страница по LAN-адресу
+отдаёт форму входа (токен обязателен на не-loopback), API без токена →
+401. `--page-auth` закрывает страницу и за туннелем до loopback. README
+описывает три пути: Tailscale (рекомендован), Cloudflare Tunnel,
+проброс порта (только с HTTPS).
+
 ## 11. Правила разработки
 
 1. **Чистое ядро.** В `core/` — только функции «данные → данные». Ни сети,
@@ -275,6 +281,7 @@ uv run python app.py --add "Мой LMS" http://127.0.0.1:1234/v1 qwen3-8b
 uv run python app.py --remove moy-lms # убрать: админу — в корзину, человеку — своё
 uv run python app.py --serve          # служба: API на :8080/v1 + страница на :8080/
 uv run python app.py --token          # токен приставки (для /v1/* и страницы на LAN)
+uv run python app.py --serve --host 0.0.0.0 --page-auth  # доступ из LAN/Tailscale
 ```
 
 Логин: переменные `AI_BRIDGE_EMAIL` и `AI_BRIDGE_PASSWORD`
