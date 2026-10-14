@@ -219,10 +219,36 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ методы
 
+    def _try_ui_get(self) -> bool:
+        """Отдать GET веб-слою, если он подключён. True — если разобрались."""
+        ui = getattr(self.server, "ui", None)
+        if ui is None:
+            return False
+        ui.handle_get(self, self.path)
+        return True
+
+    def _try_ui_post(self) -> bool:
+        """Отдать POST веб-слою, если он подключён. True — если разобрались."""
+        ui = getattr(self.server, "ui", None)
+        if ui is None:
+            return False
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        body = self.rfile.read(length) if 0 < length <= 1024 * 1024 else b""
+        ui.handle_post(self, self.path, body)
+        return True
+
     def do_GET(self) -> None:  # noqa: N802 - имя задано http.server
         path = self.path.split("?", 1)[0]
         if path in ("/v1/models", "/models"):
             self._send_json(200, self.gateway.models_payload())
+            return
+        if path.startswith("/v1/"):
+            self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
+            return
+        if self._try_ui_get():
             return
         if path == "/":
             self._send_json(
@@ -238,6 +264,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - имя задано http.server
         path = self.path.split("?", 1)[0]
         if path not in ("/v1/chat/completions", "/chat/completions"):
+            if path.startswith("/v1/"):
+                self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
+                return
+            if self._try_ui_post():
+                return
             self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
             return
 
@@ -272,13 +303,21 @@ def serve(
     port: int = 8080,
     timeout: float = 600.0,
     quiet: bool = False,
+    ui=None,
 ) -> int:
-    """Слушает, пока не придёт Ctrl+C. Возвращает код выхода."""
+    """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
+
+    ``ui`` — service.webui.WebUi: страница на том же порту, что и API.
+    Без неё служба отдаёт только OpenAI-совместимые маршруты.
+    """
     gateway = Gateway(entries_provider, keys, timeout=timeout)
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]
+    server.ui = ui  # type: ignore[attr-defined]
 
     print(f"приставка слушает http://{host}:{port}/v1 (остановить — Ctrl+C)", flush=True)
+    if ui is not None:
+        print(f"страница: http://{host}:{port}/", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

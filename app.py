@@ -29,20 +29,16 @@ from core.check import judge
 from core.catalogue import (
     STATUS_DEAD,
     STATUS_DISABLED,
-    can_remove,
-    next_priority,
-    propose,
     view,
-    with_local_enabled,
 )
 from core.progress import PullTracker, describe
-from core.stats import format_stats, for_line, for_provider
+from core.stats import format_stats, for_line
 from providers.client import (
-    NeedsKeyError,
     PocketBase,
     Provider,
     ServerError,
 )
+from service import ops
 from storage.keys import KeyStore
 from storage.snapshot import Snapshot
 
@@ -137,73 +133,30 @@ def _print_models(server_url: str, provider: dict, key: str) -> int:
 def _check_provider(server: PocketBase, provider: dict, key: str) -> int:
     """«Кнопка проверки»: список моделей, итог и рост счётчика.
 
-    Ключ остаётся на устройстве: на сервер уходит только итог проверки,
-    как и записано в правиле продукта.
+    Вся логика — в service/ops (ею же пользуется страница), здесь только
+    печать. Ключ остаётся на устройстве: на сервер уходит только итог.
     """
-    if provider.get("status") == STATUS_DEAD:
-        # Правило продукта: помечена неработающей — пользоваться можно,
-        # но проверять нельзя.
-        print(f"{provider['name']}: помечена неработающей — проверять нельзя")
-        return 2
+    result = ops.check(server, provider, key)
 
-    models: list[str] | None = None
-    error = ""
-    needs_key = False
+    if result["dead"]:
+        print(f"{provider['name']}: {result['dead']}")
+        return result["code"]
 
-    try:
-        models = [entry["name"] for entry in Provider(provider["url"]).fetch_models(key)]
-    except NeedsKeyError:
-        needs_key = True
-    except ServerError as exc:
-        error = str(exc)
-    except Exception as exc:  # noqa: BLE001 - показать причину важнее, чем тип исключения
-        error = f"не получилось связаться ({exc})"
-
-    outcome = judge(
-        models,
-        configured=provider.get("model", ""),
-        error=error,
-        needs_key=needs_key,
-    )
-
+    outcome = result["outcome"]
     if outcome["ok"]:
         detail = f"модель {outcome['model']}" if outcome["model"] else "модели есть"
         print(f"{provider['name']}: работает · {detail}")
     else:
         print(f"{provider['name']}: {outcome['error']}")
 
-    if not outcome["report"]:
-        # Нужен ключ — введём его и проверим снова; отчёт не растёт.
-        return 3
-
-    try:
-        server.report_stats(
-            provider_id=provider["id"],
-            model=outcome["model"],
-            ok=outcome["ok"],
-            error=outcome["error"],
-        )
-    except ServerError as exc:
-        print(f"отчёт не отправился: {exc}", file=sys.stderr)
-        return 1
-
-    print("отчёт отправлен")
-    _print_community_counter(server, provider["id"], outcome["model"])
-    return 0 if outcome["ok"] else 1
-
-
-def _print_community_counter(server: PocketBase, provider_id: str, model: str) -> None:
-    """Свежий счётчик сообщества после отчёта: сколько человек смогли.
-
-    Если статистика не пришла — не беда: отчёт уже отправлен.
-    """
-    try:
-        counters = for_provider(server.fetch_stats(), provider_id)
-    except ServerError:
-        return
-    label = format_stats(counters.get(model))
-    if label:
-        print(f"счётчик сообщества: {label}")
+    if outcome["report"]:
+        if result["report_error"]:
+            print(f"отчёт не отправился: {result['report_error']}", file=sys.stderr)
+        else:
+            print("отчёт отправлен")
+            if result["counter"]:
+                print(f"счётчик сообщества: {result['counter']}")
+    return result["code"]
 
 
 def _pull_model(provider: dict, model: str, key: str, *, timeout: float = 180.0) -> int:
@@ -268,22 +221,10 @@ def _merge_and_store(
     can_edit: bool,
     server_flags: dict[str, bool],
 ) -> list[dict]:
-    """Сводит каталог с локальным снапшотом и сохраняет итог.
-
-    Флаги: локальное решение сильнее серверного (устройство могло
-    переключить офлайн), серверные помогают на новом устройстве.
-    Включённое человеком запись не удаляется никогда — даже если каталог
-    её больше не отдаёт.
-    """
-    local = Snapshot().load()
-    flags = {
-        **server_flags,
-        **{entry["id"]: bool(entry.get("enabled")) for entry in local},
-    }
-    listed = view(providers, flags=flags, viewer_id=server.user_id, is_superuser=can_edit)
-    wanted = with_local_enabled(listed, local)
-    Snapshot().save(wanted)
-    return wanted
+    """Каталог глазами устройства (логика — в service/ops)."""
+    return ops.merge_view(
+        server, providers, can_edit=can_edit, server_flags=server_flags
+    )
 
 
 def _set_enabled(
@@ -294,47 +235,18 @@ def _set_enabled(
     enabled: bool,
     can_edit: bool,
 ) -> int:
-    """«Тумблер»: включает или выключает провайдеров.
-
-    Локально решение применяется сразу; на сервер уходит только для
-    обычного пользователя — у суперпользо­вателя сервер флаги не хранит
-    (PUT заменил бы каталог, а флагов в каталоге нет вовсе).
-    """
-    by_id = {entry["id"]: entry for entry in wanted}
-    unknown = [provider_id for provider_id in ids if provider_id not in by_id]
-    if unknown:
-        print(
-            f"не найдено: {', '.join(unknown)} — возможно, запись скрыта "
-            "(помечена неработающей и не включалась)",
-            file=sys.stderr,
-        )
-        return 2
-
-    merged = [
-        {**entry, "enabled": enabled if entry["id"] in ids else bool(entry.get("enabled"))}
-        for entry in wanted
-    ]
-    Snapshot().save(merged)
+    """«Тумблер»: логика в service/ops, здесь только печать."""
+    result = ops.set_enabled(server, wanted, ids, enabled=enabled, can_edit=can_edit)
 
     word = "включён" if enabled else "выключен"
-    for provider_id in ids:
-        print(f"{by_id[provider_id]['name']}: {word}")
+    for _, name in result["changed"]:
+        print(f"{name}: {word}")
 
-    if can_edit:
-        print("переключатель сохранён на устройстве: у суперпользо­вателя сервер флаги не хранит")
-        return 0
-
-    try:
-        server.save_flags(merged)
-    except ServerError as exc:
-        print(
-            f"на сервер не ушло ({exc}) — переключатель сохранён на устройстве",
-            file=sys.stderr,
-        )
-        return 1
-
-    print("переключатели отправлены на сервер")
-    return 0
+    if result["error"]:
+        print(result["error"], file=sys.stderr)
+    if result["note"]:
+        print(result["note"])
+    return result["code"]
 
 
 def _serve(
@@ -347,16 +259,18 @@ def _serve(
     port: int,
     timeout: float,
 ) -> int:
-    """Запускает локальный HTTP-сервис: другие приложения ходят в приставку.
+    """Запускает локальный HTTP-сервис: другие приложения ходят в приставку,
+    а человек следит за ней со страницы в браузере.
 
     Каталог обновляется в фоне (раз в 5 минут), а переключатели читаются
     из снапшота на каждый запрос — `--enable/--disable` подхватывается
-    сразу, без перезапуска сервиса.
+    сразу, без перезапуска службы.
     """
     import threading
     import time
 
     from service.gateway import serve as run_server
+    from service.webui import WebUi
 
     state = {"providers": providers, "server_flags": server_flags}
 
@@ -372,21 +286,23 @@ def _serve(
                 print(f"каталог не обновился: {exc}", file=sys.stderr)
 
     def entries() -> list[dict]:
-        local = Snapshot().load()
-        flags = {
-            **state["server_flags"],
-            **{entry["id"]: bool(entry.get("enabled")) for entry in local},
-        }
-        listed = view(
+        return ops.merge_view(
+            server,
             state["providers"],
-            flags=flags,
-            viewer_id=server.user_id,
-            is_superuser=can_edit,
+            can_edit=can_edit,
+            server_flags=state["server_flags"],
         )
-        return with_local_enabled(listed, local)
+
+    ui = WebUi(
+        entries,
+        KeyStore(),
+        server,
+        can_edit=can_edit,
+        bound_host=host,
+    )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
-    return run_server(entries, KeyStore(), host=host, port=port, timeout=timeout)
+    return run_server(entries, KeyStore(), host=host, port=port, timeout=timeout, ui=ui)
 
 
 def _remove_provider(
@@ -397,49 +313,16 @@ def _remove_provider(
     *,
     can_edit: bool,
 ) -> int:
-    """«Убрать провайдера»: админ — из каталога в корзину, человек — своё предложение.
+    """«Убрать провайдера»: логика в service/ops, здесь только печать."""
+    result = ops.remove(
+        server, wanted, providers, provider_id, can_edit=can_edit
+    )
 
-    Запись каталога обычный пользователь убрать не может — сервер бы её
-    сохранил, а команда соврала бы. Чужое трогать нельзя: это правило
-    продукта, а не экономия.
-    """
-    by_id = {entry["id"]: entry for entry in wanted}
-    target = by_id.get(provider_id)
-    if target is None:
-        print(f"не найдено: {provider_id}", file=sys.stderr)
-        return 2
-
-    if not can_remove(target, is_superuser=can_edit):
-        print(
-            f"«{target['name']}» — запись каталога, убрать её может только "
-            "администратор; выключить можно: --disable",
-            file=sys.stderr,
-        )
-        return 2
-
-    remaining = [entry for entry in wanted if entry["id"] != provider_id]
-    Snapshot().save(remaining)
-    KeyStore().delete(provider_id)
-
-    try:
-        if can_edit:
-            # Каталог целиком, без убранной записи: сервер отправит её
-            # в корзину — восстановимо из веб-панели.
-            server.push_catalogue(
-                [entry for entry in providers if entry["id"] != provider_id]
-            )
-            print(f"{target['name']}: убрано из каталога (в корзине, восстановимо)")
-        else:
-            server.save_flags(remaining)
-            print(f"{target['name']}: предложение убрано")
-    except ServerError as exc:
-        print(
-            f"на сервер не ушло ({exc}) — на устройстве запись убрана",
-            file=sys.stderr,
-        )
-        return 1
-
-    return 0
+    if result["error"]:
+        print(result["error"], file=sys.stderr)
+        return result["code"]
+    print(f"{result['name']}: {result['note']}")
+    return result["code"]
 
 
 def _add_provider(
@@ -457,76 +340,37 @@ def _add_provider(
     key: str = "",
     can_edit: bool,
 ) -> int:
-    """«Добавить провайдера»: обычный пользователь добавляет предложение,
-    суперпользо­ватель — запись в каталог для всех.
+    """«Добавить провайдера»: логика в service/ops, здесь только печать."""
+    result = ops.add(
+        server,
+        wanted,
+        providers,
+        name=name,
+        url=url,
+        model=model,
+        provider_id=provider_id,
+        priority=priority,
+        login_url=login_url,
+        key_url=key_url,
+        key=key,
+        can_edit=can_edit,
+    )
 
-    Предложение видят только автор и администратор (он же — публикатор).
-    Ключ, если дали, остаётся на устройстве — на сервер он не уходит.
+    if result["entry"] is None:
+        print(result["error"], file=sys.stderr)
+        return result["code"]
 
-    Суперпользо­вателю каталог отправляется целиком (его PUT заменяет
-    каталог), но из **серверного** списка, а не из локального слияния:
-    локальные «выжившие» записи в каталог не попадают — они живут только
-    на устройстве.
-    """
-    raw: dict = {"name": name, "url": url, "model": model}
-    if provider_id:
-        raw["id"] = provider_id
-    if priority is not None:
-        raw["fallbackPriority"] = priority
-    if login_url:
-        raw["loginUrl"] = login_url
-    if key_url:
-        raw["getApiKeyUrl"] = key_url
+    entry = result["entry"]
+    if result["error"]:
+        print(result["error"], file=sys.stderr)
+        return result["code"]
 
-    entry, error = propose(raw)
-    if entry is None:
-        print(error, file=sys.stderr)
-        return 2
-
-    # Свой id должен быть свободен: чужую запись мы не трогаем.
-    if any(existing["id"] == entry["id"] for existing in wanted):
-        print(
-            f"id «{entry['id']}» уже занят — укажите свой через --id",
-            file=sys.stderr,
-        )
-        return 2
-
-    if priority is None:
-        entry["fallbackPriority"] = next_priority(providers)
-
-    # Автору своё сразу нужно: включаем и показываем с пометкой «ваш».
-    entry = {**entry, "enabled": True, "mine": True}
-    if can_edit:
-        # Админ публикует сразу: без пометки «предложение».
-        entry["origin"] = "admin"
-        entry["mine"] = False
-
-    merged = [*wanted, entry]
-    Snapshot().save(merged)
-    if key:
-        KeyStore().set(entry["id"], key)
-
-    try:
-        if can_edit:
-            # В каталог уходит серверный список + новая запись, без
-            # локальных выживших — они не должны просочиться в каталог.
-            server.push_catalogue([*providers, entry])
-            print(f"{entry['name']}: добавлено в каталог — видят все")
-        else:
-            server.save_flags(merged)
-            print(f"{entry['name']}: предложение отправлено — видят только вы и администратор")
-    except ServerError as exc:
-        print(
-            f"на сервер не ушло ({exc}) — запись сохранена на устройстве",
-            file=sys.stderr,
-        )
-        return 1
-
+    print(f"{entry['name']}: {result['note']}")
     print(f"id: {entry['id']} · модель: {entry['model']}")
     if key:
         print("ключ сохранён на устройстве")
     print(f"проверить: uv run python app.py --check {entry['id']}")
-    return 0
+    return result["code"]
 
 
 def main(argv: list[str] | None = None) -> int:
