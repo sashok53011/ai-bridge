@@ -192,6 +192,10 @@ DELETE /api/ai-trash         -> очистить корзину
 - **FreedomBox: зоны firewalld.** `internal` — это wlan0-точка, а LAN-порт
   (`eth0`) числится в `external`. Порт службы открывается правилом-источником
   в `external`, иначе снаружи тайм-аут при `policy accept` в iptables.
+- **PocketBase-хуки знают только свои поля.** И `sanitize` (запись), и
+  `viewFor` (ответ GET) собирают объекты поля-за-полем: новое поле
+  каталога молча отбрасывается на обоих концах. Добавление поля — правка
+  обоих хуков + перезапуск pocketbase; старые клиенты поля игнорируют.
 - **FreedomBox: `sudo -u` сбрасывает окружение.** Для запуска от
   служебного пользователя с секретами — root читает `/etc/ai-bridge.env`
   и передаёт через `runuser -u ai-bridge -- env ...`.
@@ -206,7 +210,9 @@ app.py                вход: каталог с сервера, модели �
                       добавление/удаление своих, запуск службы со страницей,
                       токен приставки
 core/catalogue.py     normalize / view / reconcile / with_local_enabled /
-                      propose / can_remove — правила каталога
+                      propose / can_remove / set_model / edit_entry —
+                      правила каталога; поля справки о модели (pricing,
+                      context, capabilities) идут через весь конвейер
 core/models.py        список моделей из двух форматов ответа и объединение
                       (настроенные + live с префиксом провайдера)
 core/page.py          страница приставки: чистые функции «данные → HTML»
@@ -248,7 +254,15 @@ tests/                207 тестов чистых функций, клиент
 отдаётся на `/`, тумблер переключает флаг через полный путь (POST →
 ops → снапшот), ключ принимается и остаётся на устройстве. Формы без
 JavaScript; чужие Host (DNS-rebinding) и Origin (страница-обманка)
-отклоняются.
+отклоняются. Форма правки (`/edit/<id>`) с полями контекста, цены и
+способностей; пустые поля значения не стирают.
+
+`--set-model`/`--edit` проверены вживую на FreedomBox: модель Ollama
+сменена на `qwen3:0.6b` (видна в `/v1/models` без префикса, чат без
+названия модели уходит в неё), справка (context/pricing/capabilities)
+заполнена и видна в строке каталога. Попутно найдено: серверные хуки
+`sanitize` и `viewFor` знают только свои поля — новые поля каталога
+пришлось добавить в оба (бэкапы `.bak-pricing`/`.bak-viewfor` рядом).
 
 Токен и объединённые модели проверены вживую: `--token` печатает токен
 из `~/.ai-bridge/token`; `/v1/models` без токена → 401 с подсказкой, с
@@ -300,6 +314,8 @@ uv run python app.py --enable ollama  # включить (локально; об
 uv run python app.py --disable ollama # выключить
 uv run python app.py --add "Мой LMS" http://127.0.0.1:1234/v1 qwen3-8b
 uv run python app.py --remove moy-lms # убрать: админу — в корзину, человеку — своё
+uv run python app.py --set-model ollama qwen3:0.6b  # модель по умолчанию
+uv run python app.py --edit ollama context=128K pricing='$0.1/1M' capabilities='vision, tools'
 uv run python app.py --serve          # служба: API на :8080/v1 + страница на :8080/
 uv run python app.py --token          # токен приставки (для /v1/* и страницы на LAN)
 uv run python app.py --serve --host 0.0.0.0 --page-auth  # доступ из LAN/Tailscale
