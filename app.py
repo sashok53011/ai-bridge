@@ -59,12 +59,19 @@ def _configure_console() -> None:
 
 
 def load_settings() -> dict:
-    """config.toml рядом со скриптом; секреты — только из окружения."""
+    """Настройки: config.toml рядом со скриптом, поверх — окружение.
+
+    Секреты (логин, пароль) живут только в окружении или config.toml —
+    в репозиторий они не попадают. Переменная окружения сильнее файла:
+    так служба на сервере переопределяет адрес каталога без правки файлов.
+    """
     settings: dict = {"server": "https://app.devhorizon.online"}
     path = Path(__file__).with_name("config.toml")
     if path.exists():
         with path.open("rb") as handle:
             settings.update(tomllib.load(handle))
+    if os.environ.get("AI_BRIDGE_SERVER", "").strip():
+        settings["server"] = os.environ["AI_BRIDGE_SERVER"].strip()
     return settings
 
 

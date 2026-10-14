@@ -30,13 +30,17 @@ fi
 echo "== 3/6: каталоги"
 mkdir -p "$APP_DIR" "$DATA_DIR"
 chown "$SERVICE_USER":"$SERVICE_USER" "$DATA_DIR"
+# venv создаётся от служебного пользователя — каталог приложения должен
+# быть ему доступен на запись.
+chown "$SERVICE_USER":"$SERVICE_USER" "$APP_DIR"
 
 echo "== 4/6: зависимости проекта (venv)"
 if [ ! -d "$APP_DIR/.venv" ]; then
     sudo -u "$SERVICE_USER" python3 -m venv "$APP_DIR/.venv"
 fi
-sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet --upgrade pip
-sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet httpx
+# --no-cache-dir: у служебного пользователя нет home для кэша pip.
+sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet --no-cache-dir --upgrade pip
+sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet --no-cache-dir httpx
 
 echo "== 5/6: секреты"
 if [ ! -f /etc/ai-bridge.env ]; then
