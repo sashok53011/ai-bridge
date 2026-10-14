@@ -160,6 +160,50 @@ Ollama с моделью qwen3, даже если она не настроена
 повод переключаться, она уходит клиенту как есть. `Ctrl+C` останавливает
 службу, оборвавшийся клиент — не ошибка и не traceback.
 
+## Установка на Debian / FreedomBox
+
+Приставка работает как системная служба рядом с PocketBase — каталог
+доступен по `localhost`, консоль не нужна. Комплект в `deploy/debian/`:
+
+```bash
+# на сервере: код уже скопирован в /opt/ai-bridge
+sudo bash /opt/ai-bridge/deploy/debian/install.sh   # 1-й прогон: шаблон секретов
+sudo nano /etc/ai-bridge.env                        # вписать логин каталога
+sudo bash /opt/ai-bridge/deploy/debian/install.sh   # 2-й прогон: служба работает
+```
+
+Установщик сам чинит CRLF-переносы (архив, собранный на Windows) и
+создаёт служебного пользователя `ai-bridge`. Данные — в `/var/lib/ai-bridge`
+(ключи, токен, снапшот), секреты — в `/etc/ai-bridge.env` (chmod 600).
+
+Нюансы FreedomBox:
+
+- **Порт по умолчанию 8080 может быть занят** (SearXNG из комплекта) —
+  тогда поднимите службу на другом через drop-in
+  `/etc/systemd/system/ai-bridge.service.d/port.conf` с `ExecStart=... --port 8095`;
+  он переживает повторные прогоны установщика.
+- **Брандмауэр — firewalld**: порт открывается в зоне **eth0 (external)**,
+  а не internal (это wlan0-точка):
+
+  ```bash
+  sudo firewall-cmd --zone=external --add-rich-rule='rule family="ipv4" source address="192.168.0.0/24" port port="8095" protocol="tcp" accept' --permanent
+  sudo firewall-cmd --reload
+  ```
+
+  Правило-источник ограничивает доступ вашей подсетью — даже при пробросе
+  роутера наружу чужим будет отказ.
+- **PocketBase рядом**: если он слушает `127.0.0.1:8090`, задайте
+  `AI_BRIDGE_SERVER=http://127.0.0.1:8090` — без обхода через домен.
+- **Каталог с LAN-адресами**: Ollama/LM Studio на другом ПК прописывайте
+  по его адресу (`http://192.168.0.x:11434/v1`), не по `localhost` —
+  для приставки «localhost» означал бы её же машину.
+- **Переключатели суперпользо­вателя** живут только на устройстве: после
+  установки включите нужных провайдеров командой `--enable` от
+  служебного пользователя.
+
+Журнал: `journalctl -u ai-bridge -f`. Токен: `app.py --token` (от
+служебного пользователя, с `AI_BRIDGE_HOME=/var/lib/ai-bridge`).
+
 ## Проверки
 
 ```bash
