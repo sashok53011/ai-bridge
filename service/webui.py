@@ -22,7 +22,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from typing import Callable
 
-from core.page import catalogue_page, key_page, login_page
+from core.page import catalogue_page, edit_page, key_page, login_page
 from providers.client import PocketBase, ServerError
 from service import ops
 from storage.keys import KeyStore
@@ -178,10 +178,7 @@ class WebUi:
 
         if clean.startswith("/key/"):
             provider_id = urllib.parse.unquote(clean[len("/key/") :])
-            entry = next(
-                (item for item in self._entries_provider() if item["id"] == provider_id),
-                None,
-            )
+            entry = self._find(provider_id)
             if entry is None:
                 self._not_found(handler)
                 return
@@ -190,6 +187,15 @@ class WebUi:
                 200,
                 key_page(entry["name"], has_key=bool(self._keys.get(provider_id))),
             )
+            return
+
+        if clean.startswith("/edit/"):
+            provider_id = urllib.parse.unquote(clean[len("/edit/") :])
+            entry = self._find(provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            self._send_html(handler, 200, edit_page(entry))
             return
 
         self._not_found(handler)
@@ -284,6 +290,33 @@ class WebUi:
             )
             notice = result["note"] and f"{entry['name']}: {result['note']}" or ""
             self._redirect(handler, result["error"] or notice)
+            return
+
+        if clean.startswith("/edit/"):
+            provider_id = urllib.parse.unquote(clean[len("/edit/") :])
+            entry = self._find(provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            changes = {
+                name: field(name)
+                for name in (
+                    "name", "url", "model", "fallbackPriority",
+                    "loginUrl", "getApiKeyUrl", "context", "pricing", "capabilities",
+                )
+            }
+            result = ops.edit(
+                self._server,
+                self._entries_provider(),
+                [],
+                provider_id,
+                changes,
+                can_edit=self._can_edit,
+            )
+            notice = (
+                f"{entry['name']}: сохранено" if result["error"] is None else result["error"]
+            )
+            self._redirect(handler, notice)
             return
 
         if clean == "/add":

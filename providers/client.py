@@ -364,6 +364,11 @@ def _sync_shape(entry: dict) -> dict:
         "status": entry.get("status", "active"),
         "origin": entry.get("origin", "admin"),
         "authorName": entry.get("authorName", ""),
+        # Справочная информация о модели (цена, контекст, способности) —
+        # сервер хранит только после правки своего sanitize().
+        "pricing": entry.get("pricing", ""),
+        "context": entry.get("context", ""),
+        "capabilities": entry.get("capabilities", ""),
     }
 
 

@@ -69,6 +69,11 @@ def normalize(entry: object) -> dict | None:
         "origin": origin,
         "authorId": _text(entry.get("authorId")),
         "authorName": _text(entry.get("authorName")),
+        # Справочная информация о модели — помогает выбирать экономную:
+        # цена (текстом, как её пишут провайдеры), контекст и способности.
+        "pricing": _text(entry.get("pricing")),
+        "context": _text(entry.get("context")),
+        "capabilities": _text(entry.get("capabilities")),
     }
 
 
@@ -221,11 +226,99 @@ def can_remove(entry: object, *, is_superuser: bool) -> bool:
     """
     if is_superuser:
         return True
+    return _is_own_proposal(entry)
+
+
+def can_edit_model(entry: object, *, is_superuser: bool) -> bool:
+    """Можно ли менять настроенную модель этой записи.
+
+    Админ — любую (это его каталог). Обычный пользователь — только своё
+    предложение: сервер определения чужих записей не меняет, и команда
+    не должна солгать, сказав «модель изменена».
+    """
+    if is_superuser:
+        return True
+    return _is_own_proposal(entry)
+
+
+def _is_own_proposal(entry: object) -> bool:
     return (
         isinstance(entry, dict)
         and entry.get("origin") == "user"
         and bool(entry.get("mine"))
     )
+
+
+def set_model(
+    entries: list[dict], provider_id: str, model: str
+) -> tuple[list[dict] | None, str]:
+    """Меняет настроенную модель провайдера: (новый список, "") или (None, причина).
+
+    Новая модель — та, что пойдёт провайдеру по умолчанию, когда клиент
+    её не назвал; она же стоит в каталоге и в /v1/models без префикса.
+    """
+    model = model.strip()
+    if not model:
+        return None, "модель не может быть пустой"
+    if not any(entry.get("id") == provider_id for entry in entries):
+        return None, f"провайдер «{provider_id}» не найден"
+    return [
+        {**entry, "model": model} if entry.get("id") == provider_id else entry
+        for entry in entries
+    ], ""
+
+
+#: Поля определения, которые правятся в форме и через CLI.
+EDITABLE_FIELDS = (
+    "name",
+    "url",
+    "model",
+    "fallbackPriority",
+    "loginUrl",
+    "getApiKeyUrl",
+    "pricing",
+    "context",
+    "capabilities",
+)
+
+
+def edit_entry(
+    entries: list[dict], provider_id: str, changes: dict
+) -> tuple[list[dict] | None, str]:
+    """Правит определение записи: (новый список, "") или (None, причина).
+
+    ``changes`` — только изменяемые поля (пустые значения отбрасываются:
+    правка не должна молча стирать то, что человек не трогал). Итог
+    прогоняется через normalize — те же требования, что у сервера:
+    без имени и адреса запись жить не будет.
+    """
+    fields = {
+        name: value
+        for name, value in changes.items()
+        if name in EDITABLE_FIELDS and str(value).strip()
+    }
+    if "fallbackPriority" in fields:
+        try:
+            fields["fallbackPriority"] = max(0, int(fields["fallbackPriority"]))
+        except (TypeError, ValueError):
+            return None, "приоритет должен быть числом"
+    if not fields:
+        return None, "нечего менять — все поля пустые"
+
+    target = next((entry for entry in entries if entry.get("id") == provider_id), None)
+    if target is None:
+        return None, f"провайдер «{provider_id}» не найден"
+
+    candidate = normalize({**target, **fields})
+    if candidate is None:
+        return None, "после правки записи не хватает имени или адреса"
+
+    return [
+        {**candidate, **{k: v for k, v in target.items() if k not in candidate}}
+        if entry.get("id") == provider_id
+        else entry
+        for entry in entries
+    ], ""
 
 
 def next_priority(entries: list[dict]) -> int:

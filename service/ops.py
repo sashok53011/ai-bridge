@@ -20,9 +20,12 @@ from __future__ import annotations
 from core.check import judge
 from core.catalogue import (
     STATUS_DEAD,
+    can_edit_model,
     can_remove,
+    edit_entry as edit_entry_data,
     next_priority,
     propose,
+    set_model as set_model_data,
     view,
     with_local_enabled,
 )
@@ -253,6 +256,118 @@ def add(
             "note": None,
         }
     return {"code": 0, "error": None, "entry": entry, "note": note}
+
+
+def set_model(
+    server: PocketBase,
+    wanted: list[dict],
+    providers: list[dict],
+    provider_id: str,
+    model: str,
+    *,
+    can_edit: bool,
+) -> dict:
+    """Меняет настроенную модель: админ — в каталоге, человек — в своём.
+
+    Сервер определения чужих записей не меняет — команда отказывается
+    заранее, вместо ложного «изменено».
+    """
+    by_id = {entry["id"]: entry for entry in wanted}
+    target = by_id.get(provider_id)
+    if target is None:
+        return {"code": 2, "error": f"провайдер «{provider_id}» не найден", "entry": None}
+
+    if not can_edit_model(target, is_superuser=can_edit):
+        return {
+            "code": 2,
+            "error": (
+                f"«{target['name']}» — запись каталога, модель меняет только "
+                "администратор (можно своё предложение)"
+            ),
+            "entry": None,
+        }
+
+    updated, error = set_model_data(wanted, provider_id, model)
+    if updated is None:
+        return {"code": 2, "error": error, "entry": None}
+
+    new_entry = next(entry for entry in updated if entry["id"] == provider_id)
+    Snapshot().save(updated)
+
+    try:
+        if can_edit:
+            server.push_catalogue(
+                [
+                    {**entry, "model": model} if entry["id"] == provider_id else entry
+                    for entry in providers
+                ]
+            )
+        else:
+            server.save_flags(updated)
+    except ServerError as exc:
+        return {
+            "code": 1,
+            "error": f"на сервер не ушло ({exc}) — на устройстве модель изменена",
+            "entry": new_entry,
+        }
+    return {"code": 0, "error": None, "entry": new_entry}
+
+
+def edit(
+    server: PocketBase,
+    wanted: list[dict],
+    providers: list[dict],
+    provider_id: str,
+    changes: dict,
+    *,
+    can_edit: bool,
+) -> dict:
+    """Правит определение провайдера: админ — каталог, человек — своё предложение.
+
+    Пустые поля формы не стирают значения — правка не должна молча
+    ломать то, что человек не трогал.
+    """
+    by_id = {entry["id"]: entry for entry in wanted}
+    target = by_id.get(provider_id)
+    if target is None:
+        return {"code": 2, "error": f"провайдер «{provider_id}» не найден", "entry": None}
+
+    if not can_edit_model(target, is_superuser=can_edit):
+        return {
+            "code": 2,
+            "error": (
+                f"«{target['name']}» — запись каталога, правит только "
+                "администратор (можно своё предложение)"
+            ),
+            "entry": None,
+        }
+
+    updated, error = edit_entry_data(wanted, provider_id, changes)
+    if updated is None:
+        return {"code": 2, "error": error, "entry": None}
+
+    new_entry = next(entry for entry in updated if entry["id"] == provider_id)
+    Snapshot().save(updated)
+
+    try:
+        if can_edit:
+            # В каталог — серверный список с заменой одной записи; локальные
+            # выжившие в каталог не тащим (их там нет).
+            server.push_catalogue(
+                [
+                    new_entry if entry["id"] == provider_id else entry
+                    for entry in providers
+                ]
+            )
+        else:
+            server.save_flags(updated)
+    except ServerError as exc:
+        return {
+            "code": 1,
+            "error": f"на сервер не ушло ({exc}) — на устройстве запись изменена",
+            "entry": new_entry,
+        }
+    return {"code": 0, "error": None, "entry": new_entry}
 
 
 def remove(

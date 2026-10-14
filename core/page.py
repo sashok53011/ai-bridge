@@ -44,6 +44,14 @@ def _provider_row(
     counter = for_line(stats or {}, entry["id"], entry.get("model", ""))
     stats_text = format_stats(counter) or "—"
 
+    # Справка о модели: контекст, цена, способности — если админ заполнил.
+    facts = [
+        escape(entry[key])
+        for key in ("context", "pricing", "capabilities")
+        if entry.get(key)
+    ]
+    facts_html = f'<span class="facts">{" · ".join(facts)}</span>' if facts else ""
+
     # Действие над строкой: тумблер всегда, ключ и удаление — по смыслу.
     toggle_label = "выключить" if entry.get("enabled") else "включить"
     actions = [
@@ -51,6 +59,8 @@ def _provider_row(
         f'<button type="submit">{toggle_label}</button></form>',
         f'<form method="post" action="/check/{escape(entry["id"], quote=True)}">'
         f'<button type="submit" class="ghost">проверить</button></form>',
+        f'<a class="btn-ghost" href="/edit/{escape(entry["id"], quote=True)}">'
+        f'править</a>',
     ]
     if can_remove(entry, is_superuser=can_edit):
         actions.append(
@@ -62,7 +72,7 @@ def _provider_row(
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
         f'<td class="name">{name} {" ".join(badges)}</td>'
         f'<td class="url">{escape(entry["url"])}</td>'
-        f'<td class="model">{escape(entry.get("model") or "—")}</td>'
+        f'<td class="model">{escape(entry.get("model") or "—")}{facts_html}</td>'
         f'<td class="stats">{escape(stats_text)}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
         f'<td class="actions">{" ".join(actions)}</td>'
@@ -120,6 +130,8 @@ def catalogue_page(
   button.ghost {{ opacity: .8; }}
   button.danger {{ color: #c0392b; }}
   .actions {{ white-space: nowrap; }}
+  .facts {{ display: block; font-size: .8em; opacity: .7; }}
+  a.btn-ghost {{ display: inline-block; padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; text-decoration: none; color: inherit; }}
   .empty {{ opacity: .6; }}
   .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
   .role {{ opacity: .6; font-size: .85rem; }}
@@ -153,6 +165,69 @@ def catalogue_page(
 
 <p class="role">Ключи хранятся только на этом устройстве и уходят напрямую провайдеру —
 на сервер каталога они не попадают никогда.</p>
+</body>
+</html>"""
+
+
+def edit_page(entry: dict, *, notice: str = "") -> str:
+    """Форма правки одного провайдера: определение плюс справка о модели.
+
+    Пустое поле ничего не стирает — сервер отбрасывает пустые значения
+    до правки, так что можно менять одну строку, не трогая остальные.
+    """
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+
+    def field(label: str, name: str, value: str, *, placeholder: str = "") -> str:
+        return (
+            f'<label>{escape(label)}'
+            f'<input name="{name}" value="{escape(value, quote=True)}" '
+            f'placeholder="{escape(placeholder, quote=True)}"></label>'
+        )
+
+    fields = "\n  ".join(
+        [
+            field("Название", "name", entry.get("name", "")),
+            field("Адрес", "url", entry.get("url", "")),
+            field("Модель", "model", entry.get("model", ""), placeholder="qwen3:0.6b"),
+            field("Приоритет", "fallbackPriority", str(entry.get("fallbackPriority", 0))),
+            field("Страница логина", "loginUrl", entry.get("loginUrl", "")),
+            field("Где взять ключ", "getApiKeyUrl", entry.get("getApiKeyUrl", "")),
+            field("Контекст", "context", entry.get("context", ""), placeholder="128K"),
+            field("Цена", "pricing", entry.get("pricing", ""), placeholder="$0.1/1M вход, $0.4/1M выход"),
+            field(
+                "Способности", "capabilities", entry.get("capabilities", ""),
+                placeholder="vision, thinking, tools",
+            ),
+        ]
+    )
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Правка — {escape(entry.get("name", ""))}</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 34rem; padding: 0 1rem; }}
+  label {{ display: block; margin: .5rem 0; }}
+  input {{ width: 100%; padding: .35rem; }}
+  button {{ margin-top: .8rem; padding: .3rem .9rem; }}
+  .role {{ opacity: .6; font-size: .85rem; }}
+  .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
+</style>
+</head>
+<body>
+<h1>Правка: {escape(entry.get("name", ""))}</h1>
+{notice_html}
+<form method="post" action="/edit/{escape(entry.get("id", ""), quote=True)}">
+  {fields}
+  <button type="submit">сохранить</button>
+  <a href="/">назад</a>
+</form>
+<p class="role">Цена и контекст — справка для выбора модели, её видят все.
+Способности — через запятую: vision, thinking, tools. Пустое поле не стирает
+значение.</p>
 </body>
 </html>"""
 

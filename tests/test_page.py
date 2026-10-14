@@ -4,7 +4,7 @@
 с прямыми скобками или адрес с кавычкой не должны ломать страницу.
 """
 
-from core.page import catalogue_page, key_page
+from core.page import catalogue_page, edit_page, key_page
 
 
 def _entry(**kwargs) -> dict:
@@ -79,6 +79,52 @@ class TestCataloguePage:
 
     def test_an_empty_catalogue_says_so(self) -> None:
         assert "каталог пуст" in catalogue_page([])
+
+
+class TestEditPage:
+    def test_the_form_offers_every_editable_field(self) -> None:
+        page = edit_page(_entry(pricing="$0.1/1M", context="128K", capabilities="vision"))
+        for name in (
+            "name", "url", "model", "fallbackPriority",
+            "loginUrl", "getApiKeyUrl", "context", "pricing", "capabilities",
+        ):
+            assert f'name="{name}"' in page
+
+    def test_current_values_are_prefilled(self) -> None:
+        page = edit_page(_entry(name="Мой Ollama", pricing="$0.2/1M"))
+        assert 'value="Мой Ollama"' in page
+        assert 'value="$0.2/1M"' in page
+
+    def test_foreign_values_are_escaped(self) -> None:
+        page = edit_page(_entry(name='<script>alert("x")</script>'))
+        assert "<script>alert" not in page
+
+    def test_a_fresh_entry_asks_with_placeholders(self) -> None:
+        page = edit_page(_entry())
+        assert "128K" in page  # плейсхолдер контекста
+        assert "vision" in page  # плейсхолдер способностей
+
+
+class TestFacts:
+    def test_pricing_context_and_capabilities_show_under_the_model(self) -> None:
+        page = catalogue_page(
+            [_entry(context="128K", pricing="$0.1/1M", capabilities="vision, tools")]
+        )
+        assert "128K" in page
+        assert "$0.1/1M" in page
+        assert "vision, tools" in page
+
+    def test_an_empty_facts_block_is_absent(self) -> None:
+        page = catalogue_page([_entry()])
+        assert 'class="facts"' not in page
+
+    def test_facts_are_escaped(self) -> None:
+        page = catalogue_page([_entry(pricing="<img onerror=x>")])
+        assert "<img onerror" not in page
+
+    def test_every_row_offers_editing(self) -> None:
+        page = catalogue_page([_entry()])
+        assert 'href="/edit/ollama"' in page
 
 
 class TestKeyPage:

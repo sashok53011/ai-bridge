@@ -344,6 +344,49 @@ def _remove_provider(
     return result["code"]
 
 
+def _set_model_cli(
+    server: PocketBase,
+    wanted: list[dict],
+    providers: list[dict],
+    provider_id: str,
+    model: str,
+    *,
+    can_edit: bool,
+) -> int:
+    """«Сменить настроенную модель»: логика в service/ops, здесь печать."""
+    result = ops.set_model(
+        server, wanted, providers, provider_id, model, can_edit=can_edit
+    )
+    if result["error"]:
+        print(result["error"], file=sys.stderr)
+        return result["code"]
+    entry = result["entry"]
+    print(f"{entry['name']}: модель -> {entry['model']}")
+    return result["code"]
+
+
+def _edit_cli(
+    server: PocketBase,
+    wanted: list[dict],
+    providers: list[dict],
+    provider_id: str,
+    changes: dict,
+    *,
+    can_edit: bool,
+) -> int:
+    """«Правка полей»: логика в service/ops, здесь печать."""
+    result = ops.edit(
+        server, wanted, providers, provider_id, changes, can_edit=can_edit
+    )
+    if result["error"]:
+        print(result["error"], file=sys.stderr)
+        return result["code"]
+    entry = result["entry"]
+    shown = ", ".join(f"{key}={entry.get(key, '')}" for key in sorted(changes))
+    print(f"{entry['name']}: {shown}")
+    return result["code"]
+
+
 def _add_provider(
     server: PocketBase,
     wanted: list[dict],
@@ -428,6 +471,18 @@ def main(argv: list[str] | None = None) -> int:
         nargs=3,
         metavar=("ИМЯ", "АДРЕС", "МОДЕЛЬ"),
         help="добавить провайдера: обычному — предложение, админу — в каталог",
+    )
+    parser.add_argument(
+        "--set-model",
+        nargs=2,
+        metavar=("ID", "МОДЕЛЬ"),
+        help="изменить настроенную модель провайдера (например: --set-model ollama qwen3:0.6b)",
+    )
+    parser.add_argument(
+        "--edit",
+        nargs="+",
+        metavar="ID [поле=значение ...]",
+        help="править поля записи: --edit ollama model=qwen3 pricing='$0.1/1M' context=128K",
     )
     parser.add_argument(
         "--remove",
@@ -560,6 +615,25 @@ def main(argv: list[str] | None = None) -> int:
             if args.remove:
                 return _remove_provider(
                     server, wanted, providers, args.remove, can_edit=can_edit
+                )
+
+            if args.set_model:
+                provider_id, model = args.set_model
+                return _set_model_cli(
+                    server, wanted, providers, provider_id, model, can_edit=can_edit
+                )
+
+            if args.edit:
+                provider_id = args.edit[0]
+                changes = {}
+                for pair in args.edit[1:]:
+                    key, sep, value = pair.partition("=")
+                    if not sep:
+                        print(f"не разобрал «{pair}»: жду поле=значение", file=sys.stderr)
+                        return 2
+                    changes[key.strip()] = value
+                return _edit_cli(
+                    server, wanted, providers, provider_id, changes, can_edit=can_edit
                 )
 
             if args.serve:

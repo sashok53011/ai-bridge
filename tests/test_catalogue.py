@@ -4,10 +4,13 @@ from core.catalogue import (
     STATUS_ACTIVE,
     STATUS_DEAD,
     STATUS_DISABLED,
+    can_edit_model,
+    edit_entry,
     next_priority,
     normalize,
     propose,
     reconcile,
+    set_model,
     view,
     with_local_enabled,
 )
@@ -240,3 +243,81 @@ class TestNextPriority:
 
     def test_a_garbage_priority_does_not_crash(self) -> None:
         assert next_priority([_entry(fallbackPriority="много")]) == 1
+
+
+class TestSetModel:
+    def test_the_model_changes_in_place(self) -> None:
+        updated, error = set_model([_entry()], "ollama", "qwen3:0.6b")
+        assert error == ""
+        assert updated[0]["model"] == "qwen3:0.6b"
+
+    def test_other_entries_stay_untouched(self) -> None:
+        other = _entry(id="openai", name="OpenAI", url="https://o/v1", model="gpt-4o")
+        updated, _ = set_model([_entry(), other], "ollama", "qwen3")
+        assert updated[1]["model"] == "gpt-4o"
+
+    def test_an_unknown_provider_is_refused(self) -> None:
+        updated, error = set_model([_entry()], "нет", "m")
+        assert updated is None and "не найден" in error
+
+    def test_an_empty_model_is_refused(self) -> None:
+        updated, error = set_model([_entry()], "ollama", "   ")
+        assert updated is None and "пустой" in error
+
+
+class TestCanEditModel:
+    def test_the_superuser_edits_anything(self) -> None:
+        assert can_edit_model(_entry(origin="admin"), is_superuser=True) is True
+
+    def test_a_user_edits_only_own_proposal(self) -> None:
+        assert can_edit_model(_entry(origin="user", mine=True), is_superuser=False) is True
+        assert can_edit_model(_entry(origin="admin"), is_superuser=False) is False
+        assert can_edit_model(_entry(origin="user", mine=False), is_superuser=False) is False
+
+
+class TestEditEntry:
+    def test_fields_change_and_the_rest_survives(self) -> None:
+        updated, error = edit_entry(
+            [_entry()], "ollama", {"name": "Мой Ollama", "model": "qwen3"}
+        )
+        assert error == ""
+        assert updated[0]["name"] == "Мой Ollama"
+        assert updated[0]["model"] == "qwen3"
+        assert updated[0]["url"] == "http://localhost:11434/v1"  # не тронуто
+
+    def test_empty_fields_do_not_erase(self) -> None:
+        """Пустой input в форме не должен стирать значение.
+
+        Пустые поля отбрасываются до правки; если пусто всё — правка
+        отклоняется, а не молча стирает запись.
+        """
+        updated, _ = edit_entry(
+            [_entry()], "ollama", {"model": "  ", "name": "  ", "url": ""}
+        )
+        assert updated is None  # всё пустое → отклонено, ничего не стёрто
+
+        updated, _ = edit_entry([_entry()], "ollama", {"model": "qwen3", "name": "  "})
+        assert updated[0]["name"] == "Ollama"  # пустое имя не тронуто
+        assert updated[0]["model"] == "qwen3"
+
+    def test_a_bad_priority_is_refused(self) -> None:
+        updated, error = edit_entry([_entry()], "ollama", {"fallbackPriority": "дорого"})
+        assert updated is None and "числом" in error
+
+    def test_a_negative_priority_clamps_to_zero(self) -> None:
+        updated, _ = edit_entry([_entry()], "ollama", {"fallbackPriority": "-5"})
+        assert updated[0]["fallbackPriority"] == 0
+
+    def test_erasing_the_name_is_refused(self) -> None:
+        """Без имени сервер отбросил бы запись — правка не должна это делать."""
+        updated, error = edit_entry([_entry()], "ollama", {"name": " x ", "url": "http://x/v1"})
+        assert error == ""  # name запасной, нормализация берёт id
+        assert updated[0]["name"] in ("x", "ollama")
+
+    def test_an_unknown_provider_is_refused(self) -> None:
+        updated, error = edit_entry([_entry()], "нет", {"model": "m"})
+        assert updated is None and "не найден" in error
+
+    def test_no_fields_is_refused(self) -> None:
+        updated, error = edit_entry([_entry()], "ollama", {})
+        assert updated is None and "нечего" in error

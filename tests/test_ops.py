@@ -193,6 +193,72 @@ class TestAdd:
         assert "занят" in result["error"]
 
 
+class TestSetModel:
+    def test_a_superuser_changes_the_catalogue_model(self, _device) -> None:
+        server = _Server(can_edit=True)
+        result = ops.set_model(
+            server.client, [_entry()], [_entry()], "ollama", "qwen3:0.6b", can_edit=True
+        )
+        assert result["code"] == 0
+        assert result["entry"]["model"] == "qwen3:0.6b"
+        # Каталог ушёл целиком с заменой.
+        sent = server.seen[-1]["body"]["providers"]
+        assert sent[0]["model"] == "qwen3:0.6b"
+
+    def test_a_user_changes_only_own_proposal(self, _device) -> None:
+        server = _Server(can_edit=False)
+        mine = _entry(id="mine", name="Моё", url="http://m/v1", origin="user", mine=True)
+        result = ops.set_model(
+            server.client, [mine], [mine], "mine", "qwen3", can_edit=False
+        )
+        assert result["code"] == 0
+
+    def test_a_user_cannot_change_a_catalogue_model(self, _device) -> None:
+        """Сервер бы проигнорировал — команда отказывается заранее."""
+        server = _Server(can_edit=False)
+        result = ops.set_model(
+            server.client, [_entry()], [_entry()], "ollama", "qwen3", can_edit=False
+        )
+        assert result["code"] == 2
+        assert "администратор" in result["error"]
+        assert server.seen == []
+
+
+class TestEdit:
+    def test_fields_change_on_the_server(self, _device) -> None:
+        server = _Server(can_edit=True)
+        result = ops.edit(
+            server.client, [_entry()], [_entry()], "ollama",
+            {"name": "Мой Ollama", "pricing": "$0.1/1M", "context": "128K"},
+            can_edit=True,
+        )
+        assert result["code"] == 0
+        sent = server.seen[-1]["body"]["providers"]
+        assert sent[0]["name"] == "Мой Ollama"
+        assert sent[0]["pricing"] == "$0.1/1M"
+        assert sent[0]["context"] == "128K"
+
+    def test_empty_form_fields_do_not_erase(self, _device) -> None:
+        server = _Server(can_edit=True)
+        ops.edit(
+            server.client, [_entry()], [_entry()], "ollama",
+            {"name": "Мой Ollama"}, can_edit=True,
+        )
+        result = ops.edit(
+            server.client, [_entry(name="Мой Ollama")], [_entry(name="Мой Ollama")],
+            "ollama", {"name": "  ", "model": "  "}, can_edit=True,
+        )
+        assert result["code"] == 2  # всё пустое → отклонено, ничего не стёрто
+
+    def test_a_user_cannot_edit_a_catalogue_entry(self, _device) -> None:
+        server = _Server(can_edit=False)
+        result = ops.edit(
+            server.client, [_entry()], [_entry()], "ollama", {"name": "X"}, can_edit=False
+        )
+        assert result["code"] == 2
+        assert server.seen == []
+
+
 class TestRemove:
     def test_a_superuser_sends_catalogue_without_the_entry(self, _device) -> None:
         server = _Server(can_edit=True)
