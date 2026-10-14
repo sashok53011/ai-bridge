@@ -218,6 +218,25 @@ class TestTokenLogin:
         with httpx.Client(base_url=base) as client:
             assert "Ollama" in client.get("/").text
 
+    def test_a_lan_address_is_welcome_behind_the_token(self, harness) -> None:
+        """За токеном хост не проверяется: LAN и Tailscale адреса — свои.
+
+        Настоящая защита здесь токен и SameSite=Strict, а не хост:
+        чужая страница не увидит ни cookie, ни данные.
+        """
+        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
+        with httpx.Client(base_url=base) as client:
+            response = client.get("/", headers={"Host": "100.101.102.103:8080"})
+        assert response.status_code == 200
+        assert "токен" in response.text  # форма входа, не каталог
+
+    def test_a_lan_address_is_still_refused_without_the_token(self, harness) -> None:
+        """Без токена хост-проверка остаётся: страница открыта — пускай loopback."""
+        _, _, _, base = harness([_entry()])  # require_token=False
+        with httpx.Client(base_url=base) as client:
+            response = client.get("/", headers={"Host": "192.168.1.5:8080"})
+        assert response.status_code == 403
+
 
 class TestProtection:
     def test_a_foreign_host_is_refused(self, harness) -> None:

@@ -260,6 +260,7 @@ def _serve(
     port: int,
     timeout: float,
     token: str,
+    page_auth: bool = False,
 ) -> int:
     """Запускает локальный HTTP-сервис: другие приложения ходят в приставку,
     а человек следит за ней со страницы в браузере.
@@ -297,13 +298,16 @@ def _serve(
         )
 
     is_loopback = host in ("127.0.0.1", "localhost", "::1")
+    # Страница закрыта токеном, если привязка не-loopback (LAN) или
+    # человек явно попросил (--page-auth — для туннелей и прокси,
+    # которые достучатся до loopback).
     ui = WebUi(
         entries,
         KeyStore(),
         server,
         can_edit=can_edit,
         bound_host=host,
-        require_token=not is_loopback and bool(token),
+        require_token=page_auth or not is_loopback,
         token=token,
     )
 
@@ -489,6 +493,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="отключить проверку токена на /v1/* (только для чисто локального использования)",
     )
+    parser.add_argument(
+        "--page-auth",
+        action="store_true",
+        help="требовать вход по токену на странице, даже на loopback (для туннелей и прокси)",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -560,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
                     port=args.port,
                     timeout=args.timeout,
                     token=token_value,
+                    page_auth=args.page_auth,
                 )
 
             if args.models:

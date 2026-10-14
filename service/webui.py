@@ -81,15 +81,25 @@ class WebUi:
     # ------------------------------------------------------------ защита
 
     def _refusal(self, handler: BaseHTTPRequestHandler) -> str | None:
-        """Причина отказать в обслуживании запроса, если она есть."""
-        host = (handler.headers.get("Host") or "").strip().lower()
-        hostname = host.split(":")[0].strip("[]")
-        allowed = {"127.0.0.1", "localhost", "::1", self._bound_host.strip("[]").lower()}
-        if hostname not in allowed:
-            return f"неожиданный хост {hostname!r} — это может быть DNS-rebinding"
+        """Причина отказать в обслуживании запроса, если она есть.
+
+        Проверка хоста (анти-DNS-rebinding) нужна только там, где страница
+        открыта. Когда действует вход по токену, настоящая защита — сам
+        токен и cookie SameSite=Strict: чужая страница не увидит ни
+        сессии, ни данных, а Origin-проверка ниже от CSRF работает всегда.
+        Поэтому за токеном хост не проверяем — иначе закрылись бы
+        LAN-адреса и туннели, ради которых токен и включали.
+        """
+        if not self._require_token:
+            host = (handler.headers.get("Host") or "").strip().lower()
+            hostname = host.split(":")[0].strip("[]")
+            allowed = {"127.0.0.1", "localhost", "::1", self._bound_host.strip("[]").lower()}
+            if hostname not in allowed:
+                return f"неожиданный хост {hostname!r} — это может быть DNS-rebinding"
 
         origin = (handler.headers.get("Origin") or "").strip()
         if origin and origin != "null":
+            host = (handler.headers.get("Host") or "").strip().lower()
             origin_host = (urllib.parse.urlsplit(origin).netloc or "").lower()
             if origin_host != host:
                 return "запрос пришёл с чужого сайта и отклонён"
