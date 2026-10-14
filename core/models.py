@@ -53,6 +53,53 @@ def offers_model(configured: str, models: list[str]) -> bool:
     return any(model.endswith("/" + wanted) or model.endswith(":" + wanted) for model in lowered)
 
 
+def union_models(
+    configured: list[dict],
+    live_by_provider: dict[str, list[str]],
+) -> list[dict]:
+    """Объединённый список моделей приставки: настроенные + все live.
+
+    Настроенные модели включённых провайдеров идут **без префикса** —
+    это то, что клиенты используют по умолчанию. Остальное, что провайдер
+    реально отдаёт в своём /models, — с префиксом ``providerid/имя``,
+    который приставка понимает как «закрепи за этим провайдером».
+
+    Коллизии имени решаются в пользу настроенной модели; полные
+    дубликаты (один и тот же live у двух провайдеров) дедуплицируются.
+    """
+    result: list[dict] = []
+    seen: set[str] = set()
+    known_by_provider: dict[str, set[str]] = {}
+
+    # Настроенные — без префикса, они главные.
+    for entry in configured:
+        provider_id = str(entry.get("id") or "")
+        model = str(entry.get("model") or "").strip()
+        if not provider_id or not model:
+            continue
+        if model in seen:
+            continue
+        seen.add(model)
+        known_by_provider.setdefault(provider_id, set()).add(model.lower())
+        result.append({"id": model, "owned_by": provider_id})
+
+    # Live-списки — с префиксом, чтобы коллизии имён не смешивались.
+    for provider_id in sorted(live_by_provider):
+        known = known_by_provider.setdefault(provider_id, set())
+        for model in live_by_provider[provider_id]:
+            model = str(model).strip()
+            if not model or model.lower() in known:
+                continue
+            prefixed = f"{provider_id}/{model}"
+            if prefixed in seen:
+                continue
+            seen.add(prefixed)
+            known.add(model.lower())
+            result.append({"id": prefixed, "owned_by": provider_id})
+
+    return result
+
+
 def parse_ndjson(text: str) -> list[dict]:
     """Разбирает поток NDJSON (строка JSON на строку) — пригодится для
     прогресса загрузки локальных моделей и любых потоковых ответов."""

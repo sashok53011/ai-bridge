@@ -41,6 +41,7 @@ from providers.client import (
 from service import ops
 from storage.keys import KeyStore
 from storage.snapshot import Snapshot
+from storage import token as token_lib
 
 _MARKS = {
     STATUS_DEAD: "[нераб.]",
@@ -258,13 +259,15 @@ def _serve(
     host: str,
     port: int,
     timeout: float,
+    token: str,
 ) -> int:
     """Запускает локальный HTTP-сервис: другие приложения ходят в приставку,
     а человек следит за ней со страницы в браузере.
 
-    Каталог обновляется в фоне (раз в 5 минут), а переключатели читаются
+    Каталог обновляется в фоне (раз в 5 минут), переключатели читаются
     из снапшота на каждый запрос — `--enable/--disable` подхватывается
-    сразу, без перезапуска службы.
+    сразу, без перезапуска службы. Live-списки моделей кэшируются
+    шлюзом; `token` — токен приставки для /v1/* (пусто — без проверки).
     """
     import threading
     import time
@@ -293,16 +296,21 @@ def _serve(
             server_flags=state["server_flags"],
         )
 
+    is_loopback = host in ("127.0.0.1", "localhost", "::1")
     ui = WebUi(
         entries,
         KeyStore(),
         server,
         can_edit=can_edit,
         bound_host=host,
+        require_token=not is_loopback and bool(token),
+        token=token,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
-    return run_server(entries, KeyStore(), host=host, port=port, timeout=timeout, ui=ui)
+    return run_server(
+        entries, KeyStore(), host=host, port=port, timeout=timeout, ui=ui, token=token
+    )
 
 
 def _remove_provider(
@@ -471,9 +479,28 @@ def main(argv: list[str] | None = None) -> int:
         metavar="СЕК",
         help="таймаут запроса к провайдеру, по умолчанию 180",
     )
+    parser.add_argument(
+        "--token",
+        action="store_true",
+        help="показать действующий токен приставки (для /v1/* и страницы на LAN)",
+    )
+    parser.add_argument(
+        "--no-auth",
+        action="store_true",
+        help="отключить проверку токена на /v1/* (только для чисто локального использования)",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings()
+
+    if args.token:
+        token, source = token_lib.resolve(
+            from_env=os.environ.get("AI_BRIDGE_TOKEN", ""),
+            from_config=str(settings.get("token", "")),
+        )
+        print(token)
+        print(f"источник: {source}", file=sys.stderr)
+        return 0
     email = os.environ.get("AI_BRIDGE_EMAIL", "") or str(settings.get("email", ""))
     password = os.environ.get("AI_BRIDGE_PASSWORD", "") or str(settings.get("password", ""))
     if not email or not password:
@@ -520,6 +547,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
             if args.serve:
+                token_value = "" if args.no_auth else token_lib.resolve(
+                    from_env=os.environ.get("AI_BRIDGE_TOKEN", ""),
+                    from_config=str(settings.get("token", "")),
+                )[0]
                 return _serve(
                     server,
                     providers,
@@ -528,6 +559,7 @@ def main(argv: list[str] | None = None) -> int:
                     host=args.host,
                     port=args.port,
                     timeout=args.timeout,
+                    token=token_value,
                 )
 
             if args.models:

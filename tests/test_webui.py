@@ -167,6 +167,58 @@ def _fake_provider(url: str, *, models=None, **kwargs) -> Provider:
     return Provider(url, transport=httpx.MockTransport(handler), **kwargs)
 
 
+class TestTokenLogin:
+    """На не-loopback адресе страница требует вход по токену."""
+
+    def test_a_fresh_browser_sees_the_login_form(self, harness) -> None:
+        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
+        with httpx.Client(base_url=base) as client:
+            response = client.get("/")
+        assert response.status_code == 200
+        assert "токен" in response.text
+        assert "Ollama" not in response.text  # каталог до входа не показывается
+
+    def test_a_wrong_token_stays_out(self, harness) -> None:
+        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
+        with httpx.Client(base_url=base, follow_redirects=False) as client:
+            response = client.post("/login", data={"token": "wrong"})
+        assert response.status_code == 200
+        assert "неверный токен" in response.text
+
+    def test_the_right_token_sets_a_cookie_and_opens_the_catalogue(self, harness) -> None:
+        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
+        with httpx.Client(base_url=base, follow_redirects=False) as client:
+            response = client.post("/login", data={"token": "s3cret"})
+            assert response.status_code == 303
+            cookie = response.headers.get("set-cookie", "")
+            assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
+
+            page = client.get("/", headers={"Cookie": f"ai_bridge_session=s3cret"})
+            assert "Ollama" in page.text
+
+    def test_actions_need_the_session_too(self, harness) -> None:
+        catalogue, _, _, base = harness([_entry()], require_token=True, token="s3cret")
+        with httpx.Client(base_url=base, follow_redirects=False) as client:
+            # Без cookie тумблер не проходит.
+            response = client.post("/toggle/ollama")
+            assert response.status_code == 200  # форма входа, не действие
+            assert catalogue()[0]["enabled"] is False
+
+            # С cookie — проходит.
+            client.post("/login", data={"token": "s3cret"})
+            response = client.post(
+                "/toggle/ollama", headers={"Cookie": "ai_bridge_session=s3cret"}
+            )
+            assert response.status_code == 303
+            assert catalogue()[0]["enabled"] is True
+
+    def test_loopback_page_stays_open(self, harness) -> None:
+        """На 127.0.0.1 вход не нужен — это ваша машина."""
+        _, _, _, base = harness([_entry()])  # require_token по умолчанию False
+        with httpx.Client(base_url=base) as client:
+            assert "Ollama" in client.get("/").text
+
+
 class TestProtection:
     def test_a_foreign_host_is_refused(self, harness) -> None:
         """DNS-rebinding: чужой домен, разрешившийся в 127.0.0.1."""

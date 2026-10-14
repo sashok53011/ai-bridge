@@ -1,6 +1,6 @@
 """Список моделей: два формата ответа и сравнение с настройкой."""
 
-from core.models import extract_models, offers_model, parse_ndjson
+from core.models import extract_models, offers_model, union_models, parse_ndjson
 
 
 class TestExtractModels:
@@ -49,3 +49,42 @@ class TestParseNdjson:
     def test_broken_lines_are_skipped(self) -> None:
         text = '{"status":"a"}\nэто не json\n\n{"status":"b"}\n'
         assert [event["status"] for event in parse_ndjson(text)] == ["a", "b"]
+
+
+class TestUnionModels:
+    def test_configured_models_come_without_a_prefix(self) -> None:
+        union = union_models(
+            [{"id": "ollama", "model": "llama3.2"}],
+            {"ollama": ["qwen3", "llama3.2"]},
+        )
+        assert {"id": "llama3.2", "owned_by": "ollama"} in union
+        # Настроенная уже названа — live-дубликат не добавляется.
+        assert {"id": "ollama/llama3.2", "owned_by": "ollama"} not in union
+
+    def test_extra_live_models_carry_the_provider_prefix(self) -> None:
+        union = union_models(
+            [{"id": "ollama", "model": "llama3.2"}],
+            {"ollama": ["qwen3:8b"]},
+        )
+        assert {"id": "ollama/qwen3:8b", "owned_by": "ollama"} in union
+
+    def test_two_providers_with_the_same_model_do_not_collide(self) -> None:
+        union = union_models(
+            [{"id": "a", "model": "shared"}],
+            {"a": [], "b": ["shared"]},
+        )
+        ids = [entry["id"] for entry in union]
+        assert "shared" in ids
+        assert "b/shared" in ids
+
+    def test_the_result_is_sorted_and_deduplicated(self) -> None:
+        union = union_models(
+            [{"id": "x", "model": "m1"}],
+            {"x": ["m1", "m2"], "y": ["m2"]},
+        )
+        ids = [entry["id"] for entry in union]
+        assert ids == sorted(set(ids))
+        assert len(ids) == len(set(ids))
+
+    def test_an_empty_provider_gets_nothing(self) -> None:
+        assert union_models([{"id": "x", "model": ""}], {}) == []

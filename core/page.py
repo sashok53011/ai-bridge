@@ -157,6 +157,40 @@ def catalogue_page(
 </html>"""
 
 
+def login_page(notice: str = "") -> str:
+    """Вход в приставку: форма с токеном.
+
+    Показывается, когда страница открыта на не-loopback адресе и браузер
+    ещё не ввёл токен. Токен один на приставку — тот же, что для /v1/*.
+    """
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — AI-приставка</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 30rem; padding: 0 1rem; }}
+  input {{ width: 100%; padding: .4rem; font-family: monospace; }}
+  button {{ margin-top: .6rem; padding: .3rem .9rem; }}
+  .role {{ opacity: .6; font-size: .85rem; }}
+  .notice {{ background: rgba(160, 48, 48, .15); padding: .5rem .8rem; border-radius: .4rem; }}
+</style>
+</head>
+<body>
+<h1>AI-приставка</h1>
+{notice_html}
+<form method="post" action="/login">
+  <input name="token" type="password" placeholder="токен приставки" autocomplete="current-password" autofocus>
+  <button type="submit">войти</button>
+</form>
+<p class="role">Токен: <code>uv run python app.py --token</code> — тот же, что для /v1/*.</p>
+</body>
+</html>"""
+
+
 def key_page(provider_name: str, *, has_key: bool, notice: str = "") -> str:
     """Ввод ключа одного провайдера: форма плюс честное предупреждение."""
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""

@@ -8,7 +8,9 @@
   * **Host** должен указывать на нас (loopback или адрес, на который
     привязан сервер) — иначе это DNS-rebinding чужого домена;
   * **Origin**, если браузер его прислал, должен совпадать с нашим
-    хостом — чужой сайт не может нажать наши кнопки.
+    хостом — чужой сайт не может нажать наши кнопки;
+  * если страница открыта на **не-loopback** адресе, действует вход по
+    токену (cookie HttpOnly, SameSite=Strict) — тот же токен, что для /v1/*.
 
 Ключи по-прежнему живут только на устройстве: страница их принимает
 и показывает лишь «задан/не задан».
@@ -20,10 +22,13 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from typing import Callable
 
-from core.page import catalogue_page, key_page
+from core.page import catalogue_page, key_page, login_page
 from providers.client import PocketBase, ServerError
 from service import ops
 from storage.keys import KeyStore
+
+#: Имя cookie входа; значение — токен приставки, срок — до закрытия браузера.
+_COOKIE_NAME = "ai_bridge_session"
 
 
 class WebUi:
@@ -32,7 +37,8 @@ class WebUi:
     ``entries_provider`` — свежий список провайдеров (каталог + флаги),
     ``keys`` — хранилище ключей, ``server`` — залогиненный клиент каталога
     (нужен, чтобы сохранять флаги и отчёты), ``bound_host`` — адрес
-    привязки службы для проверки Host.
+    привязки службы для проверки Host. ``require_token`` включает вход
+    по токену (для не-loopback привязки); ``token`` — сам токен.
     """
 
     def __init__(
@@ -44,6 +50,8 @@ class WebUi:
         can_edit: bool = False,
         bound_host: str = "127.0.0.1",
         make_provider=None,
+        require_token: bool = False,
+        token: str = "",
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -51,6 +59,24 @@ class WebUi:
         self._can_edit = can_edit
         self._bound_host = bound_host
         self._make_provider = make_provider
+        self._require_token = require_token
+        self._token = token
+
+    # ------------------------------------------------------------ вход
+
+    def _has_session(self, handler: BaseHTTPRequestHandler) -> bool:
+        """Есть ли в запросе валидная cookie входа."""
+        if not self._require_token:
+            return True
+        cookie = handler.headers.get("Cookie") or ""
+        for part in cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == _COOKIE_NAME and value == self._token:
+                return True
+        return False
+
+    def _login_form(self, handler: BaseHTTPRequestHandler, notice: str = "") -> None:
+        self._send_html(handler, 200, login_page(notice))
 
     # ------------------------------------------------------------ защита
 
@@ -120,6 +146,9 @@ class WebUi:
 
         clean = urllib.parse.urlsplit(path).path
         if clean in ("/", "/index.html"):
+            if not self._has_session(handler):
+                self._login_form(handler)
+                return
             self._send_html(
                 handler,
                 200,
@@ -131,6 +160,10 @@ class WebUi:
                     role="вы вошли как администратор" if self._can_edit else "",
                 ),
             )
+            return
+
+        if not self._has_session(handler):
+            self._login_form(handler)
             return
 
         if clean.startswith("/key/"):
@@ -171,6 +204,27 @@ class WebUi:
         def field(name: str) -> str:
             values = form.get(name, [""])
             return values[0].strip() if values else ""
+
+        # Вход: единственное действие, доступное без сессии.
+        if clean == "/login":
+            if self._token and field("token") == self._token:
+                # Cookie: HttpOnly (JS не читает), SameSite=Strict (чужие
+                # формы не пришлют), без срока — живёт до закрытия браузера.
+                handler.send_response(303)
+                handler.send_header("Location", "/")
+                handler.send_header(
+                    "Set-Cookie",
+                    f"{_COOKIE_NAME}={self._token}; Path=/; HttpOnly; SameSite=Strict",
+                )
+                handler.send_header("Content-Length", "0")
+                handler.end_headers()
+                return
+            self._login_form(handler, notice="неверный токен")
+            return
+
+        if not self._has_session(handler):
+            self._login_form(handler, notice="сначала войдите")
+            return
 
         if clean.startswith("/toggle/"):
             provider_id = urllib.parse.unquote(clean[len("/toggle/") :])

@@ -96,10 +96,10 @@ class TestRoute:
 
 
 class TestFallback:
-    def test_overload_and_server_faults_switch_the_provider(self) -> None:
-        for status in (429, 500, 502, 503, 504):
+    def test_overload_auth_faults_and_server_errors_switch_the_provider(self) -> None:
+        for status in (401, 403, 429, 500, 502, 503, 504):
             assert should_fallback(status) is True
 
     def test_a_bad_request_stays_where_it_is(self) -> None:
-        for status in (400, 401, 403, 404, 413, 422):
+        for status in (400, 404, 413, 422):
             assert should_fallback(status) is False

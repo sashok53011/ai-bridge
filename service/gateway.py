@@ -17,14 +17,23 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
+from core.models import union_models
 from core.routes import advertised_models, route, should_fallback
 from providers.client import Provider, ServerError
 
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
 _NO_MODELS = {"object": "list", "data": []}
+
+#: Как часто обновляются live-списки моделей (секунды).
+_MODELS_TTL = 600.0
+
+#: Таймаут вытягивания списка моделей у одного провайдера.
+_MODELS_FETCH_TIMEOUT = 8.0
 
 
 def _error_body(message: str, *, kind: str = "invalid_request_error", code: str | None = None) -> bytes:
@@ -59,7 +68,9 @@ class Gateway:
     ``entries_provider`` — вызываемое, отдающее свежий список провайдеров
     с переключателями (каталог + снапшот устройства). ``keys`` — хранилище
     ключей; ключ уходит только к провайдеру в его заголовке Authorization.
-    ``provider_factory`` подменяется в тестах.
+    ``token`` — токен самой приставки; если задан, все /v1/* маршруты
+    требуют его в Authorization: Bearer. ``provider_factory`` подменяется
+    в тестах.
     """
 
     def __init__(
@@ -69,16 +80,118 @@ class Gateway:
         *,
         timeout: float = 600.0,
         provider_factory: Callable[..., Provider] = Provider,
+        token: str = "",
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
         self._timeout = timeout
         self._provider_factory = provider_factory
+        self._token = token
+        # Кэш live-списков моделей: {провайдер: (время, [модели])}.
+        self._live_cache: dict[str, tuple[float, list[str]]] = {}
+        self._cache_lock = threading.Lock()
+
+    # ------------------------------------------------------------ аутентификация
+
+    @property
+    def auth_required(self) -> bool:
+        return bool(self._token)
+
+    def check_token(self, authorization_header: str) -> bool:
+        """Есть ли в заголовке нужный токен приставки.
+
+        Клиент шлёт Bearer-токен приставки (как в OpenRouter); настоящие
+        ключи провайдеров сюда не попадают — приставка подставляет их сама.
+        """
+        if not self._token:
+            return True
+        value = authorization_header.strip()
+        if value.lower().startswith("bearer "):
+            value = value[7:].strip()
+        return value == self._token
+
+    # ------------------------------------------------------------ live-модели
+
+    def _refresh_live_models(self, entries: list[dict]) -> None:
+        """Обновляет кэш live-списков для всех включённых провайдеров.
+
+        Вызывается из фонового потока; молчащий провайдер просто не
+        попадает в кэш — его настроенные модели всё равно в списке.
+        """
+        now = time.monotonic()
+        for entry in entries:
+            if not entry.get("enabled"):
+                continue
+            provider_id = entry["id"]
+            with self._cache_lock:
+                cached = self._live_cache.get(provider_id)
+                if cached and now - cached[0] < _MODELS_TTL:
+                    continue
+            try:
+                client = self._provider_factory(
+                    entry["url"], timeout=_MODELS_FETCH_TIMEOUT
+                )
+                key = self._keys.get(provider_id)
+                models = [m["name"] for m in client.fetch_models(key)]
+            except Exception:  # noqa: BLE001 — молчащий провайдер не крашит список
+                continue
+            with self._cache_lock:
+                self._live_cache[provider_id] = (now, models)
+
+    def start_refresh_loop(self, interval: float = _MODELS_TTL) -> None:
+        """Фоновое обновление live-списков: сразу и потом по интервалу."""
+
+        def loop() -> None:
+            while True:
+                try:
+                    self._refresh_live_models(self._entries_provider())
+                except Exception:  # noqa: BLE001 — фон не должен умирать
+                    pass
+                time.sleep(interval)
+
+        threading.Thread(target=loop, daemon=True).start()
 
     # ------------------------------------------------------------ решения
 
     def models_payload(self) -> dict:
-        models = advertised_models(self._entries_provider())
+        """Объединённый список: настроенные (без префикса) + live (с префиксом)."""
+        entries = self._entries_provider()
+        configured = advertised_models(entries)
+
+        # Берём кэш для включённых провайдеров; протухшее обновляем тут же
+        # (stale-while-revalidate): сеть не блокирует ответ.
+        live: dict[str, list[str]] = {}
+        now = time.monotonic()
+        stale: list[dict] = []
+        with self._cache_lock:
+            for entry in entries:
+                if not entry.get("enabled"):
+                    continue
+                cached = self._live_cache.get(entry["id"])
+                if cached and now - cached[0] < _MODELS_TTL:
+                    live[entry["id"]] = cached[1]
+                else:
+                    stale.append(entry)
+
+        # Протухшие обновляем синхронно — это быстро (короткий таймаут),
+        # и клиент получает полный список с первого раза.
+        for entry in stale:
+            try:
+                client = self._provider_factory(
+                    entry["url"], timeout=_MODELS_FETCH_TIMEOUT
+                )
+                key = self._keys.get(entry["id"])
+                models = [m["name"] for m in client.fetch_models(key)]
+                live[entry["id"]] = models
+                with self._cache_lock:
+                    self._live_cache[entry["id"]] = (now, models)
+            except Exception:  # noqa: BLE001 — молчащий провайдер не крашит список
+                continue
+
+        models = union_models(
+            [{"id": e["id"], "model": e.get("model", "")} for e in entries if e.get("enabled")],
+            live,
+        )
         return {"object": "list", "data": models} if models else _NO_MODELS
 
     def chat(self, body: bytes, requested_model: str):
@@ -187,6 +300,21 @@ class _Handler(BaseHTTPRequestHandler):
     def gateway(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
 
+    def _reject_unauthorized(self) -> None:
+        """401 в формате, который понимают OpenAI-клиенты."""
+        self._send(
+            401,
+            "application/json",
+            [
+                _error_body(
+                    "приставка ждёт свой токен в Authorization: Bearer <токен>; "
+                    "узнать его: uv run python app.py --token",
+                    kind="authentication_error",
+                    code="missing_token",
+                )
+            ],
+        )
+
     # ------------------------------------------------------------ ответы
 
     def _send(self, status: int, content_type: str, chunks) -> None:
@@ -243,6 +371,11 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - имя задано http.server
         path = self.path.split("?", 1)[0]
         if path in ("/v1/models", "/models"):
+            if self.gateway.auth_required and not self.gateway.check_token(
+                self.headers.get("Authorization", "")
+            ):
+                self._reject_unauthorized()
+                return
             self._send_json(200, self.gateway.models_payload())
             return
         if path.startswith("/v1/"):
@@ -270,6 +403,12 @@ class _Handler(BaseHTTPRequestHandler):
             if self._try_ui_post():
                 return
             self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
+            return
+
+        if self.gateway.auth_required and not self.gateway.check_token(
+            self.headers.get("Authorization", "")
+        ):
+            self._reject_unauthorized()
             return
 
         try:
@@ -304,20 +443,26 @@ def serve(
     timeout: float = 600.0,
     quiet: bool = False,
     ui=None,
+    token: str = "",
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
     ``ui`` — service.webui.WebUi: страница на том же порту, что и API.
-    Без неё служба отдаёт только OpenAI-совместимые маршруты.
+    ``token`` — токен приставки; если задан, /v1/* требует его в заголовке.
+    Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
-    gateway = Gateway(entries_provider, keys, timeout=timeout)
+    gateway = Gateway(entries_provider, keys, timeout=timeout, token=token)
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]
     server.ui = ui  # type: ignore[attr-defined]
 
+    gateway.start_refresh_loop()
+
     print(f"приставка слушает http://{host}:{port}/v1 (остановить — Ctrl+C)", flush=True)
     if ui is not None:
         print(f"страница: http://{host}:{port}/", flush=True)
+    if token:
+        print("для /v1/* нужен Authorization: Bearer <токен> (--token покажет)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
