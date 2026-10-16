@@ -69,12 +69,32 @@ def _server(entries: list[dict], *, can_edit: bool = False, make_provider=None):
 
     state = {"providers": [dict(entry) for entry in entries]}
     puts: list[list[dict]] = []
+    stats_payload = {
+        "ollama": {
+            "version": 1,
+            "providerId": "ollama",
+            "updated": "2026-10-16T18:00:00Z",
+            "models": {
+                "llama3.2": {
+                    "ok": 5,
+                    "fail": 2,
+                    "usersOk": 3,
+                    "usersFail": 1,
+                    "last": "2026-10-16T18:00:00Z",
+                    "lastStatus": "ok",
+                    "lastError": "",
+                }
+            },
+        }
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/auth-with-password"):
             return httpx.Response(
                 200, json={"token": "t", "record": {"id": "u1", "email": "a@b.c"}}
             )
+        if request.url.path == "/api/ai-stats" and request.method == "GET":
+            return httpx.Response(200, json=stats_payload)
         if request.url.path == "/api/ai-config" and request.method == "PUT":
             body = _json.loads(request.content)
             state["providers"] = list(body.get("providers") or [])
@@ -138,6 +158,14 @@ class TestPages:
             response = client.get("/")
         assert response.status_code == 200
         assert "Ollama" in response.text
+
+    def test_the_stats_column_shows_the_counter(self, harness) -> None:
+        """Колонка «проверки» живёт от GET /api/ai-stats, а не пустая вечно."""
+        _, _, _, base = harness([_entry()])
+        with httpx.Client(base_url=base) as client:
+            response = client.get("/")
+        # usersOk/usersFail («сколько человек»), а не сырые попытки ok/fail.
+        assert "3 (1)" in response.text
 
     def test_a_toggle_flips_the_flag_and_redirects(self, harness) -> None:
         catalogue, _, _, base = harness([_entry()])

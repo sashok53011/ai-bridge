@@ -159,6 +159,10 @@ class WebUi:
             if not self._has_session(handler):
                 self._login_form(handler)
                 return
+            try:
+                stats = self._server.fetch_stats()
+            except ServerError:
+                stats = {}  # счётчик — украшение; без него страница живёт
             self._send_html(
                 handler,
                 200,
@@ -166,6 +170,7 @@ class WebUi:
                     self._entries_provider(),
                     can_edit=self._can_edit,
                     keyed_ids=frozenset(self._keys.ids()),
+                    stats=stats,
                     notice=self._notice_from_query(path),
                     role="вы вошли как администратор" if self._can_edit else "",
                 ),
