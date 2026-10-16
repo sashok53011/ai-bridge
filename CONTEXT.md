@@ -220,17 +220,26 @@ core/page.py          страница приставки: чистые функ
 core/routes.py        маршрутизация: кому достаётся запрос, когда фолбэк
 core/stats.py         формат счётчика, его рост и колонка для каталога
 core/check.py         итог проверки: успех / поломка / «нужен ключ»
+core/autopilot.py     фоновая проверка: кого проверять, строка журнала раунда
 core/progress.py      поток загрузки: события слоей, общий прогресс
 providers/client.py   клиент PocketBase, клиент провайдера и прокси чата
-storage/keys.py       ключи провайдеров (~/.ai-bridge/keys.json)
+storage/keys.py       ключи провайдеров (~/.ai-bridge/keys.json, зашифрованы)
+storage/secretbox.py  шифрование ключей: AES-256-GCM, мастер-ключ в master.key
 storage/snapshot.py   снапшот каталога с флагами (там же, без ключей)
 storage/token.py      токен приставки (~/.ai-bridge/token)
 service/ops.py        действия приставки: ими делятся CLI и страница
+service/autopilot.py  поток автопроверки внутри --serve (--check-interval)
 service/gateway.py    OpenAI-совместимый шлюз: токен, кэш live-моделей,
                       фолбэк, SSE
 service/webui.py      маршруты страницы: Host/Origin + cookie-вход на LAN
-tests/                207 тестов чистых функций, клиента и страниц, <20 с
+tests/                252 теста чистых функций, клиента и страниц; офлайн, ~20 с
 ```
+
+Фоновая автопроверка (`--check-interval`, внутри `--serve`) проверяет
+включённых по расписанию и сама отчитывается в статистику сообщества;
+ключи на устройстве зашифрованы: `master.key` рядом с `keys.json`
+(на Windows — привязан к учётной записи через DPAPI). Потеря
+`master.key` — потеря ключей, ошибка об этом говорит прямо.
 
 Проверено на живом сервере: вход (включая суперпользо­вателя через
 `_superusers`), каталог (29 провайдеров), список моделей локального Ollama
@@ -294,8 +303,8 @@ JavaScript; чужие Host (DNS-rebinding) и Origin (страница-обма
    ни файлов, ни времени. Всё, что снаружи, — в `providers/` и `storage/`.
 2. **Тест на стадии отладки.** Нашёл баг — сначала пишешь воспроизводящий
    тест на реальных данных из логов, потом чинишь. Тест остаётся как регрессия.
-3. **Быстрая проверка.** `uv run pytest` — меньше секунды. Тесты по одному
-   файлу: `uv run pytest tests/test_catalogue.py`.
+3. **Быстрая проверка.** `uv run pytest` — офлайн, ~250 тестов, ~20 с.
+   Тесты по одному файлу: `uv run pytest tests/test_catalogue.py`.
 4. **UI в конце.** Интерфейс добавляется, когда известен весь набор функций,
    а не после каждой мелочи.
 5. **Секреты — только в окружении.** В репозиторий не попадают ни пароли,
@@ -319,6 +328,7 @@ uv run python app.py --edit ollama context=128K pricing='$0.1/1M' capabilities='
 uv run python app.py --serve          # служба: API на :8080/v1 + страница на :8080/
 uv run python app.py --token          # токен приставки (для /v1/* и страницы на LAN)
 uv run python app.py --serve --host 0.0.0.0 --page-auth  # доступ из LAN/Tailscale
+uv run python app.py --serve --check-interval 0  # без фоновой автопроверки
 ```
 
 Логин: переменные `AI_BRIDGE_EMAIL` и `AI_BRIDGE_PASSWORD`
