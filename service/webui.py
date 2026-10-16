@@ -305,6 +305,7 @@ class WebUi:
                 200,
                 key_page(
                     entry["name"],
+                    provider_id=provider_id,
                     has_key=bool(space.keys.get(provider_id)),
                     notice=notice if notice_bad else "",
                 ),

@@ -564,8 +564,13 @@ def test_page(
 </html>"""
 
 
-def key_page(provider_name: str, *, has_key: bool, notice: str = "") -> str:
-    """Ввод ключа одного провайдера: форма плюс честное предупреждение."""
+def key_page(
+    provider_name: str, *, provider_id: str, has_key: bool, notice: str = ""
+) -> str:
+    """Ввод ключа одного провайдера: форма плюс честное предупреждение.
+
+    В скрытом поле — id провайдера (не имя: сервер ищет запись по id).
+    """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     value_hint = "сейчас задан — можно оставить пустым, чтобы удалить" if has_key else ""
     return f"""<!doctype html>
@@ -587,7 +592,7 @@ def key_page(provider_name: str, *, has_key: bool, notice: str = "") -> str:
 <h1>Ключ: {escape(provider_name)}</h1>
 {notice_html}
 <form method="post" action="/key">
-  <input type="hidden" name="id" value="{escape(provider_name, quote=True)}">
+  <input type="hidden" name="id" value="{escape(provider_id, quote=True)}">
   <input name="api_key" type="password" placeholder="вставьте ключ" autocomplete="off" autofocus>
   <p class="role">{escape(value_hint)}</p>
   <button type="submit">сохранить</button>

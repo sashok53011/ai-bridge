@@ -151,18 +151,24 @@ class TestFacts:
 
 
 class TestKeyPage:
+    def test_the_form_carries_the_provider_id_not_its_name(self) -> None:
+        """Регрессия 17.10: скрытое поле хранило имя — ключ не сохранялся."""
+        page = key_page("Ollama", provider_id="ollama", has_key=False)
+        assert 'value="ollama"' in page
+        assert "Ollama" in page  # имя — в заголовке, для человека
+
     def test_the_page_asks_for_the_key(self) -> None:
-        page = key_page("OpenAI", has_key=False)
+        page = key_page("OpenAI", provider_id="openai", has_key=False)
         assert 'name="api_key"' in page
         assert "OpenAI" in page
 
     def test_a_set_key_is_admitted_without_being_shown(self) -> None:
-        page = key_page("OpenAI", has_key=True)
+        page = key_page("OpenAI", provider_id="openai", has_key=True)
         assert "задан" in page
         assert "sk-" not in page  # сам ключ на страницу не попадает никогда
 
     def test_the_provider_name_is_escaped(self) -> None:
-        page = key_page('<b>жирный</b>', has_key=False)
+        page = key_page('<b>жирный</b>', provider_id="x", has_key=False)
         assert "<b>жирный</b>" not in page
 
 
