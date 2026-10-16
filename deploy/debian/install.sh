@@ -48,7 +48,7 @@ if [ ! -d "$APP_DIR/.venv" ]; then
 fi
 # --no-cache-dir: у служебного пользователя нет home для кэша pip.
 sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet --no-cache-dir --upgrade pip
-sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet --no-cache-dir httpx
+sudo -u "$SERVICE_USER" "$APP_DIR/.venv/bin/pip" install --quiet --no-cache-dir httpx cryptography
 
 echo "== 5/6: секреты"
 if [ ! -f /etc/ai-bridge.env ]; then

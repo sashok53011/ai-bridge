@@ -1,7 +1,5 @@
 """Снапшот на устройстве: полный список с флагами, без секретов."""
 
-import json
-
 from storage.keys import KeyStore
 from storage.snapshot import Snapshot
 
@@ -59,4 +57,5 @@ class TestSnapshot:
         snap.clear()
 
         assert keys.get("ollama") == "sk-123"
-        assert json.loads((tmp_path / "keys.json").read_text(encoding="utf-8")) == {"ollama": "sk-123"}
+        raw = (tmp_path / "keys.json").read_text(encoding="utf-8")
+        assert "sk-123" not in raw  # на диске ключ только в зашифрованном виде
