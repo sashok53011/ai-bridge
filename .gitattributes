@@ -1,0 +1,4 @@
+# Нормализация переносов: архивы и чекауты везде LF, даже на Windows.
+# Без этого `git archive` на Windows привозил CRLF на Linux, и bash на
+# сервере падал с «$'\r': command not found» ( deploy/debian/install.sh ).
+* text=auto eol=lf

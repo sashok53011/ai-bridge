@@ -5,7 +5,7 @@
 #
 # Копируй этот файл в config.toml и правь под себя.
 
-server = "https://app.devhorizon.online"
+server = "https://pb.devhorizon.online"
 
 # email = "ваша почта"
 # password = "ваш пароль"
