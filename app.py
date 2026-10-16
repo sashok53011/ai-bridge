@@ -268,6 +268,7 @@ def _serve(
     timeout: float,
     token: str,
     page_auth: bool = False,
+    check_interval: float = 3600.0,
 ) -> int:
     """Запускает локальный HTTP-сервис: другие приложения ходят в приставку,
     а человек следит за ней со страницы в браузере.
@@ -276,10 +277,13 @@ def _serve(
     из снапшота на каждый запрос — `--enable/--disable` подхватывается
     сразу, без перезапуска службы. Live-списки моделей кэшируются
     шлюзом; `token` — токен приставки для /v1/* (пусто — без проверки).
+    `check_interval > 0` включает фоновую проверку включённых: служба
+    сама отчитывается за сообщество (см. service/autopilot).
     """
     import threading
     import time
 
+    from service import autopilot
     from service.gateway import serve as run_server
     from service.webui import WebUi
 
@@ -319,6 +323,11 @@ def _serve(
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
+
+    if check_interval > 0:
+        autopilot.start(server, entries, KeyStore(), interval=check_interval)
+        print(f"фоновая проверка включённых: каждые {check_interval:.0f} с", flush=True)
+
     return run_server(
         entries, KeyStore(), host=host, port=port, timeout=timeout, ui=ui, token=token
     )
@@ -560,6 +569,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="требовать вход по токену на странице, даже на loopback (для туннелей и прокси)",
     )
+    parser.add_argument(
+        "--check-interval",
+        type=float,
+        default=3600.0,
+        metavar="СЕК",
+        help="фоновая проверка включённых каждые N секунд внутри --serve (0 — выключить), по умолчанию 3600",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings()
@@ -651,6 +667,7 @@ def main(argv: list[str] | None = None) -> int:
                     timeout=args.timeout,
                     token=token_value,
                     page_auth=args.page_auth,
+                    check_interval=args.check_interval,
                 )
 
             if args.models:

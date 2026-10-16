@@ -120,10 +120,14 @@ def check(
     key: str,
     *,
     make_provider=Provider,
+    counter: bool = True,
 ) -> dict:
     """Проверка провайдера: список моделей, итог, отчёт и счётчик.
 
     Ключ уходит только к провайдеру; серверу — лишь итог проверки.
+    ``counter=False`` пропускает лишний запрос за свежим счётчиком —
+    им пользуется фоновая проверка, где счётчику всё равно некому
+    смотреться (строку печатает сам раунд).
     """
     if provider.get("status") == STATUS_DEAD:
         return {
@@ -167,20 +171,20 @@ def check(
             report_error = str(exc)
             code = 1
 
-    counter = None
-    if outcome["report"] and report_error is None:
+    fresh_counter = None
+    if counter and outcome["report"] and report_error is None:
         try:
             counters = for_provider(server.fetch_stats(), provider["id"])
-            counter = format_stats(counters.get(outcome["model"]))
+            fresh_counter = format_stats(counters.get(outcome["model"]))
         except ServerError:
-            counter = None  # счётчик — украшение; проверка уже состоялась
+            fresh_counter = None  # счётчик — украшение; проверка уже состоялась
 
     return {
         "code": code,
         "dead": None,
         "outcome": outcome,
         "report_error": report_error,
-        "counter": counter,
+        "counter": fresh_counter,
     }
 
 
