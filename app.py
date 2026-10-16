@@ -39,7 +39,7 @@ from providers.client import (
     ServerError,
 )
 from service import ops
-from storage.keys import KeyStore
+from storage.keys import KeyStore, default_dir
 from storage.snapshot import Snapshot
 from storage import token as token_lib
 
@@ -269,23 +269,40 @@ def _serve(
     token: str,
     page_auth: bool = False,
     check_interval: float = 3600.0,
+    admin_email: str = "",
 ) -> int:
-    """Запускает локальный HTTP-сервис: другие приложения ходят в приставку,
-    а человек следит за ней со страницы в браузере.
+    """Запускает локальный HTTP-сервис: люди входят аккаунтами, приложения — токенами.
 
     Каталог обновляется в фоне (раз в 5 минут), переключатели читаются
-    из снапшота на каждый запрос — `--enable/--disable` подхватывается
-    сразу, без перезапуска службы. Live-списки моделей кэшируются
-    шлюзом; `token` — токен приставки для /v1/* (пусто — без проверки).
-    `check_interval > 0` включает фоновую проверку включённых: служба
-    сама отчитывается за сообщество (см. service/autopilot).
+    из личных снапшотов на каждый запрос — изменения подхватываются
+    сразу, без перезапуска. `token` — аварийный вход админа и его же
+    личный /v1-токен. `check_interval > 0` включает фоновую проверку
+    ключами админа. Страница требует входа со всех адресов (page_auth
+    теперь не нужен — вход обязателен всегда).
     """
     import threading
     import time
 
     from service import autopilot
     from service.gateway import serve as run_server
+    from service.space import Spaces, migrate_device_space
     from service.webui import WebUi
+    from storage.sessions import SessionStore
+    from storage.usertokens import UserTokens
+    from storage.users import UserStore
+
+    root = default_dir()
+    admin_id = server.user_id
+    spaces = Spaces(root, admin_id=admin_id)
+    sessions = SessionStore(root)
+    user_tokens = UserTokens(root)
+    users = UserStore(root)
+
+    if migrate_device_space(root, admin_id, user_tokens):
+        print("токен устройства принят на имя админа", flush=True)
+    admin = spaces.for_user(admin_id)
+    profile = users.get(admin_id) or {}
+    users.remember(admin_id, profile.get("email") or admin_email, role="admin")
 
     state = {"providers": providers, "server_flags": server_flags}
 
@@ -300,36 +317,59 @@ def _serve(
                 # Каталог — украшение; без него работают включённые записи.
                 print(f"каталог не обновился: {exc}", file=sys.stderr)
 
-    def entries() -> list[dict]:
+    def entries_for(user_id: str, *, is_admin: bool) -> list[dict]:
         return ops.merge_view(
             server,
             state["providers"],
-            can_edit=can_edit,
-            server_flags=state["server_flags"],
+            can_edit=is_admin,
+            server_flags=state["server_flags"] if is_admin else {},
+            snapshot=spaces.for_user(user_id).snapshot,
+            viewer_id=user_id,
         )
 
-    is_loopback = host in ("127.0.0.1", "localhost", "::1")
-    # Страница закрыта токеном, если привязка не-loopback (LAN) или
-    # человек явно попросил (--page-auth — для туннелей и прокси,
-    # которые достучатся до loopback).
+    def admin_entries() -> list[dict]:
+        return entries_for(admin_id, is_admin=True)
+
+    def context_for_user(user_id: str):
+        profile = users.get(user_id)
+        if profile is None:
+            return None
+        space = spaces.for_user(user_id)
+        is_admin = profile.get("role") == "admin"
+        return (lambda: entries_for(user_id, is_admin=is_admin)), space.keys
+
     ui = WebUi(
-        entries,
-        KeyStore(),
+        lambda: state["providers"],
         server,
-        can_edit=can_edit,
+        spaces=spaces,
+        sessions=sessions,
+        user_tokens=user_tokens,
+        users=users,
+        admin_id=admin_id,
+        device_token=token,
         bound_host=host,
-        require_token=page_auth or not is_loopback,
-        token=token,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
 
     if check_interval > 0:
-        autopilot.start(server, entries, KeyStore(), interval=check_interval)
-        print(f"фоновая проверка включённых: каждые {check_interval:.0f} с", flush=True)
+        autopilot.start(server, admin_entries, admin.keys, interval=check_interval)
+        print(
+            f"фоновая проверка включённых (ключи админа): каждые {check_interval:.0f} с",
+            flush=True,
+        )
 
+    print("вход на страницу — логин/пароль аккаунта (регистрация открыта)", flush=True)
     return run_server(
-        entries, KeyStore(), host=host, port=port, timeout=timeout, ui=ui, token=token
+        admin_entries,
+        admin.keys,
+        host=host,
+        port=port,
+        timeout=timeout,
+        ui=ui,
+        token=token,
+        user_tokens=user_tokens,
+        context_for_user=context_for_user,
     )
 
 
@@ -601,6 +641,9 @@ def main(argv: list[str] | None = None) -> int:
         with PocketBase(str(settings["server"])) as server:
             server.login(email, password)
             providers, updated, can_edit, server_flags = server.fetch_catalogue()
+            from storage.users import UserStore
+
+            UserStore().remember(server.user_id, email, role="admin" if can_edit else "user")
             wanted = _merge_and_store(
                 server, providers, can_edit=can_edit, server_flags=server_flags
             )
@@ -668,6 +711,7 @@ def main(argv: list[str] | None = None) -> int:
                     token=token_value,
                     page_auth=args.page_auth,
                     check_interval=args.check_interval,
+                    admin_email=email,
                 )
 
             if args.models:

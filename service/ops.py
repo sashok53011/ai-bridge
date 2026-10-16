@@ -47,19 +47,30 @@ def merge_view(
     *,
     can_edit: bool,
     server_flags: dict[str, bool],
+    snapshot: Snapshot | None = None,
+    viewer_id: str | None = None,
 ) -> list[dict]:
-    """Каталог глазами устройства: сервер + локальные флаги и выжившие.
+    """Каталог глазами одного человека: сервер + локальные флаги и выжившие.
 
+    ``snapshot`` — чей снапшот читать и писать (по умолчанию — общий
+    устройственный); ``viewer_id`` — кто смотрит (по умолчанию — тот,
+    за кем залогинен сервер): от этого зависит, какие записи «мои».
     Итог сохраняется в снапшот — перезапуск не теряет решений человека.
     """
-    local = Snapshot().load()
+    store = snapshot or Snapshot()
+    local = store.load()
     flags = {
         **server_flags,
         **{entry["id"]: bool(entry.get("enabled")) for entry in local},
     }
-    listed = view(providers, flags=flags, viewer_id=server.user_id, is_superuser=can_edit)
+    listed = view(
+        providers,
+        flags=flags,
+        viewer_id=viewer_id or server.user_id,
+        is_superuser=can_edit,
+    )
     wanted = with_local_enabled(listed, local)
-    Snapshot().save(wanted)
+    store.save(wanted)
     return wanted
 
 
@@ -70,8 +81,15 @@ def set_enabled(
     *,
     enabled: bool,
     can_edit: bool,
+    snapshot: Snapshot | None = None,
+    sync: bool = True,
 ) -> dict:
-    """Включает или выключает провайдеров. Возвращает итог."""
+    """Включает или выключает провайдеров. Возвращает итог.
+
+    ``sync=False`` — хранить флаг только на устройстве, не отправлять
+    на сервер (личные переключатели людей: их серверные флаги — это
+    история старого проекта, а здесь человек и так вошёл своим аккаунтом).
+    """
     by_id = {entry["id"]: entry for entry in wanted}
     unknown = [provider_id for provider_id in ids if provider_id not in by_id]
     if unknown:
@@ -92,7 +110,7 @@ def set_enabled(
         }
         for entry in wanted
     ]
-    Snapshot().save(merged)
+    (snapshot or Snapshot()).save(merged)
     changed = [(provider_id, by_id[provider_id]["name"]) for provider_id in ids]
 
     if can_edit:
@@ -101,6 +119,14 @@ def set_enabled(
             "changed": changed,
             "error": None,
             "note": "переключатель сохранён на устройстве: у суперпользо­вателя сервер флаги не хранит",
+        }
+
+    if not sync:
+        return {
+            "code": 0,
+            "changed": changed,
+            "error": None,
+            "note": "переключатель сохранён в вашем пространстве",
         }
 
     try:
@@ -122,13 +148,16 @@ def check(
     *,
     make_provider=Provider,
     counter: bool = True,
+    report_for: str = "",
 ) -> dict:
     """Проверка провайдера: список моделей, итог, отчёт и счётчик.
 
     Ключ уходит только к провайдеру; серверу — лишь итог проверки.
     ``counter=False`` пропускает лишний запрос за свежим счётчиком —
     им пользуется фоновая проверка, где счётчику всё равно некому
-    смотреться (строку печатает сам раунд).
+    смотреться (строку печатает сам раунд). ``report_for`` — чьим
+    именем записать успех в статистику сообщества (по умолчанию —
+    суперпользо­ватель приставки).
     """
     if provider.get("status") == STATUS_DEAD:
         return {
@@ -167,6 +196,7 @@ def check(
                 model=outcome["model"],
                 ok=outcome["ok"],
                 error=outcome["error"],
+                for_user=report_for,
             )
         except ServerError as exc:
             report_error = str(exc)
@@ -203,6 +233,8 @@ def add(
     key_url: str = "",
     key: str = "",
     can_edit: bool,
+    snapshot: Snapshot | None = None,
+    key_store: KeyStore | None = None,
 ) -> dict:
     """Добавляет провайдера: человеку — предложение, админу — в каталог.
 
@@ -255,9 +287,9 @@ def add(
         entry["mine"] = False
 
     merged = [*wanted, entry]
-    Snapshot().save(merged)
+    (snapshot or Snapshot()).save(merged)
     if key:
-        KeyStore().set(entry["id"], key)
+        (key_store or KeyStore()).set(entry["id"], key)
 
     try:
         if can_edit:
@@ -284,6 +316,7 @@ def set_model(
     model: str,
     *,
     can_edit: bool,
+    snapshot: Snapshot | None = None,
 ) -> dict:
     """Меняет настроенную модель: админ — в каталоге, человек — в своём.
 
@@ -310,7 +343,7 @@ def set_model(
         return {"code": 2, "error": error, "entry": None}
 
     new_entry = next(entry for entry in updated if entry["id"] == provider_id)
-    Snapshot().save(updated)
+    (snapshot or Snapshot()).save(updated)
 
     try:
         if can_edit:
@@ -344,6 +377,7 @@ def edit(
     changes: dict,
     *,
     can_edit: bool,
+    snapshot: Snapshot | None = None,
 ) -> dict:
     """Правит определение провайдера: админ — каталог, человек — своё предложение.
 
@@ -370,7 +404,7 @@ def edit(
         return {"code": 2, "error": error, "entry": None}
 
     new_entry = next(entry for entry in updated if entry["id"] == provider_id)
-    Snapshot().save(updated)
+    (snapshot or Snapshot()).save(updated)
 
     try:
         if can_edit:
@@ -403,6 +437,8 @@ def remove(
     provider_id: str,
     *,
     can_edit: bool,
+    snapshot: Snapshot | None = None,
+    key_store: KeyStore | None = None,
 ) -> dict:
     """Убирает провайдера: админу — из каталога в корзину, человеку — своё.
 
@@ -426,8 +462,8 @@ def remove(
         }
 
     remaining = [entry for entry in wanted if entry["id"] != provider_id]
-    Snapshot().save(remaining)
-    KeyStore().delete(provider_id)
+    (snapshot or Snapshot()).save(remaining)
+    (key_store or KeyStore()).delete(provider_id)
 
     try:
         if can_edit:

@@ -4,7 +4,18 @@
 с прямыми скобками или адрес с кавычкой не должны ломать страницу.
 """
 
-from core.page import catalogue_page, edit_page, key_page
+from core.page import (
+    catalogue_page,
+    edit_page,
+    key_page,
+    login_page,
+    pick_model_page,
+    signup_page,
+    test_page as chat_test_page,  # имя «test_*» путает pytest с тестами
+    token_created_page,
+    tokens_page,
+    users_page,
+)
 
 
 def _entry(**kwargs) -> dict:
@@ -47,26 +58,37 @@ class TestCataloguePage:
         page = catalogue_page([_entry(url='http://x/" onmouseover="evil()')])
         assert 'onmouseover="evil()' not in page
 
-    def test_the_add_form_asks_for_name_url_and_model(self) -> None:
-        page = catalogue_page([_entry()])
+    def test_the_add_form_is_an_admin_affair(self) -> None:
+        page = catalogue_page([_entry()], can_edit=True)
         assert 'action="/add"' in page
         assert 'name="name"' in page
         assert 'name="url"' in page
         assert 'name="model"' in page
         assert 'name="api_key"' in page
+        # Человек управляет лишь своим пространством — каталог не его.
+        assert 'action="/add"' not in catalogue_page([_entry()], can_edit=False)
 
     def test_every_row_can_be_toggled_and_checked(self) -> None:
         page = catalogue_page([_entry()])
         assert 'action="/toggle/ollama"' in page
         assert 'action="/check/ollama"' in page
 
+    def test_every_row_offers_the_personal_tools(self) -> None:
+        """Каждому доступны ключ, выбор своей модели и тест-чат."""
+        page = catalogue_page([_entry()], can_edit=False)
+        assert 'href="/key/ollama"' in page
+        assert 'href="/pick/ollama"' in page
+        assert 'action="/test/ollama"' in page
+
     def test_an_admin_sees_remove_and_a_user_does_not(self) -> None:
         assert 'action="/remove/ollama"' in catalogue_page([_entry()], can_edit=True)
         assert 'action="/remove/ollama"' not in catalogue_page([_entry()], can_edit=False)
 
-    def test_a_user_sees_remove_for_own_proposal(self) -> None:
-        page = catalogue_page([_entry(origin="user", mine=True)])
-        assert 'action="/remove/ollama"' in page
+    def test_a_user_does_not_get_editing_even_for_their_proposal(self) -> None:
+        """Правка определений — привилегия админа; человек — своё пространство."""
+        page = catalogue_page([_entry(origin="user", mine=True)], can_edit=False)
+        assert 'action="/remove/ollama"' not in page
+        assert 'href="/edit/ollama"' not in page
 
     def test_the_key_column_says_only_what_is_true(self) -> None:
         assert ">задан<" in catalogue_page([_entry()], keyed_ids=frozenset({"ollama"}))
@@ -122,9 +144,10 @@ class TestFacts:
         page = catalogue_page([_entry(pricing="<img onerror=x>")])
         assert "<img onerror" not in page
 
-    def test_every_row_offers_editing(self) -> None:
-        page = catalogue_page([_entry()])
+    def test_every_row_offers_editing_to_the_admin(self) -> None:
+        page = catalogue_page([_entry()], can_edit=True)
         assert 'href="/edit/ollama"' in page
+        assert 'href="/edit/ollama"' not in catalogue_page([_entry()], can_edit=False)
 
 
 class TestKeyPage:
@@ -141,3 +164,74 @@ class TestKeyPage:
     def test_the_provider_name_is_escaped(self) -> None:
         page = key_page('<b>жирный</b>', has_key=False)
         assert "<b>жирный</b>" not in page
+
+
+class TestAuthPages:
+    def test_the_login_form_asks_for_email_and_password(self) -> None:
+        page = login_page()
+        assert 'name="email"' in page
+        assert 'name="password"' in page
+
+    def test_the_token_stays_as_an_emergency_way_in(self) -> None:
+        assert 'name="token"' in login_page()
+
+    def test_registration_is_offered_when_the_server_allows_it(self) -> None:
+        assert 'href="/signup"' in login_page()
+        assert 'href="/signup"' not in login_page(signup_open=False)
+
+    def test_the_signup_form_asks_to_repeat_the_password(self) -> None:
+        page = signup_page()
+        assert 'name="password"' in page
+        assert 'name="password2"' in page
+
+    def test_a_login_error_is_visible_and_escaped(self) -> None:
+        page = login_page(notice="нет <такого> аккаунта")
+        assert "нет &lt;такого&gt;" in page
+
+
+class TestTokensPage:
+    def test_a_token_is_shown_once_and_in_full(self) -> None:
+        page = token_created_page("uib-abcdef", "телефон")
+        assert "uib-abcdef" in page
+        assert "телефон" in page
+
+    def test_the_list_shows_tails_not_the_whole_token(self) -> None:
+        page = tokens_page([{"name": "телефон", "tail": "Ab12Cd", "created": "2026-10-16"}])
+        assert "Ab12Cd" in page
+        assert "uib-" not in page  # полный токен в список не возвращается
+        assert 'action="/tokens/revoke"' in page
+
+    def test_an_empty_token_list_says_so(self) -> None:
+        assert "токенов пока нет" in tokens_page([])
+
+
+class TestUsersPage:
+    def test_the_admin_sees_people_and_a_delete_button(self) -> None:
+        page = users_page(
+            [{"id": "u1", "email": "a@b.c", "role": "user", "lastLogin": "2026-10-16"}],
+            current_id="u0",
+        )
+        assert "a@b.c" in page
+        assert 'action="/users/delete"' in page
+
+    def test_the_admin_cannot_delete_themselves(self) -> None:
+        page = users_page([{"id": "u0", "email": "me@b.c", "role": "admin"}], current_id="u0")
+        assert 'action="/users/delete"' not in page
+
+
+class TestPickAndTestPages:
+    def test_picking_offers_models_with_the_current_one_checked(self) -> None:
+        page = pick_model_page("Ollama", "ollama", ["qwen3", "llama3"], current="llama3")
+        assert 'value="qwen3"' in page
+        assert "checked" in page
+        assert 'action="/pick/ollama"' in page
+
+    def test_picking_without_models_points_at_the_key(self) -> None:
+        page = pick_model_page("OpenAI", "openai", [])
+        assert "проверьте ключ" in page
+
+    def test_a_test_page_shows_the_answer_or_the_error(self) -> None:
+        ok = chat_test_page("Ollama", "qwen3", "привет", answer="ок")
+        assert "ок" in ok
+        bad = chat_test_page("Ollama", "qwen3", "привет", error="нет ключа")
+        assert "нет ключа" in bad

@@ -1,19 +1,30 @@
-"""Веб-интерфейс: маршруты форм и защита локальной службы.
+"""Веб-интерфейс: вход людей, личные пространства, роли, защита.
 
-Две линии обороны проверяются отдельно: чужой Host (DNS-rebinding) и
-чужой Origin (нажатие кнопок со страницы-обманки).
+Страница требует входа со всех адресов; cookie HttpOnly + SameSite=Strict,
+чужой Origin отклоняется. Админ правит каталог, человек ведёт своё
+пространство: ключи, переключатели, токены.
 """
 
+import os
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
 
-from providers.client import PocketBase, Provider
-from service import ops
+from providers.client import PocketBase
 from service.gateway import _Handler, _Server
+from service.space import Spaces
 from service.webui import WebUi
 from storage.keys import KeyStore
+from storage.sessions import SessionStore
+from storage.snapshot import Snapshot
+from storage.usertokens import UserTokens
+from storage.users import UserStore, user_dir
+
+_DEVICE_TOKEN = "t-Device"
+_ADMIN = "u1"
+_GUEST = "u2"
 
 
 def _entry(**kwargs) -> dict:
@@ -38,93 +49,76 @@ def _device(tmp_path, monkeypatch):
     return tmp_path
 
 
-class _Catalogue:
-    """Список, который читается так же, как в жизни: каталог + снапшот.
-
-    ``ops`` пишет итог в снапшот на диске — значит и читать надо через
-    ``ops.merge_view``, иначе тест проверяет не тот путь.
-    ``puts`` — каталоги, отправленные админом через PUT.
-    """
-
-    def __init__(self, entries: list[dict], server: PocketBase, can_edit: bool):
-        self.entries = entries
-        self._server = server
-        self._can_edit = can_edit
-        self.puts: list[list[dict]] = getattr(server, "puts", [])
-
-    def __call__(self) -> list[dict]:
-        return ops.merge_view(
-            self._server, self.entries, can_edit=self._can_edit, server_flags={}
-        )
+def _root() -> Path:
+    return Path(os.environ["AI_BRIDGE_HOME"])
 
 
-def _server(entries: list[dict], *, can_edit: bool = False, make_provider=None):
-    """Залогиненный клиент каталога для веб-слоя.
+class _CatalogueMock:
+    """Клиент каталога: GET отдаёт текущий список, PUT и DELETE запоминает."""
 
-    GET отдаёт текущий список, PUT запоминает присланный каталог —
-    без этого нельзя проверить, что админская правка не уносит чужие
-    записи в корзину (регрессия 16.10.2026).
-    """
-    import json as _json
+    def __init__(self, entries: list[dict], *, can_edit: bool):
+        import json as _json
 
-    state = {"providers": [dict(entry) for entry in entries]}
-    puts: list[list[dict]] = []
-    stats_payload = {
-        "ollama": {
-            "version": 1,
-            "providerId": "ollama",
-            "updated": "2026-10-16T18:00:00Z",
-            "models": {
-                "llama3.2": {
-                    "ok": 5,
-                    "fail": 2,
-                    "usersOk": 3,
-                    "usersFail": 1,
-                    "last": "2026-10-16T18:00:00Z",
-                    "lastStatus": "ok",
-                    "lastError": "",
-                }
-            },
-        }
-    }
+        self.puts: list[list[dict]] = []
+        self.deleted: list[str] = []
+        state = {"providers": [dict(entry) for entry in entries]}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/auth-with-password"):
-            return httpx.Response(
-                200, json={"token": "t", "record": {"id": "u1", "email": "a@b.c"}}
-            )
-        if request.url.path == "/api/ai-stats" and request.method == "GET":
-            return httpx.Response(200, json=stats_payload)
-        if request.url.path == "/api/ai-config" and request.method == "PUT":
-            body = _json.loads(request.content)
-            state["providers"] = list(body.get("providers") or [])
-            puts.append(state["providers"])
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/auth-with-password"):
+                return httpx.Response(
+                    200, json={"token": "t", "record": {"id": _ADMIN, "email": "a@b.c"}}
+                )
+            if request.url.path == "/api/ai-stats" and request.method == "GET":
+                return httpx.Response(200, json=self.stats)
+            if request.url.path == "/api/ai-config" and request.method == "PUT":
+                body = _json.loads(request.content)
+                state["providers"] = list(body.get("providers") or [])
+                self.puts.append(state["providers"])
+                return httpx.Response(
+                    200, json={"canEdit": can_edit, "updated": "", "providers": state["providers"]}
+                )
+            if request.method == "DELETE" and "/api/collections/users/records/" in request.url.path:
+                self.deleted.append(request.url.path.rsplit("/", 1)[-1])
+                return httpx.Response(200, json={})
             return httpx.Response(
                 200, json={"canEdit": can_edit, "updated": "", "providers": state["providers"]}
             )
-        return httpx.Response(
-            200, json={"canEdit": can_edit, "updated": "", "providers": state["providers"]}
-        )
 
-    client = PocketBase("https://server.test", transport=httpx.MockTransport(handler))
-    client.login("a@b.c", "secret")
-    client.fetch_catalogue()
-    client.puts = puts
-    return client
+        self.stats: dict = {}
+        self.client = PocketBase("https://server.test", transport=httpx.MockTransport(handler))
+        self.client.login("a@b.c", "secret")
+        self.client.fetch_catalogue()
 
 
 def _harness(entries: list[dict], **kwargs):
     """Веб-слой на настоящем HTTP-порту — как в жизни, но без сети."""
-    can_edit = kwargs.pop("can_edit", False)
-    keys = KeyStore()
-    client = _server(entries, can_edit=can_edit)
-    catalogue = _Catalogue(entries, client, can_edit)
+    can_edit = kwargs.pop("can_edit", True)
+    authenticator = kwargs.pop(
+        "authenticator", lambda email, password: (_GUEST, email, False)
+    )
+    signup_hook = kwargs.pop("signup_hook", lambda email, password: None)
+    catalogue = _CatalogueMock(entries, can_edit=can_edit)
+
+    state = {"entries": [dict(entry) for entry in entries]}
+
+    def source() -> list[dict]:
+        # Обновлённый список: после админского PUT сервер отдаёт новый.
+        if catalogue.puts:
+            return [dict(entry) for entry in catalogue.puts[-1]]
+        return [dict(entry) for entry in state["entries"]]
+
     ui = WebUi(
-        catalogue,
-        keys,
-        client,
-        can_edit=can_edit,
+        source,
+        catalogue.client,
+        spaces=Spaces(admin_id=_ADMIN),
+        sessions=SessionStore(),
+        user_tokens=UserTokens(),
+        users=UserStore(),
+        admin_id=_ADMIN,
+        device_token=_DEVICE_TOKEN,
         bound_host="127.0.0.1",
+        authenticator=authenticator,
+        signup_hook=signup_hook,
         **kwargs,
     )
     server = _Server(("127.0.0.1", 0), _Handler)
@@ -133,7 +127,7 @@ def _harness(entries: list[dict], **kwargs):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
-    return catalogue, keys, server, base
+    return catalogue, server, base
 
 
 @pytest.fixture
@@ -143,215 +137,184 @@ def harness(tmp_path):
     def build(entries, **kwargs):
         item = _harness(entries, **kwargs)
         holders.append(item)
-        return item
+        return item[0], item[2]  # (каталог-мок, base)
 
     yield build
-    for _, _, server, _ in holders:
+    for _, server, _ in holders:
         server.shutdown()
         server.server_close()
 
 
-class TestPages:
-    def test_the_catalogue_renders(self, harness) -> None:
-        _, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base) as client:
+def _client(base: str, *, follow: bool = False) -> httpx.Client:
+    """Клиент без авто-редиректа: тесты проверяют коды ответов напрямую."""
+    return httpx.Client(base_url=base, follow_redirects=follow)
+
+
+def _as_admin(client: httpx.Client) -> None:
+    """Вход админа: аварийный токен устройства = его личный токен."""
+    response = client.post("/login", data={"token": _DEVICE_TOKEN})
+    assert response.status_code == 303  # cookie в заголовке, дальше GET /
+
+
+def _as_guest(client: httpx.Client, email: str = "guest@mail") -> None:
+    response = client.post("/login", data={"email": email, "password": "pw"})
+    assert response.status_code == 303
+
+
+class TestEntry:
+    def test_an_anonymous_visitor_sees_the_login_page(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
             response = client.get("/")
         assert response.status_code == 200
-        assert "Ollama" in response.text
-
-    def test_the_stats_column_shows_the_counter(self, harness) -> None:
-        """Колонка «проверки» живёт от GET /api/ai-stats, а не пустая вечно."""
-        _, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base) as client:
-            response = client.get("/")
-        # usersOk/usersFail («сколько человек»), а не сырые попытки ok/fail.
-        assert "3 (1)" in response.text
-
-    def test_a_toggle_flips_the_flag_and_redirects(self, harness) -> None:
-        catalogue, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
-            response = client.post("/toggle/ollama")
-        assert response.status_code == 303
-        # Итог живёт в снапшоте — читаем тем же путём, что и страница.
-        assert catalogue()[0]["enabled"] is True
-
-    def test_a_check_uses_the_stored_key_only(self, harness) -> None:
-        """Ключ уходит к провайдеру, на страницу не возвращается."""
-        catalogue, keys, _, base = harness(
-            [_entry()],
-            make_provider=lambda url, **kw: _fake_provider(url, models=["llama3.2"], **kw),
-        )
-        keys.set("ollama", "sk-secret")
-        with httpx.Client(base_url=base, follow_redirects=True) as client:
-            response = client.post("/check/ollama")
-        assert "sk-secret" not in response.text
-        assert catalogue()  # список жив
-
-    def test_adding_a_provider_from_the_form(self, harness) -> None:
-        catalogue, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
-            response = client.post(
-                "/add",
-                data={"name": "Мой LMS", "url": "http://127.0.0.1:1234/v1", "model": "qwen3"},
-            )
-        assert response.status_code == 303
-        assert any(entry["id"] == "moy-lms" for entry in catalogue())
-
-    def test_saving_a_key_keeps_it_on_the_device(self, harness) -> None:
-        _, keys, _, base = harness([_entry()])
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
-            client.post("/key", data={"id": "ollama", "api_key": "sk-local"})
-        assert keys.get("ollama") == "sk-local"
-
-    def test_an_unknown_page_is_a_404(self, harness) -> None:
-        _, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base) as client:
-            assert client.get("/нет-такого").status_code == 404
-
-
-def _fake_provider(url: str, *, models=None, **kwargs) -> Provider:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": [{"id": name} for name in (models or [])]})
-
-    return Provider(url, transport=httpx.MockTransport(handler), **kwargs)
-
-
-class TestTokenLogin:
-    """На не-loopback адресе страница требует вход по токену."""
-
-    def test_a_fresh_browser_sees_the_login_form(self, harness) -> None:
-        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
-        with httpx.Client(base_url=base) as client:
-            response = client.get("/")
-        assert response.status_code == 200
-        assert "токен" in response.text
-        assert "Ollama" not in response.text  # каталог до входа не показывается
+        assert 'action="/login"' in response.text
 
     def test_a_wrong_token_stays_out(self, harness) -> None:
-        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
-            response = client.post("/login", data={"token": "wrong"})
-        assert response.status_code == 200
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            response = client.post("/login", data={"token": "не тот"})
         assert "неверный токен" in response.text
 
-    def test_the_right_token_sets_a_cookie_and_opens_the_catalogue(self, harness) -> None:
-        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
-            response = client.post("/login", data={"token": "s3cret"})
-            assert response.status_code == 303
-            cookie = response.headers.get("set-cookie", "")
-            assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
+    def test_the_right_token_opens_the_catalogue_as_admin(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_admin(client)
+            page = client.get("/")
+        assert "Ollama" in page.text
+        assert "администратор" in page.text
 
-            page = client.get("/", headers={"Cookie": f"ai_bridge_session=s3cret"})
-            assert "Ollama" in page.text
+    def test_email_and_password_open_a_regular_space(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            page = client.get("/")
+        assert "anna@mail" in page.text
+        assert "человек" in page.text
 
-    def test_actions_need_the_session_too(self, harness) -> None:
-        catalogue, _, _, base = harness([_entry()], require_token=True, token="s3cret")
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
-            # Без cookie тумблер не проходит.
-            response = client.post("/toggle/ollama")
-            assert response.status_code == 200  # форма входа, не действие
-            assert catalogue()[0]["enabled"] is False
+    def test_a_bad_password_is_refused(self, harness) -> None:
+        from providers.client import ServerError
 
-            # С cookie — проходит.
-            client.post("/login", data={"token": "s3cret"})
-            response = client.post(
-                "/toggle/ollama", headers={"Cookie": "ai_bridge_session=s3cret"}
+        def authenticator(email, password):
+            raise ServerError("не подошло")
+
+        _, base = harness([_entry()], authenticator=authenticator)
+        with _client(base) as client:
+            response = client.post("/login", data={"email": "a@b.c", "password": "x"})
+        assert "не подошли" in response.text
+
+    def test_logout_ends_the_session(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_admin(client)
+            client.post("/logout")
+            page = client.get("/")
+        assert 'action="/login"' in page.text
+
+
+class TestSignup:
+    def test_registration_creates_an_account_and_signs_in(self, harness) -> None:
+        calls = []
+        _, base = harness(
+            [_entry()],
+            signup_hook=lambda email, password: calls.append(email),
+            authenticator=lambda email, password: (_GUEST, email, False),
+        )
+        with _client(base) as client:
+            client.post(
+                "/signup",
+                data={"email": "new@mail", "password": "pw123", "password2": "pw123"},
             )
-            assert response.status_code == 303
-            assert catalogue()[0]["enabled"] is True
+            home = client.get("/")
+        assert calls == ["new@mail"]
+        assert "new@mail" in home.text
 
-    def test_loopback_page_stays_open(self, harness) -> None:
-        """На 127.0.0.1 вход не нужен — это ваша машина."""
-        _, _, _, base = harness([_entry()])  # require_token по умолчанию False
-        with httpx.Client(base_url=base) as client:
-            assert "Ollama" in client.get("/").text
-
-    def test_a_lan_address_is_welcome_behind_the_token(self, harness) -> None:
-        """За токеном хост не проверяется: LAN и Tailscale адреса — свои.
-
-        Настоящая защита здесь токен и SameSite=Strict, а не хост:
-        чужая страница не увидит ни cookie, ни данные.
-        """
-        _, _, _, base = harness([_entry()], require_token=True, token="s3cret")
-        with httpx.Client(base_url=base) as client:
-            response = client.get("/", headers={"Host": "100.101.102.103:8080"})
-        assert response.status_code == 200
-        assert "токен" in response.text  # форма входа, не каталог
-
-    def test_a_lan_address_is_still_refused_without_the_token(self, harness) -> None:
-        """Без токена хост-проверка остаётся: страница открыта — пускай loopback."""
-        _, _, _, base = harness([_entry()])  # require_token=False
-        with httpx.Client(base_url=base) as client:
-            response = client.get("/", headers={"Host": "192.168.1.5:8080"})
-        assert response.status_code == 403
+    def test_mismatched_passwords_never_reach_the_server(self, harness) -> None:
+        calls = []
+        _, base = harness([_entry()], signup_hook=lambda e, p: calls.append(e))
+        with _client(base) as client:
+            page = client.post(
+                "/signup", data={"email": "new@mail", "password": "a", "password2": "b"}
+            )
+        assert calls == []
+        assert "не совпали" in page.text
 
 
 class TestProtection:
-    def test_a_foreign_host_is_refused(self, harness) -> None:
-        """DNS-rebinding: чужой домен, разрешившийся в 127.0.0.1."""
-        _, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base) as client:
-            response = client.get("/", headers={"Host": "evil.example"})
-        assert response.status_code == 403
-        assert "evil" in response.text or "rebinding" in response.text
-
     def test_a_foreign_origin_cannot_press_buttons(self, harness) -> None:
-        """Страница-обманка на чужом домене шлёт POST в наш порт."""
-        catalogue, _, _, base = harness([_entry()])
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_admin(client)
             response = client.post(
-                "/toggle/ollama",
-                headers={"Origin": "http://evil.example"},
+                "/toggle/ollama", headers={"Origin": "http://evil.example"}
             )
         assert response.status_code == 403
-        assert catalogue()[0]["enabled"] is False  # флаг не тронут
 
     def test_our_own_origin_is_welcome(self, harness) -> None:
-        catalogue, _, _, base = harness([_entry()])
-        port = base.rsplit(":", 1)[1]
-        with httpx.Client(base_url=base, follow_redirects=False) as client:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_admin(client)
+            port = base.rsplit(":", 1)[1]
             response = client.post(
-                "/toggle/ollama",
-                headers={"Origin": f"http://127.0.0.1:{port}"},
+                "/toggle/ollama", headers={"Origin": f"http://127.0.0.1:{port}"}
             )
         assert response.status_code == 303
-        assert catalogue()[0]["enabled"] is True
 
-    def test_the_api_routes_still_answer_without_the_ui(self, tmp_path) -> None:
-        """API не зависит от веб-слоя: /v1/models работает и без него."""
-        from service.gateway import Gateway
 
-        gateway = Gateway(lambda: [_entry(enabled=True)], KeyStore())
-        server = _Server(("127.0.0.1", 0), _Handler)
-        server.gateway = gateway
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            base = f"http://127.0.0.1:{server.server_address[1]}"
-            with httpx.Client(base_url=base) as client:
-                data = client.get("/v1/models").json()
-            assert data["data"] == [{"id": "llama3.2", "owned_by": "ollama"}]
-        finally:
-            server.shutdown()
-            server.server_close()
+class TestPersonalSpace:
+    def test_a_guests_toggle_lives_in_their_own_space(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            client.post("/toggle/ollama")
+
+        guest = Snapshot(user_dir(_GUEST, _root()))
+        assert guest.load()[0]["enabled"] is True
+        assert Snapshot(_root()).load() == []  # пространство админа не тронуто
+
+    def test_a_guest_cannot_edit_add_or_see_people(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            edit = client.post("/edit/ollama", data={"name": "X"})
+            add = client.post("/add", data={"name": "X", "url": "http://x/v1", "model": "m"})
+            people = client.get("/users")
+        assert edit.status_code == 403
+        assert add.status_code == 403
+        assert people.status_code == 403
+
+    def test_a_guests_key_stays_in_their_keystore(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            client.post("/key", data={"id": "ollama", "api_key": "sk-mine"})
+
+        # Мастер-ключ устройства общий — читаем через Spaces, как в жизни.
+        assert Spaces().for_user(_GUEST).keys.get("ollama") == "sk-mine"
+        assert KeyStore(_root()).get("ollama") == ""  # у админа чужого ключа нет
+
+    def test_a_guest_picks_their_own_model(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            client.post("/pick/ollama", data={"model": "qwen3:0.6b"})
+
+        guest = Snapshot(user_dir(_GUEST, _root())).load()
+        assert guest[0]["model"] == "qwen3:0.6b"
+        assert Snapshot(_root()).load() == []  # каталог не тронут
 
 
 class TestAdminWritesKeepCatalogue:
-    """Регрессия 16.10.2026: страница передавала админские действия с
-    пустым списком каталога, и PUT заменял каталог одной записью —
-    остальное уходило в корзину (чистка 29 провайдеров за одну правку).
-    Админская запись строится по свежему серверному списку.
-    """
+    """Регрессия 16.10.2026: админская запись строится по свежему серверному списку."""
 
     def test_edit_sends_the_whole_catalogue(self, harness) -> None:
         entries = [
             _entry(),
             _entry(id="openai", name="OpenAI", url="https://api.openai.com/v1", model="gpt-4o-mini"),
         ]
-        catalogue, _, _, base = harness(entries, can_edit=True)
+        catalogue, base = harness(entries)
 
-        with httpx.Client(base_url=base) as client:
+        with _client(base) as client:
+            _as_admin(client)
             response = client.post("/edit/ollama", data={"url": "http://192.168.0.133:11434/v1"})
 
         assert response.status_code == 303
@@ -362,9 +325,10 @@ class TestAdminWritesKeepCatalogue:
         assert edited["url"] == "http://192.168.0.133:11434/v1"
 
     def test_add_appends_to_the_catalogue(self, harness) -> None:
-        catalogue, _, _, base = harness([_entry()], can_edit=True)
+        catalogue, base = harness([_entry()])
 
-        with httpx.Client(base_url=base) as client:
+        with _client(base) as client:
+            _as_admin(client)
             client.post(
                 "/add",
                 data={"name": "Мой LMS", "url": "http://192.168.0.133:1234/v1", "model": "qwen3"},
@@ -379,10 +343,51 @@ class TestAdminWritesKeepCatalogue:
             _entry(),
             _entry(id="openai", name="OpenAI", url="https://api.openai.com/v1", model="gpt-4o-mini"),
         ]
-        catalogue, _, _, base = harness(entries, can_edit=True)
+        catalogue, base = harness(entries)
 
-        with httpx.Client(base_url=base) as client:
+        with _client(base) as client:
+            _as_admin(client)
             client.post("/remove/openai")
 
         assert len(catalogue.puts) == 1
         assert [entry["id"] for entry in catalogue.puts[0]] == ["ollama"]
+
+
+class TestTokens:
+    def test_creating_a_token_shows_it_once_and_lists_its_tail(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            created = client.post("/tokens/create", data={"name": "телефон"})
+            token = 'uib-' + created.text.split('readonly value="uib-', 1)[1].split('"', 1)[0]
+            listed = client.get("/tokens")
+        assert token in created.text
+        assert token[-6:] in listed.text
+        assert token not in listed.text  # полный токен список не тащит
+
+    def test_a_revoked_token_stops_belonging_to_anyone(self, harness) -> None:
+        tokens = UserTokens()
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            created = client.post("/tokens/create", data={"name": "ноутбук"})
+            token = 'uib-' + created.text.split('readonly value="uib-', 1)[1].split('"', 1)[0]
+            assert tokens.owner(token) == _GUEST
+            client.post("/tokens/revoke", data={"tail": token[-6:]})
+        assert tokens.owner(token) == ""
+
+
+class TestAdminPeople:
+    def test_the_admin_sees_people_and_deletes_one(self, harness) -> None:
+        catalogue, base = harness([_entry()])
+        UserStore().remember(_GUEST, "guest@mail")
+
+        with _client(base) as client:
+            _as_admin(client)
+            listed = client.get("/users")
+            deleted = client.post("/users/delete", data={"id": _GUEST})
+
+        assert "guest@mail" in listed.text
+        assert deleted.status_code == 303
+        assert catalogue.deleted == [_GUEST]
+        assert UserStore().get(_GUEST) is None

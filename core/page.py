@@ -17,6 +17,36 @@ from core.catalogue import can_remove
 from core.stats import format_stats, for_line
 
 
+def _style() -> str:
+    """Общий вид страниц: одна тёмная/светлая тема на всех формах."""
+    return """  :root { color-scheme: light dark; }
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 70rem; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; }
+  input { padding: .35rem; }
+  button { padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; background: transparent; cursor: pointer; }
+  button.ghost { opacity: .8; }
+  button.danger { color: #c0392b; }
+  form { display: inline; }
+  .role { opacity: .6; font-size: .85rem; }
+  .notice { background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }
+  .notice.bad { background: rgba(160, 48, 48, .15); }
+  .nav { font-size: .9rem; }
+  .nav button.link { border: none; padding: 0; font-size: .9rem; text-decoration: underline; color: inherit; }
+  label { display: block; margin: .5rem 0; }"""
+
+
+def _nav(*, can_edit: bool) -> str:
+    """Верхняя строка: личные разделы и выход."""
+    links = ['<a href="/tokens">мои токены</a>']
+    if can_edit:
+        links.append('<a href="/users">пользователи</a>')
+    links.append(
+        '<form method="post" action="/logout" style="display:inline">'
+        '<button class="link" type="submit">выйти</button></form>'
+    )
+    return f'<p class="nav">{" · ".join(links)}</p>'
+
+
 def _badge(text: str, kind: str = "") -> str:
     cls = f"badge badge-{kind}" if kind else "badge"
     return f'<span class="{cls}">{escape(text)}</span>'
@@ -52,21 +82,27 @@ def _provider_row(
     ]
     facts_html = f'<span class="facts">{" · ".join(facts)}</span>' if facts else ""
 
-    # Действие над строкой: тумблер всегда, ключ и удаление — по смыслу.
+    # Действие над строкой. Админ правит определение (править/убрать),
+    # человек ведёт своё пространство: ключ, тест, своя модель.
     toggle_label = "выключить" if entry.get("enabled") else "включить"
+    entry_id = escape(entry["id"], quote=True)
     actions = [
-        f'<form method="post" action="/toggle/{escape(entry["id"], quote=True)}">'
+        f'<form method="post" action="/toggle/{entry_id}">'
         f'<button type="submit">{toggle_label}</button></form>',
-        f'<form method="post" action="/check/{escape(entry["id"], quote=True)}">'
+        f'<form method="post" action="/check/{entry_id}">'
         f'<button type="submit" class="ghost">проверить</button></form>',
-        f'<a class="btn-ghost" href="/edit/{escape(entry["id"], quote=True)}">'
-        f'править</a>',
+        f'<a class="btn-ghost" href="/key/{entry_id}">ключ</a>',
+        f'<a class="btn-ghost" href="/pick/{entry_id}">модель</a>',
+        f'<form method="post" action="/test/{entry_id}">'
+        f'<button type="submit" class="ghost">тест</button></form>',
     ]
-    if can_remove(entry, is_superuser=can_edit):
-        actions.append(
-            f'<form method="post" action="/remove/{escape(entry["id"], quote=True)}">'
-            f'<button type="submit" class="ghost danger">убрать</button></form>'
-        )
+    if can_edit:
+        actions.append(f'<a class="btn-ghost" href="/edit/{entry_id}">править</a>')
+        if can_remove(entry, is_superuser=can_edit):
+            actions.append(
+                f'<form method="post" action="/remove/{entry_id}">'
+                f'<button type="submit" class="ghost danger">убрать</button></form>'
+            )
 
     return (
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
@@ -87,6 +123,7 @@ def catalogue_page(
     can_edit: bool = False,
     keyed_ids: frozenset[str] = frozenset(),
     notice: str = "",
+    notice_bad: bool = False,
     role: str = "",
 ) -> str:
     """Весь каталог одной страницей: тумблеры, проверка, ключи, добавление."""
@@ -102,8 +139,28 @@ def catalogue_page(
     if not rows:
         rows = '<tr><td colspan="6" class="empty">каталог пуст</td></tr>'
 
-    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    notice_html = (
+        f'<p class="notice{" bad" if notice_bad else ""}">{escape(notice)}</p>'
+        if notice
+        else ""
+    )
     role_html = f'<p class="role">{escape(role)}</p>' if role else ""
+
+    # Добавление провайдеров — привилегия админа: человек управляет лишь
+    # своим пространством (ключ, модель, вкл).
+    add_html = ""
+    if can_edit:
+        add_html = """<details>
+<summary>Добавить провайдера</summary>
+<form method="post" action="/add">
+  <input name="name" placeholder="Имя" required>
+  <input name="url" type="url" placeholder="https://…/v1" required>
+  <input name="model" placeholder="модель" required>
+  <input name="api_key" type="password" placeholder="ключ (останется на устройстве)" autocomplete="off">
+  <button type="submit">добавить</button>
+</form>
+<p class="role">администратору — запись в каталог для всех.</p>
+</details>"""
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -118,7 +175,6 @@ def catalogue_page(
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
   th {{ font-size: .85rem; text-transform: lowercase; opacity: .7; }}
-  tr.on td {{ background: #2a80..; }}
   tr.on td {{ background: rgba(42, 128, 60, .10); }}
   .badge {{ font-size: .75rem; padding: .1rem .4rem; border-radius: .3rem; margin-left: .3rem; }}
   .badge-on {{ background: #2a803c33; }}
@@ -129,12 +185,15 @@ def catalogue_page(
   button {{ padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; background: transparent; cursor: pointer; }}
   button.ghost {{ opacity: .8; }}
   button.danger {{ color: #c0392b; }}
+  button.link {{ border: none; padding: 0; font-size: .9rem; text-decoration: underline; color: inherit; }}
   .actions {{ white-space: nowrap; }}
   .facts {{ display: block; font-size: .8em; opacity: .7; }}
   a.btn-ghost {{ display: inline-block; padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; text-decoration: none; color: inherit; }}
   .empty {{ opacity: .6; }}
   .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
+  .notice.bad {{ background: rgba(160, 48, 48, .15); }}
   .role {{ opacity: .6; font-size: .85rem; }}
+  .nav {{ font-size: .9rem; }}
   .add {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #8884; }}
   .add input {{ margin: .2rem; padding: .3rem; }}
   details {{ margin-top: 1rem; }}
@@ -143,6 +202,7 @@ def catalogue_page(
 </head>
 <body>
 <h1>AI-приставка</h1>
+{_nav(can_edit=can_edit)}
 {role_html}
 {notice_html}
 <table>
@@ -150,18 +210,7 @@ def catalogue_page(
 {rows}
 </table>
 
-<details>
-<summary>Добавить провайдера</summary>
-<form method="post" action="/add">
-  <input name="name" placeholder="Имя" required>
-  <input name="url" type="url" placeholder="https://…/v1" required>
-  <input name="model" placeholder="модель" required>
-  <input name="api_key" type="password" placeholder="ключ (останется на устройстве)" autocomplete="off">
-  <button type="submit">добавить</button>
-</form>
-<p class="role">обычному пользователю — предложение (видят только вы и администратор),
-администратору — запись в каталог для всех.</p>
-</details>
+{add_html}
 
 <p class="role">Ключи хранятся только на этом устройстве и уходят напрямую провайдеру —
 на сервер каталога они не попадают никогда.</p>
@@ -232,13 +281,21 @@ def edit_page(entry: dict, *, notice: str = "") -> str:
 </html>"""
 
 
-def login_page(notice: str = "") -> str:
-    """Вход в приставку: форма с токеном.
+def login_page(notice: str = "", *, signup_open: bool = True) -> str:
+    """Вход в приставку: логин/пароль аккаунта сервера каталога.
 
-    Показывается, когда страница открыта на не-loopback адресе и браузер
-    ещё не ввёл токен. Токен один на приставку — тот же, что для /v1/*.
+    Токен остаётся аварийным входом: если сервер каталога ляжет,
+    админ всё равно попадёт на страницу. Регистрация — открытая,
+    но ссылка показывается только когда сервер её вообще принимает.
     """
-    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    notice_html = (
+        f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
+    )
+    signup_html = (
+        '<p class="role">нет аккаунта? <a href="/signup">зарегистрироваться</a></p>'
+        if signup_open
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -246,22 +303,263 @@ def login_page(notice: str = "") -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Вход — AI-приставка</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 30rem; padding: 0 1rem; }}
-  input {{ width: 100%; padding: .4rem; font-family: monospace; }}
-  button {{ margin-top: .6rem; padding: .3rem .9rem; }}
-  .role {{ opacity: .6; font-size: .85rem; }}
-  .notice {{ background: rgba(160, 48, 48, .15); padding: .5rem .8rem; border-radius: .4rem; }}
+{_style()}
+  body {{ max-width: 30rem; }}
+  input {{ width: 100%; margin: .2rem 0; font-family: monospace; }}
 </style>
 </head>
 <body>
 <h1>AI-приставка</h1>
 {notice_html}
 <form method="post" action="/login">
-  <input name="token" type="password" placeholder="токен приставки" autocomplete="current-password" autofocus>
+  <input name="email" type="email" placeholder="почта" autocomplete="username" autofocus>
+  <input name="password" type="password" placeholder="пароль" autocomplete="current-password">
   <button type="submit">войти</button>
 </form>
-<p class="role">Токен: <code>uv run python app.py --token</code> — тот же, что для /v1/*.</p>
+{signup_html}
+<details>
+<summary class="role">вход по токену (аварийный)</summary>
+<form method="post" action="/login">
+  <input name="token" type="password" placeholder="токен приставки" autocomplete="off">
+  <button type="submit">войти по токену</button>
+</form>
+<p class="role">Токен: <code>uv run python app.py --token</code>.</p>
+</details>
+</body>
+</html>"""
+
+
+def signup_page(notice: str = "") -> str:
+    """Регистрация: открыта, без подтверждения почты — защита это модерация."""
+    notice_html = (
+        f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
+    )
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Регистрация — AI-приставка</title>
+<style>
+{_style()}
+  body {{ max-width: 30rem; }}
+  input {{ width: 100%; margin: .2rem 0; font-family: monospace; }}
+</style>
+</head>
+<body>
+<h1>Регистрация</h1>
+{notice_html}
+<form method="post" action="/signup">
+  <input name="email" type="email" placeholder="почта" autocomplete="username" autofocus required>
+  <input name="password" type="password" placeholder="пароль" autocomplete="new-password" required>
+  <input name="password2" type="password" placeholder="ещё раз пароль" autocomplete="new-password" required>
+  <button type="submit">создать аккаунт</button>
+  <a href="/login">назад ко входу</a>
+</form>
+<p class="role">Аккаунт открывает ваше пространство приставки: свои ключи,
+свои переключатели, свои токены для приложений.</p>
+</body>
+</html>"""
+
+
+def tokens_page(tokens: list[dict], *, notice: str = "") -> str:
+    """Мои токены: список хвостов, создание, отзыв."""
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    if tokens:
+        rows = "\n".join(
+            f'<tr><td>{escape(str(item.get("name") or ""))}</td>'
+            f'<td><code>…{escape(str(item.get("tail") or ""))}</code></td>'
+            f'<td>{escape(str(item.get("created") or "")[:10])}</td>'
+            f'<td><form method="post" action="/tokens/revoke">'
+            f'<input type="hidden" name="tail" value="{escape(str(item.get("tail") or ""), quote=True)}">'
+            f'<button type="submit" class="ghost danger">отозвать</button></form></td></tr>'
+            for item in tokens
+        )
+    else:
+        rows = '<tr><td colspan="4" class="empty">токенов пока нет</td></tr>'
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Мои токены — AI-приставка</title>
+<style>
+{_style()}
+  table {{ border-collapse: collapse; width: 100%; max-width: 40rem; }}
+  th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
+  input {{ margin: .2rem; }}
+</style>
+</head>
+<h1>Мои токены</h1>
+{_nav(can_edit=False)}
+{notice_html}
+<p class="role">Токен — это пропуск для ваших приложений (OpenWebUI, телефон):
+они шлют его в заголовке Authorization вместо логина и пароля.</p>
+<table>
+<tr><th>название</th><th>хвост</th><th>создан</th><th></th></tr>
+{rows}
+</table>
+<form method="post" action="/tokens/create">
+  <input name="name" placeholder="название: телефон, ноутбук…" required>
+  <button type="submit">создать токен</button>
+</form>
+<p class="role">После создания токен показывается один раз — скопируйте.</p>
+<p><a href="/">← назад в каталог</a></p>
+</body>
+</html>"""
+
+
+def token_created_page(token: str, name: str) -> str:
+    """Один раз показать новый токен: скопируй и уходи."""
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Новый токен — AI-приставка</title>
+<style>
+{_style()}
+  body {{ max-width: 40rem; }}
+  input {{ width: 100%; font-family: monospace; }}
+</style>
+</head>
+<h1>Новый токен: {escape(name)}</h1>
+<input readonly value="{escape(token, quote=True)}" onclick="this.select()">
+<p class="role">Скопируйте сейчас: показывается один раз. В приложении укажите
+адрес приставки <code>/v1</code> и этот токен в Authorization.</p>
+<p><a href="/tokens">← к токенам</a></p>
+</body>
+</html>"""
+
+
+def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> str:
+    """Пользователи приставки: список и удаление (модерация)."""
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    if users:
+        rows = "\n".join(
+            (
+                f'<tr><td>{escape(str(item.get("email") or ""))}</td>'
+                f'<td>{escape(str(item.get("role") or ""))}</td>'
+                f'<td>{escape(str(item.get("lastLogin") or "")[:10])}</td>'
+                + (
+                    "<td></td>"
+                    if str(item.get("id")) == current_id
+                    else f'<td><form method="post" action="/users/delete">'
+                    f'<input type="hidden" name="id" value="{escape(str(item.get("id")), quote=True)}">'
+                    f'<button type="submit" class="ghost danger">удалить</button></form></td>'
+                )
+                + "</tr>"
+            )
+            for item in users
+        )
+    else:
+        rows = '<tr><td colspan="4" class="empty">никто ещё не регистрировался</td></tr>'
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Пользователи — AI-приставка</title>
+<style>
+{_style()}
+  table {{ border-collapse: collapse; width: 100%; max-width: 40rem; }}
+  th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
+</style>
+</head>
+<h1>Пользователи</h1>
+{_nav(can_edit=True)}
+{notice_html}
+<p class="role">Регистрация открыта, защита — модерация: удалённый человек
+теряет доступ и своё пространство на этом устройстве.</p>
+<table>
+<tr><th>почта</th><th>роль</th><th>последний вход</th><th></th></tr>
+{rows}
+</table>
+<p><a href="/">← назад в каталог</a></p>
+</body>
+</html>"""
+
+
+def pick_model_page(
+    provider_name: str,
+    provider_id: str,
+    models: list[str],
+    *,
+    current: str = "",
+    notice: str = "",
+) -> str:
+    """Выбор своей модели провайдера: список живых моделей радиокнопками."""
+    notice_html = (
+        f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
+    )
+    if models:
+        rows = "\n".join(
+            f'<label><input type="radio" name="model" value="{escape(model, quote=True)}"'
+            f'{" checked" if model == current else ""}> {escape(model)}</label>'
+            for model in models
+        )
+        body = f"""<form method="post" action="/pick/{escape(provider_id, quote=True)}">
+  {rows}
+  <button type="submit">выбрать</button>
+</form>"""
+    else:
+        body = (
+            '<p class="role">модели не получились — проверьте ключ '
+            f'у «{escape(provider_name)}»</p>'
+        )
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Модель — {escape(provider_name)}</title>
+<style>
+{_style()}
+  body {{ max-width: 34rem; }}
+  label {{ display: block; margin: .2rem 0; }}
+</style>
+</head>
+<h1>Модель: {escape(provider_name)}</h1>
+<p class="role">Какую модель обслуживать по умолчанию — выбор ваш, личный.</p>
+{notice_html}
+{body}
+<p><a href="/">← назад в каталог</a></p>
+</body>
+</html>"""
+
+
+def test_page(
+    provider_name: str,
+    model: str,
+    question: str,
+    *,
+    answer: str = "",
+    error: str = "",
+) -> str:
+    """Итог тестового чата: один вопрос — один ответ или честная ошибка."""
+    notice_html = (
+        f'<p class="notice bad">{escape(error)}</p>' if error else ""
+    )
+    answer_html = f"<p>{escape(answer)}</p>" if answer else ""
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Тест — {escape(provider_name)}</title>
+<style>
+{_style()}
+  body {{ max-width: 34rem; }}
+  .q {{ opacity: .6; }}
+</style>
+</head>
+<h1>Тест: {escape(provider_name)} · {escape(model or "—")}</h1>
+<p class="role">Тест — настоящий, но крошечный запрос: на платной модели он
+стоит доли цента.</p>
+<p class="q">«{escape(question)}»</p>
+{notice_html}
+{answer_html}
+<p><a href="/">← назад в каталог</a></p>
 </body>
 </html>"""
 

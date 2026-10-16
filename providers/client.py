@@ -75,6 +75,27 @@ class PocketBase:
         )
         # Ответ уже сохранён в self._remember()
 
+    def signup(self, email: str, password: str) -> None:
+        """Регистрация нового человека (открытая, без подтверждения почты).
+
+        Сервер принимает её, только когда в настройках коллекции ``users``
+        разрешена регистрация; иначе — понятный отказ сервера.
+        """
+        self._request(
+            "POST",
+            "/api/collections/users/records",
+            json={
+                "email": email,
+                "password": password,
+                "passwordConfirm": password,
+            },
+            auth=False,
+        )
+
+    def delete_user(self, user_id: str) -> None:
+        """Удаляет аккаунт человека на сервере — модерация админом."""
+        self._request("DELETE", f"/api/collections/users/records/{user_id}")
+
     def _remember(self, body: dict[str, Any]) -> None:
         self._token = str(body.get("token") or "")
         record = body.get("record") or {}
@@ -157,18 +178,22 @@ class PocketBase:
         model: str,
         ok: bool,
         error: str = "",
+        for_user: str = "",
     ) -> dict[str, Any]:
-        """Отчёт о проверке: какая модель, получилось ли, и почему нет."""
-        return self._request(
-            "POST",
-            "/api/ai-stats",
-            json={
-                "providerId": provider_id,
-                "model": model,
-                "ok": ok,
-                "error": error,
-            },
-        )
+        """Отчёт о проверке: какая модель, получилось ли, и почему нет.
+
+        ``for_user`` — записать успех от имени этого человека (сервер
+        доверяет суперпользо­вателю приставки); пусто — от себя.
+        """
+        payload: dict[str, Any] = {
+            "providerId": provider_id,
+            "model": model,
+            "ok": ok,
+            "error": error,
+        }
+        if for_user:
+            payload["userId"] = for_user
+        return self._request("POST", "/api/ai-stats", json=payload)
 
     def fetch_stats(self) -> dict[str, Any]:
         """Свежая статистика по всем провайдерам: популярность и доступность."""

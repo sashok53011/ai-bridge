@@ -25,12 +25,20 @@ def default_dir() -> Path:
 
 
 class KeyStore:
-    """Ключи провайдеров в зашифрованном JSON-файле на диске."""
+    """Ключи провайдеров в зашифрованном JSON-файле на диске.
 
-    def __init__(self, directory: Path | None = None) -> None:
+    Формат v2: ``{"version": 2, "entries": {id: шифротекст}}``. Старый
+    формат с открытым JSON читается и при первой записи сам мигрирует;
+    потерянный мастер-ключ — громкая ошибка, а не молчаливое «ключей нет».
+
+    ``master`` — общий SecretBox устройства: у личных пространств людей
+    ключи свои, а мастер-ключ один на всё устройство.
+    """
+
+    def __init__(self, directory: Path | None = None, *, master: SecretBox | None = None) -> None:
         self.directory = directory or default_dir()
         self.path = self.directory / "keys.json"
-        self._box = SecretBox(self.directory)
+        self._box = master or SecretBox(self.directory)
         self._values, legacy = self._read()
         if legacy:
             # Открытый текст остался с прошлой версии — запечатываем сразу.
