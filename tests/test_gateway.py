@@ -13,6 +13,7 @@ import pytest
 
 from providers.client import Provider
 from service.gateway import Gateway, _Handler, _Server
+from service.gateway import test_chat as run_test_chat  # имя «test_*» путает pytest
 from storage.keys import KeyStore
 
 
@@ -314,3 +315,46 @@ class TestStreaming:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
         assert response.content == sse
+
+
+class _FakeModel:
+    """Провайдер с заранее заданным ответом — для тестового чата."""
+
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.seen: dict = {}
+
+    def forward_chat(self, body, *, api_key, timeout, stream):
+        self.seen = json.loads(body)
+        return httpx.Response(200, json=self._payload)
+
+
+class TestTestChat:
+    def test_the_answer_comes_from_the_message_with_a_sane_budget(self) -> None:
+        fake = _FakeModel({"choices": [{"message": {"content": "работает"}}]})
+
+        result = run_test_chat(_entry(), "sk", make_provider=lambda url, **kw: fake)
+
+        assert result["answer"] == "работает"
+        assert result["error"] == ""
+        # Запас на «размышления» thinking-моделей: 16 токенов были мало.
+        assert fake.seen["max_tokens"] >= 100
+
+    def test_a_thinking_model_is_not_reported_as_empty(self) -> None:
+        """qwen3 тратит лимит на рассуждение — покажем его, а не пустоту."""
+        fake = _FakeModel(
+            {
+                "choices": [
+                    {"message": {"content": "", "reasoning": "всё в порядке, отвечу: работает"}}
+                ]
+            }
+        )
+
+        result = run_test_chat(_entry(), "sk", make_provider=lambda url, **kw: fake)
+
+        assert "рассуждала" in result["answer"]
+        assert "работает" in result["answer"]
+
+    def test_no_model_or_no_key_is_honest(self) -> None:
+        assert "не выбрана модель" in run_test_chat(_entry(model=""), "sk")["error"]
+        assert "нужен ключ" in run_test_chat(_entry(), "")["error"]

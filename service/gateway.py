@@ -58,7 +58,10 @@ def test_chat(
         {
             "model": entry.get("model") or "",
             "messages": [{"role": "user", "content": question}],
-            "max_tokens": 16,
+            # Лимит с запасом: модели с рассуждением (qwen3 и подобные)
+            # тратят часть бюджета на «размышления», и при крошечном
+            # лимите итог в content обрезается в пустоту.
+            "max_tokens": 256,
             "temperature": 0,
         },
         ensure_ascii=False,
@@ -87,10 +90,19 @@ def test_chat(
 
     try:
         data = response.json()
-        answer = data["choices"][0]["message"]["content"] or ""
+        message = data["choices"][0].get("message") or {}
+        answer = (message.get("content") or "").strip()
+        if not answer:
+            # Модель с рассуждением израсходовала лимит на «размышления» —
+            # покажем их, чем молча выдать пустоту.
+            thinking = (
+                message.get("reasoning") or message.get("reasoning_content") or ""
+            ).strip()
+            if thinking:
+                answer = f"(модель рассуждала, итог обрезан лимитом) {thinking[:200]}"
     except Exception:  # noqa: BLE001 — чужой формат ответа не должен ронять страницу
         answer = ""
-    return {"question": question, "answer": answer.strip() or "(пустой ответ)", "error": ""}
+    return {"question": question, "answer": answer or "(пустой ответ)", "error": ""}
 
 
 def _error_body(message: str, *, kind: str = "invalid_request_error", code: str | None = None) -> bytes:
