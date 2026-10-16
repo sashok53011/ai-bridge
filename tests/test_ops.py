@@ -39,9 +39,13 @@ def _device(tmp_path, monkeypatch):
 
 
 class _Server:
-    """Клиент каталога с журналом запросов и настраиваемым canEdit."""
+    """Клиент каталога с журналом запросов и настраиваемым canEdit.
 
-    def __init__(self, *, can_edit: bool, user_id: str = "u1"):
+    ``providers`` — что отдаёт GET: админские действия теперь берут
+    свежий серверный список, иначе тест проверяет не тот путь.
+    """
+
+    def __init__(self, *, can_edit: bool, user_id: str = "u1", providers: list[dict] | None = None):
         self.seen: list[dict] = []
         self._can_edit = can_edit
 
@@ -55,7 +59,7 @@ class _Server:
                 )
             if path == "/api/ai-config" and request.method == "GET":
                 return httpx.Response(
-                    200, json={"canEdit": can_edit, "updated": "", "providers": []}
+                    200, json={"canEdit": can_edit, "updated": "", "providers": list(providers or [])}
                 )
             if path == "/api/ai-stats" and request.method == "GET":
                 return httpx.Response(200, json=self.stats)
@@ -142,7 +146,7 @@ class TestCheck:
 class TestAdd:
     def test_a_superuser_pushes_server_list_plus_new_entry(self, _device) -> None:
         """Локальные выжившие записи в каталог не попадают."""
-        server = _Server(can_edit=True)
+        server = _Server(can_edit=True, providers=[_entry()])
         server.client.fetch_catalogue()  # canEdit запомнен
         Snapshot().save([_entry(id="stray", name="Выжившая", url="http://s/v1", enabled=True)])
 
@@ -195,7 +199,7 @@ class TestAdd:
 
 class TestSetModel:
     def test_a_superuser_changes_the_catalogue_model(self, _device) -> None:
-        server = _Server(can_edit=True)
+        server = _Server(can_edit=True, providers=[_entry()])
         result = ops.set_model(
             server.client, [_entry()], [_entry()], "ollama", "qwen3:0.6b", can_edit=True
         )
@@ -226,7 +230,7 @@ class TestSetModel:
 
 class TestEdit:
     def test_fields_change_on_the_server(self, _device) -> None:
-        server = _Server(can_edit=True)
+        server = _Server(can_edit=True, providers=[_entry()])
         result = ops.edit(
             server.client, [_entry()], [_entry()], "ollama",
             {"name": "Мой Ollama", "pricing": "$0.1/1M", "context": "128K"},
@@ -261,7 +265,10 @@ class TestEdit:
 
 class TestRemove:
     def test_a_superuser_sends_catalogue_without_the_entry(self, _device) -> None:
-        server = _Server(can_edit=True)
+        server = _Server(
+            can_edit=True,
+            providers=[_entry(), _entry(id="b", name="B", url="http://b/v1")],
+        )
         result = ops.remove(
             server.client, [_entry(), _entry(id="b", name="B", url="http://b/v1")],
             [_entry(), _entry(id="b", name="B", url="http://b/v1")],

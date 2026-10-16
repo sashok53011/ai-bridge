@@ -8,8 +8,9 @@
 Правила, которые нельзя потерять при переносе:
 
   * суперпользо­вателю флаги на сервер не отправляются (PUT заменил бы
-    каталог), а каталог целиком он шлёт из **серверного** списка —
-    локальные «выжившие» записи в каталог не попадают;
+    каталог), а каталог целиком он шлёт из **свежего серверного** списка —
+    устаревший или пустой список унёс бы чужие записи в корзину
+    (так 16.10.2026 страница потеряла каталог за одну правку);
   * 401/403 без ключа — просьба ввести ключ, а не поломка: в статистику
     такой итог не уходит;
   * обычный пользователь убирает только своё предложение.
@@ -230,6 +231,19 @@ def add(
             "note": None,
         }
 
+    if can_edit:
+        # Админский PUT заменяет каталог целиком — база только свежая:
+        # устаревший или пустой список унёс бы чужие записи в корзину.
+        try:
+            providers, _, _, _ = server.fetch_catalogue()
+        except ServerError as exc:
+            return {
+                "code": 1,
+                "error": f"каталог не прочитался ({exc}) — не добавляю",
+                "entry": None,
+                "note": None,
+            }
+
     if priority is None:
         entry["fallbackPriority"] = next_priority(providers)
 
@@ -300,12 +314,17 @@ def set_model(
 
     try:
         if can_edit:
-            server.push_catalogue(
-                [
-                    {**entry, "model": model} if entry["id"] == provider_id else entry
-                    for entry in providers
-                ]
-            )
+            # В каталог — свежий серверный список с заменой одной записи;
+            # локальные выжившие в каталог не тащим (их там нет). Записи
+            # нет на сервере — правленая добавляется, а не теряется.
+            current, _, _, _ = server.fetch_catalogue()
+            sent = [
+                new_entry if entry["id"] == provider_id else entry
+                for entry in current
+            ]
+            if all(entry["id"] != provider_id for entry in current):
+                sent.append(new_entry)
+            server.push_catalogue(sent)
         else:
             server.save_flags(updated)
     except ServerError as exc:
@@ -355,14 +374,17 @@ def edit(
 
     try:
         if can_edit:
-            # В каталог — серверный список с заменой одной записи; локальные
-            # выжившие в каталог не тащим (их там нет).
-            server.push_catalogue(
-                [
-                    new_entry if entry["id"] == provider_id else entry
-                    for entry in providers
-                ]
-            )
+            # В каталог — свежий серверный список с заменой одной записи;
+            # устаревший или пустой список унёс бы чужие записи в корзину.
+            # Записи нет на сервере — правленая добавляется, а не теряется.
+            current, _, _, _ = server.fetch_catalogue()
+            sent = [
+                new_entry if entry["id"] == provider_id else entry
+                for entry in current
+            ]
+            if all(entry["id"] != provider_id for entry in current):
+                sent.append(new_entry)
+            server.push_catalogue(sent)
         else:
             server.save_flags(updated)
     except ServerError as exc:
@@ -409,7 +431,11 @@ def remove(
 
     try:
         if can_edit:
-            server.push_catalogue([entry for entry in providers if entry["id"] != provider_id])
+            # Свежий серверный список: PUT заменяет каталог целиком.
+            current, _, _, _ = server.fetch_catalogue()
+            server.push_catalogue(
+                [entry for entry in current if entry["id"] != provider_id]
+            )
             note = "убрано из каталога (в корзине, восстановимо)"
         else:
             server.save_flags(remaining)

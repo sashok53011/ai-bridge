@@ -43,12 +43,14 @@ class _Catalogue:
 
     ``ops`` пишет итог в снапшот на диске — значит и читать надо через
     ``ops.merge_view``, иначе тест проверяет не тот путь.
+    ``puts`` — каталоги, отправленные админом через PUT.
     """
 
     def __init__(self, entries: list[dict], server: PocketBase, can_edit: bool):
         self.entries = entries
         self._server = server
         self._can_edit = can_edit
+        self.puts: list[list[dict]] = getattr(server, "puts", [])
 
     def __call__(self) -> list[dict]:
         return ops.merge_view(
@@ -57,18 +59,37 @@ class _Catalogue:
 
 
 def _server(entries: list[dict], *, can_edit: bool = False, make_provider=None):
-    """Залогиненный клиент каталога для веб-слоя."""
+    """Залогиненный клиент каталога для веб-слоя.
+
+    GET отдаёт текущий список, PUT запоминает присланный каталог —
+    без этого нельзя проверить, что админская правка не уносит чужие
+    записи в корзину (регрессия 16.10.2026).
+    """
+    import json as _json
+
+    state = {"providers": [dict(entry) for entry in entries]}
+    puts: list[list[dict]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/auth-with-password"):
             return httpx.Response(
                 200, json={"token": "t", "record": {"id": "u1", "email": "a@b.c"}}
             )
-        return httpx.Response(200, json={"canEdit": can_edit, "updated": "", "providers": []})
+        if request.url.path == "/api/ai-config" and request.method == "PUT":
+            body = _json.loads(request.content)
+            state["providers"] = list(body.get("providers") or [])
+            puts.append(state["providers"])
+            return httpx.Response(
+                200, json={"canEdit": can_edit, "updated": "", "providers": state["providers"]}
+            )
+        return httpx.Response(
+            200, json={"canEdit": can_edit, "updated": "", "providers": state["providers"]}
+        )
 
     client = PocketBase("https://server.test", transport=httpx.MockTransport(handler))
     client.login("a@b.c", "secret")
     client.fetch_catalogue()
+    client.puts = puts
     return client
 
 
@@ -286,3 +307,54 @@ class TestProtection:
         finally:
             server.shutdown()
             server.server_close()
+
+
+class TestAdminWritesKeepCatalogue:
+    """Регрессия 16.10.2026: страница передавала админские действия с
+    пустым списком каталога, и PUT заменял каталог одной записью —
+    остальное уходило в корзину (чистка 29 провайдеров за одну правку).
+    Админская запись строится по свежему серверному списку.
+    """
+
+    def test_edit_sends_the_whole_catalogue(self, harness) -> None:
+        entries = [
+            _entry(),
+            _entry(id="openai", name="OpenAI", url="https://api.openai.com/v1", model="gpt-4o-mini"),
+        ]
+        catalogue, _, _, base = harness(entries, can_edit=True)
+
+        with httpx.Client(base_url=base) as client:
+            response = client.post("/edit/ollama", data={"url": "http://192.168.0.133:11434/v1"})
+
+        assert response.status_code == 303
+        assert len(catalogue.puts) == 1
+        sent = catalogue.puts[0]
+        assert {entry["id"] for entry in sent} == {"ollama", "openai"}
+        edited = next(entry for entry in sent if entry["id"] == "ollama")
+        assert edited["url"] == "http://192.168.0.133:11434/v1"
+
+    def test_add_appends_to_the_catalogue(self, harness) -> None:
+        catalogue, _, _, base = harness([_entry()], can_edit=True)
+
+        with httpx.Client(base_url=base) as client:
+            client.post(
+                "/add",
+                data={"name": "Мой LMS", "url": "http://192.168.0.133:1234/v1", "model": "qwen3"},
+            )
+
+        assert len(catalogue.puts) == 1
+        ids = [entry["id"] for entry in catalogue.puts[0]]
+        assert "ollama" in ids and "moy-lms" in ids
+
+    def test_remove_takes_only_one_entry(self, harness) -> None:
+        entries = [
+            _entry(),
+            _entry(id="openai", name="OpenAI", url="https://api.openai.com/v1", model="gpt-4o-mini"),
+        ]
+        catalogue, _, _, base = harness(entries, can_edit=True)
+
+        with httpx.Client(base_url=base) as client:
+            client.post("/remove/openai")
+
+        assert len(catalogue.puts) == 1
+        assert [entry["id"] for entry in catalogue.puts[0]] == ["ollama"]
