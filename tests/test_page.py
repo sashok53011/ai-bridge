@@ -167,6 +167,38 @@ class TestKeyPage:
             assert 'href="/tokens"' in page
             assert 'action="/logout"' in page
 
+    def test_the_key_page_links_to_the_providers_own_pages(self) -> None:
+        page = key_page(
+            "Ollama", provider_id="ollama", has_key=False,
+            key_url="https://ollama.com/api", login_url="https://ollama.com/login",
+        )
+        assert 'href="https://ollama.com/api"' in page
+        assert "получить ключ" in page
+        assert 'href="https://ollama.com/login"' in page
+
+    def test_a_dangerous_scheme_is_not_a_link(self) -> None:
+        page = key_page(
+            "X", provider_id="x", has_key=False,
+            key_url="javascript:alert(1)", login_url="ftp://чужое",
+        )
+        assert "javascript:" not in page
+        assert "ftp:" not in page
+
+
+class TestProviderLinks:
+    def test_the_row_links_to_login_and_key_pages_when_known(self) -> None:
+        page = catalogue_page(
+            [_entry(loginUrl="https://o.com/login", getApiKeyUrl="https://o.com/keys")]
+        )
+        assert 'href="https://o.com/login"' in page
+        assert 'href="https://o.com/keys"' in page
+        assert "получить ключ" in page
+
+    def test_no_fields_no_links(self) -> None:
+        page = catalogue_page([_entry()])
+        assert "получить ключ" not in page
+        assert "страница логина" not in page
+
     def test_the_page_asks_for_the_key(self) -> None:
         page = key_page("OpenAI", provider_id="openai", has_key=False)
         assert 'name="api_key"' in page

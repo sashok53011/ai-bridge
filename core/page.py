@@ -52,6 +52,14 @@ def _badge(text: str, kind: str = "") -> str:
     return f'<span class="{cls}">{escape(text)}</span>'
 
 
+def _safe_url(value: object) -> str:
+    """Адрес для ссылки: только http/https, иначе пусто (чужая схема — не ссылка)."""
+    text = str(value or "").strip()
+    if text.startswith(("http://", "https://")):
+        return text
+    return ""
+
+
 def _provider_row(
     entry: dict,
     *,
@@ -82,6 +90,22 @@ def _provider_row(
     ]
     facts_html = f'<span class="facts">{" · ".join(facts)}</span>' if facts else ""
 
+    # Ссылки на самого провайдера: где войти и где взять ключ — из полей каталога.
+    provider_links = []
+    if _safe_url(entry.get("loginUrl")):
+        provider_links.append(
+            f'<a href="{escape(_safe_url(entry["loginUrl"]), quote=True)}" '
+            f'target="_blank" rel="noopener">страница логина</a>'
+        )
+    if _safe_url(entry.get("getApiKeyUrl")):
+        provider_links.append(
+            f'<a href="{escape(_safe_url(entry["getApiKeyUrl"]), quote=True)}" '
+            f'target="_blank" rel="noopener">получить ключ</a>'
+        )
+    links_html = (
+        f'<span class="facts">{" · ".join(provider_links)}</span>' if provider_links else ""
+    )
+
     # Действие над строкой. Админ правит определение (править/убрать),
     # человек ведёт своё пространство: ключ, тест, своя модель.
     toggle_label = "выключить" if entry.get("enabled") else "включить"
@@ -107,7 +131,7 @@ def _provider_row(
     return (
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
         f'<td class="name">{name} {" ".join(badges)}</td>'
-        f'<td class="url">{escape(entry["url"])}</td>'
+        f'<td class="url">{escape(entry["url"])}{links_html}</td>'
         f'<td class="model">{escape(entry.get("model") or "—")}{facts_html}</td>'
         f'<td class="stats">{escape(stats_text)}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
@@ -570,14 +594,34 @@ def test_page(
 
 
 def key_page(
-    provider_name: str, *, provider_id: str, has_key: bool, notice: str = "", can_edit: bool = False
+    provider_name: str,
+    *,
+    provider_id: str,
+    has_key: bool,
+    notice: str = "",
+    can_edit: bool = False,
+    login_url: str = "",
+    key_url: str = "",
 ) -> str:
     """Ввод ключа одного провайдера: форма плюс честное предупреждение.
 
     В скрытом поле — id провайдера (не имя: сервер ищет запись по id).
+    Ссылки «где взять ключ» и «страница логина» — из полей каталога.
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     value_hint = "сейчас задан — можно оставить пустым, чтобы удалить" if has_key else ""
+    hints = []
+    if _safe_url(key_url):
+        hints.append(
+            f'Ещё нет ключа? <a href="{escape(_safe_url(key_url), quote=True)}" '
+            f'target="_blank" rel="noopener">получить ключ у провайдера</a>'
+        )
+    if _safe_url(login_url):
+        hints.append(
+            f'Страница входа провайдера: <a href="{escape(_safe_url(login_url), quote=True)}" '
+            f'target="_blank" rel="noopener">открыть</a>'
+        )
+    hints_html = f'<p class="role">{" · ".join(hints)}</p>' if hints else ""
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -604,6 +648,7 @@ def key_page(
   <button type="submit">сохранить</button>
   <a href="/">назад</a>
 </form>
+{hints_html}
 <p class="role">Ключ остаётся на устройстве: он уходит только к провайдеру в его запросе.</p>
 </body>
 </html>"""

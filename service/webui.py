@@ -309,6 +309,8 @@ class WebUi:
                     has_key=bool(space.keys.get(provider_id)),
                     notice=notice if notice_bad else "",
                     can_edit=is_admin,
+                    login_url=entry.get("loginUrl", ""),
+                    key_url=entry.get("getApiKeyUrl", ""),
                 ),
             )
             return
