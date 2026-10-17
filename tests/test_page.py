@@ -157,6 +157,16 @@ class TestKeyPage:
         assert 'value="ollama"' in page
         assert "Ollama" in page  # имя — в заголовке, для человека
 
+    def test_every_secondary_page_keeps_the_navigation(self) -> None:
+        """Со страниц ключа/модели/теста есть выход и «мои токены»."""
+        for page in (
+            key_page("Ollama", provider_id="ollama", has_key=False),
+            pick_model_page("Ollama", "ollama", ["qwen3"]),
+            chat_test_page("Ollama", "ollama", "привет", answer="ок"),
+        ):
+            assert 'href="/tokens"' in page
+            assert 'action="/logout"' in page
+
     def test_the_page_asks_for_the_key(self) -> None:
         page = key_page("OpenAI", provider_id="openai", has_key=False)
         assert 'name="api_key"' in page

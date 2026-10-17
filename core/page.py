@@ -268,6 +268,7 @@ def edit_page(entry: dict, *, notice: str = "") -> str:
 </head>
 <body>
 <h1>Правка: {escape(entry.get("name", ""))}</h1>
+{_nav(can_edit=True)}
 {notice_html}
 <form method="post" action="/edit/{escape(entry.get("id", ""), quote=True)}">
   {fields}
@@ -487,6 +488,7 @@ def pick_model_page(
     *,
     current: str = "",
     notice: str = "",
+    can_edit: bool = False,
 ) -> str:
     """Выбор своей модели провайдера: список живых моделей радиокнопками."""
     notice_html = (
@@ -520,6 +522,7 @@ def pick_model_page(
 </style>
 </head>
 <h1>Модель: {escape(provider_name)}</h1>
+{_nav(can_edit=can_edit)}
 <p class="role">Какую модель обслуживать по умолчанию — выбор ваш, личный.</p>
 {notice_html}
 {body}
@@ -535,6 +538,7 @@ def test_page(
     *,
     answer: str = "",
     error: str = "",
+    can_edit: bool = False,
 ) -> str:
     """Итог тестового чата: один вопрос — один ответ или честная ошибка."""
     notice_html = (
@@ -554,6 +558,7 @@ def test_page(
 </style>
 </head>
 <h1>Тест: {escape(provider_name)} · {escape(model or "—")}</h1>
+{_nav(can_edit=can_edit)}
 <p class="role">Тест — настоящий, но крошечный запрос: на платной модели он
 стоит доли цента.</p>
 <p class="q">«{escape(question)}»</p>
@@ -565,7 +570,7 @@ def test_page(
 
 
 def key_page(
-    provider_name: str, *, provider_id: str, has_key: bool, notice: str = ""
+    provider_name: str, *, provider_id: str, has_key: bool, notice: str = "", can_edit: bool = False
 ) -> str:
     """Ввод ключа одного провайдера: форма плюс честное предупреждение.
 
@@ -590,6 +595,7 @@ def key_page(
 </head>
 <body>
 <h1>Ключ: {escape(provider_name)}</h1>
+{_nav(can_edit=can_edit)}
 {notice_html}
 <form method="post" action="/key">
   <input type="hidden" name="id" value="{escape(provider_id, quote=True)}">

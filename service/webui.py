@@ -308,6 +308,7 @@ class WebUi:
                     provider_id=provider_id,
                     has_key=bool(space.keys.get(provider_id)),
                     notice=notice if notice_bad else "",
+                    can_edit=is_admin,
                 ),
             )
             return
@@ -338,6 +339,7 @@ class WebUi:
                     entry["name"], provider_id, models,
                     current=entry.get("model", ""),
                     notice=notice if notice_bad else "",
+                    can_edit=is_admin,
                 ),
             )
             return
@@ -440,6 +442,7 @@ class WebUi:
                 test_page(
                     entry["name"], entry.get("model", ""),
                     outcome["question"], answer=outcome["answer"], error=outcome["error"],
+                    can_edit=is_admin,
                 ),
             )
             return
