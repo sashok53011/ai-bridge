@@ -81,6 +81,28 @@ class UserStore:
                 result.append(data)
         return sorted(result, key=lambda item: item.get("created", ""))
 
+    def api_enabled(self, user_id: str) -> bool:
+        """Работают ли токены человека в /v1 (по умолчанию — да).
+
+        Тумблер «доступ приложений»: выключил — ни один его токен
+        не пройдёт, включил — снова работает. Это «телефон потерян»
+        или «подожди, я проверю» — одна кнопка вместо отзыва всех токенов.
+        """
+        profile = self.get(user_id)
+        if not isinstance(profile, dict):
+            return False
+        return profile.get("api", "on") != "off"
+
+    def set_api(self, user_id: str, enabled: bool) -> None:
+        """Переключает доступ приложений; профиль должен существовать."""
+        profile = self.get(user_id) or {"id": str(user_id), "email": ""}
+        profile["api"] = "on" if enabled else "off"
+        path = self._path(user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     def purge(self, user_id: str) -> None:
         """Полностью вычищает личное пространство человека."""
         shutil.rmtree(user_dir(user_id, self.directory), ignore_errors=True)

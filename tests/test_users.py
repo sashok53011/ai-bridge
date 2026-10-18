@@ -40,3 +40,19 @@ class TestUserStore:
 
         assert store.get("u1") is None
         assert not personal.exists()
+
+    def test_api_access_is_on_by_default_and_flips(self, tmp_path) -> None:
+        store = UserStore(tmp_path)
+        store.remember("u1", "a@b.c")
+
+        assert store.api_enabled("u1") is True
+
+        store.set_api("u1", False)
+        assert store.api_enabled("u1") is False
+        assert UserStore(tmp_path).api_enabled("u1") is False  # переживает перезапуск
+
+        store.set_api("u1", True)
+        assert store.api_enabled("u1") is True
+
+    def test_an_unknown_person_has_no_api_access(self, tmp_path) -> None:
+        assert UserStore(tmp_path).api_enabled("никого") is False

@@ -154,6 +154,7 @@ class Gateway:
         token: str = "",
         user_tokens=None,  # storage.usertokens.UserTokens | None
         context_for_user: Callable[[str], tuple[Callable[[], list[dict]], object] | None] | None = None,
+        api_gate: Callable[[str], bool] | None = None,
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -162,6 +163,7 @@ class Gateway:
         self._token = token
         self._user_tokens = user_tokens
         self._context_for_user = context_for_user
+        self._api_gate = api_gate
         # Кэш live-списков моделей: {провайдер: (время, [модели])}.
         self._live_cache: dict[str, tuple[float, list[str]]] = {}
         self._cache_lock = threading.Lock()
@@ -185,11 +187,12 @@ class Gateway:
             value = value[7:].strip()
         return hmac.compare_digest(value.encode("utf-8"), self._token.encode("utf-8"))
 
-    def authenticate(self, authorization_header: str) -> tuple[bool, str]:
-        """(разрешено, id владельца токена). Пустой id — устройственный режим.
+    def authenticate(self, authorization_header: str) -> tuple[bool, str, str]:
+        """(разрешено, id владельца токена, причина отказа). Пустой id — устройство.
 
         В персональном режиме токен принадлежит человеку: его id уходит
-        дальше, и запрос обслуживается его пространством.
+        дальше, и запрос обслуживается его пространством. Тумблер
+        «доступ приложений» (api_gate) выключает все токены человека разом.
         """
         value = authorization_header.strip()
         if value.lower().startswith("bearer "):
@@ -197,13 +200,17 @@ class Gateway:
 
         if self._user_tokens is not None:
             if not value and not self._token:
-                return True, ""  # --no-auth: открыто, обслуживается устройство
+                return True, "", ""  # --no-auth: открыто, обслуживается устройство
             owner = self._user_tokens.owner(value)
-            return (bool(owner), owner)
+            if not owner:
+                return False, "", ""
+            if self._api_gate is not None and not self._api_gate(owner):
+                return False, "", "доступ приложений отключён владельцем токена"
+            return True, owner, ""
 
         if not self._token:
-            return True, ""
-        return hmac.compare_digest(value.encode("utf-8"), self._token.encode("utf-8")), ""
+            return True, "", ""
+        return hmac.compare_digest(value.encode("utf-8"), self._token.encode("utf-8")), "", ""
 
     def _context(self, user_id: str) -> tuple[Callable[[], list[dict]], object]:
         """(список провайдеров, ключи) для владельца токена."""
@@ -408,15 +415,18 @@ class _Handler(BaseHTTPRequestHandler):
     def gateway(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
 
-    def _reject_unauthorized(self) -> None:
+    def _reject_unauthorized(self, reason: str = "") -> None:
         """401 в формате, который понимают OpenAI-клиенты."""
+        message = reason or (
+            "приставка ждёт свой токен в Authorization: Bearer <токен>; "
+            "взять его: страница «приложения и токены»"
+        )
         self._send(
             401,
             "application/json",
             [
                 _error_body(
-                    "приставка ждёт свой токен в Authorization: Bearer <токен>; "
-                    "узнать его: uv run python app.py --token",
+                    message,
                     kind="authentication_error",
                     code="missing_token",
                 )
@@ -481,9 +491,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - имя задано http.server
         path = self.path.split("?", 1)[0]
         if path in ("/v1/models", "/models"):
-            allowed, user_id = self.gateway.authenticate(self.headers.get("Authorization", ""))
+            allowed, user_id, reason = self.gateway.authenticate(self.headers.get("Authorization", ""))
             if not allowed:
-                self._reject_unauthorized()
+                self._reject_unauthorized(reason)
                 return
             self._send_json(200, self.gateway.models_payload(user_id))
             return
@@ -514,9 +524,9 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
             return
 
-        allowed, user_id = self.gateway.authenticate(self.headers.get("Authorization", ""))
+        allowed, user_id, reason = self.gateway.authenticate(self.headers.get("Authorization", ""))
         if not allowed:
-            self._reject_unauthorized()
+            self._reject_unauthorized(reason)
             return
 
         try:
@@ -563,17 +573,20 @@ def serve(
     token: str = "",
     user_tokens=None,
     context_for_user=None,
+    api_gate=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
     ``ui`` — service.webui.WebUi: страница на том же порту, что и API.
     ``token`` — токен приставки; если задан, /v1/* требует его в заголовке.
-    ``user_tokens`` + ``context_for_user`` — персональные токены людей.
+    ``user_tokens`` + ``context_for_user`` — персональные токены людей,
+    ``api_gate`` — их тумблер «доступ приложений».
     Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
     gateway = Gateway(
         entries_provider, keys, timeout=timeout, token=token,
         user_tokens=user_tokens, context_for_user=context_for_user,
+        api_gate=api_gate,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

@@ -376,6 +376,31 @@ class TestTokens:
             client.post("/tokens/revoke", data={"tail": token[-6:]})
         assert tokens.owner(token) == ""
 
+    def test_the_endpoint_line_is_built_from_the_host(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/")
+        port = base.rsplit(":", 1)[1]
+        assert f'value="http://127.0.0.1:{port}/v1"' in page.text
+
+    def test_the_api_switch_flips_the_flag(self, harness) -> None:
+        users = UserStore()
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/tokens")
+            assert users.api_enabled(_GUEST) is True
+            assert "выключить доступ" in page.text
+
+            client.post("/tokens/api")
+            assert users.api_enabled(_GUEST) is False
+
+            page = client.get("/tokens")
+            assert "ВЫКЛЮЧЕН" in page.text
+            client.post("/tokens/api")
+            assert users.api_enabled(_GUEST) is True
+
 
 class TestAdminPeople:
     def test_the_admin_sees_people_and_deletes_one(self, harness) -> None:

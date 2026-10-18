@@ -435,3 +435,49 @@ class TestProxyTransparency:
         assert "ни один провайдер не ответил" in text
         assert "Ollama" in text and "HTTP 429" in text
         assert "OpenAI" in text and "HTTP 500" in text
+
+
+class TestApiGate:
+    """Тумблер «доступ приложений»: выключил — ни один токен не пройдёт."""
+
+    def _gateway(self, tmp_path, gate) -> tuple[Gateway, str]:
+        from storage.usertokens import UserTokens
+
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        gateway = Gateway(
+            lambda: [],
+            KeyStore(tmp_path),
+            user_tokens=tokens,
+            api_gate=gate,
+        )
+        return gateway, token
+
+    def test_a_switched_off_person_gets_a_clear_401(self, tmp_path) -> None:
+        gateway, token = self._gateway(tmp_path, lambda uid: False)
+
+        allowed, user_id, reason = gateway.authenticate(f"Bearer {token}")
+
+        assert allowed is False
+        assert user_id == ""
+        assert "отключён" in reason
+
+    def test_a_switched_on_person_passes_with_their_id(self, tmp_path) -> None:
+        from storage.usertokens import UserTokens
+
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        gateway = Gateway(
+            lambda: [], KeyStore(tmp_path), user_tokens=tokens, api_gate=lambda uid: True
+        )
+
+        allowed, user_id, reason = gateway.authenticate(f"Bearer {token}")
+
+        assert (allowed, user_id, reason) == (True, "u1", "")
+
+    def test_an_unknown_token_is_refused_without_sermons(self, tmp_path) -> None:
+        gateway, _ = self._gateway(tmp_path, lambda uid: True)
+
+        allowed, user_id, reason = gateway.authenticate("Bearer uib-чужой")
+
+        assert (allowed, user_id, reason) == (False, "", "")

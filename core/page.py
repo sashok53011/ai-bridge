@@ -35,9 +35,23 @@ def _style() -> str:
   label { display: block; margin: .5rem 0; }"""
 
 
+def _copyable(value: str) -> str:
+    """Поле с адресом: клик выделяет и копирует в буфер.
+
+    Без JavaScript страница работает: поле просто выделяется, дальше
+    Ctrl+C — как обычно. Копирование по клику — прогрессивное улучшение.
+    """
+    return (
+        f'<input readonly class="copy" value="{escape(value, quote=True)}" '
+        f'onclick="this.select(); navigator.clipboard && '
+        f'navigator.clipboard.writeText(this.value)" '
+        f'title="клик — копировать в буфер">'
+    )
+
+
 def _nav(*, can_edit: bool) -> str:
     """Верхняя строка: личные разделы и выход."""
-    links = ['<a href="/tokens">мои токены</a>']
+    links = ['<a href="/tokens">приложения и токены</a>']
     if can_edit:
         links.append('<a href="/users">пользователи</a>')
     links.append(
@@ -149,6 +163,7 @@ def catalogue_page(
     notice: str = "",
     notice_bad: bool = False,
     role: str = "",
+    app_address: str = "",
 ) -> str:
     """Весь каталог одной страницей: тумблеры, проверка, ключи, добавление."""
     rows = "\n".join(
@@ -172,6 +187,12 @@ def catalogue_page(
 
     # Добавление провайдеров — привилегия админа: человек управляет лишь
     # своим пространством (ключ, модель, вкл).
+    address_html = (
+        '<p class="role">Для приложений (тип endpoint — OpenAI): '
+        f"{_copyable(app_address)}</p>"
+        if app_address
+        else ""
+    )
     add_html = ""
     if can_edit:
         add_html = """<details>
@@ -218,6 +239,7 @@ def catalogue_page(
   .notice.bad {{ background: rgba(160, 48, 48, .15); }}
   .role {{ opacity: .6; font-size: .85rem; }}
   .nav {{ font-size: .9rem; }}
+  input.copy {{ width: 24rem; max-width: 100%; font-family: monospace; }}
   .add {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #8884; }}
   .add input {{ margin: .2rem; padding: .3rem; }}
   details {{ margin-top: 1rem; }}
@@ -229,6 +251,7 @@ def catalogue_page(
 {_nav(can_edit=can_edit)}
 {role_html}
 {notice_html}
+{address_html}
 <table>
 <tr><th>провайдер</th><th>адрес</th><th>модель</th><th>проверки</th><th>ключ</th><th></th></tr>
 {rows}
@@ -387,8 +410,15 @@ def signup_page(notice: str = "") -> str:
 </html>"""
 
 
-def tokens_page(tokens: list[dict], *, notice: str = "") -> str:
-    """Мои токены: список хвостов, создание, отзыв."""
+def tokens_page(
+    tokens: list[dict],
+    *,
+    app_address: str = "",
+    api_on: bool = True,
+    notice: str = "",
+    can_edit: bool = False,
+) -> str:
+    """Приложения и токены: адрес для настройки, тумблер доступа, список."""
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     if tokens:
         rows = "\n".join(
@@ -402,24 +432,47 @@ def tokens_page(tokens: list[dict], *, notice: str = "") -> str:
         )
     else:
         rows = '<tr><td colspan="4" class="empty">токенов пока нет</td></tr>'
+
+    api_button = "включить доступ" if not api_on else "выключить доступ"
+    api_status = (
+        "доступ приложений включён — токены работают"
+        if api_on
+        else "доступ приложений ВЫКЛЮЧЕН — ни один токен не пройдёт"
+    )
+    address_html = ""
+    if app_address:
+        address_html = f"""<h2>Настройка в приложении</h2>
+<p class="role">Тип endpoint — <b>OpenAI</b>. Адрес вставьте в поле
+«custom base URL» (клик по полю копирует в буфер), а ключом будет ваш токен ниже.</p>
+<p>{_copyable(app_address)}</p>"""
+
     return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Мои токены — AI-приставка</title>
+<title>Приложения и токены — AI-приставка</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; max-width: 40rem; }}
   th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
   input {{ margin: .2rem; }}
+  input.copy {{ width: 100%; max-width: 40rem; font-family: monospace; }}
+  h2 {{ font-size: 1.1rem; margin-top: 1.6rem; }}
+  .api {{ background: rgba(42, 128, 60, .10); padding: .6rem .8rem; border-radius: .4rem; }}
+  .api.off {{ background: rgba(160, 48, 48, .15); }}
 </style>
 </head>
-<h1>Мои токены</h1>
-{_nav(can_edit=False)}
+<body>
+<h1>Приложения и токены</h1>
+{_nav(can_edit=can_edit)}
 {notice_html}
-<p class="role">Токен — это пропуск для ваших приложений (OpenWebUI, телефон):
-они шлют его в заголовке Authorization вместо логина и пароля.</p>
+{address_html}
+<p class="api{" off" if not api_on else ""}">{escape(api_status)}
+<form method="post" action="/tokens/api" style="float:right">
+  <button type="submit" class="ghost">{api_button}</button>
+</form></p>
+<h2>Мои токены</h2>
 <table>
 <tr><th>название</th><th>хвост</th><th>создан</th><th></th></tr>
 {rows}
@@ -428,7 +481,8 @@ def tokens_page(tokens: list[dict], *, notice: str = "") -> str:
   <input name="name" placeholder="название: телефон, ноутбук…" required>
   <button type="submit">создать токен</button>
 </form>
-<p class="role">После создания токен показывается один раз — скопируйте.</p>
+<p class="role">Токен показывается один раз при создании — скопируйте.
+Отозванный токен перестаёт работать мгновенно.</p>
 <p><a href="/">← назад в каталог</a></p>
 </body>
 </html>"""

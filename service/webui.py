@@ -226,6 +226,18 @@ class WebUi:
         except Exception:  # noqa: BLE001 — список моделей — украшение, ошибка уйдёт в форму
             return []
 
+    @staticmethod
+    def _app_address(handler: BaseHTTPRequestHandler) -> str:
+        """Адрес /v1 для приложений — по тому, как страница открыта.
+
+        За туннелом хост без порта → https; по LAN/localhost с портом → http.
+        """
+        host = (handler.headers.get("Host") or "").strip().lower()
+        if not host:
+            return ""
+        scheme = "http" if ":" in host else "https"
+        return f"{scheme}://{host}/v1"
+
     # ------------------------------------------------------------ страницы
 
     def handle_get(self, handler: BaseHTTPRequestHandler, path: str) -> None:
@@ -273,13 +285,22 @@ class WebUi:
                     notice=notice,
                     notice_bad=notice_bad,
                     role=role_line,
+                    app_address=self._app_address(handler),
                 ),
             )
             return
 
         if clean == "/tokens":
             self._send_html(
-                handler, 200, tokens_page(self._user_tokens.list_for(str(viewer["id"])), notice=notice)
+                handler,
+                200,
+                tokens_page(
+                    self._user_tokens.list_for(str(viewer["id"])),
+                    app_address=self._app_address(handler),
+                    api_on=self._users.api_enabled(str(viewer["id"])),
+                    notice=notice,
+                    can_edit=is_admin,
+                ),
             )
             return
 
@@ -475,6 +496,17 @@ class WebUi:
                 return
             space.keys.set(provider_id, field("api_key"))
             self._redirect(handler, f"{entry['name']}: ключ сохранён в вашем пространстве")
+            return
+
+        if clean == "/tokens/api":
+            turned_on = not self._users.api_enabled(user_id)
+            self._users.set_api(user_id, turned_on)
+            self._redirect(
+                handler,
+                "доступ приложений включён — токены работают"
+                if turned_on
+                else "доступ приложений выключен — токены не пройдут",
+            )
             return
 
         if clean == "/tokens/create":

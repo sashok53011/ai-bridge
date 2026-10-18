@@ -199,6 +199,34 @@ class TestProviderLinks:
         assert "получить ключ" not in page
         assert "страница логина" not in page
 
+
+class TestAppAddress:
+    def test_the_catalogue_shows_a_copyable_endpoint_line(self) -> None:
+        page = catalogue_page([_entry()], app_address="https://ai.devhorizon.online/v1")
+        assert 'value="https://ai.devhorizon.online/v1"' in page
+        assert "clipboard" in page  # клик копирует в буфер
+        assert "клик — копировать" in page
+
+    def test_no_address_no_line(self) -> None:
+        assert "clipboard" not in catalogue_page([_entry()])
+
+    def test_the_tokens_page_is_a_setup_guide_with_a_switch(self) -> None:
+        page = tokens_page(
+            [{"name": "телефон", "tail": "Ab12Cd", "created": "2026-10-16"}],
+            app_address="https://ai.devhorizon.online/v1",
+            api_on=True,
+        )
+        assert "Приложения и токены" in page
+        assert 'value="https://ai.devhorizon.online/v1"' in page
+        assert 'action="/tokens/api"' in page
+        assert "выключить доступ" in page
+        assert "OpenAI" in page  # тип endpoint для настройки
+
+    def test_a_switched_off_page_says_it_loudly(self) -> None:
+        page = tokens_page([], api_on=False)
+        assert "ВЫКЛЮЧЕН" in page
+        assert "включить доступ" in page
+
     def test_the_page_asks_for_the_key(self) -> None:
         page = key_page("OpenAI", provider_id="openai", has_key=False)
         assert 'name="api_key"' in page

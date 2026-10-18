@@ -370,6 +370,7 @@ def _serve(
         token=token,
         user_tokens=user_tokens,
         context_for_user=context_for_user,
+        api_gate=users.api_enabled,
     )
 
 
