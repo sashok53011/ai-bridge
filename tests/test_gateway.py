@@ -481,3 +481,80 @@ class TestApiGate:
         allowed, user_id, reason = gateway.authenticate("Bearer uib-чужой")
 
         assert (allowed, user_id, reason) == (False, "", "")
+
+
+class TestAccessRegistry:
+    """Онлайн-проверка реестра: зарегистрирован/заблокирован, с кэшем."""
+
+    def _gateway(self, tmp_path, checker) -> tuple[Gateway, list]:
+        calls: list[str] = []
+
+        def wrapped(user_id: str) -> bool:
+            calls.append(user_id)
+            return checker(user_id)
+
+        return Gateway(lambda: [], KeyStore(tmp_path), access_checker=wrapped), calls
+
+    def test_an_ok_person_passes_and_is_remembered(self, tmp_path) -> None:
+        gateway, calls = self._gateway(tmp_path, lambda uid: True)
+
+        assert gateway.authorize("u1") == (True, "")
+        assert gateway.authorize("u1") == (True, "")  # в пределах TTL — из кэша
+        assert calls == ["u1"]  # десятки запросов = один поход к реестру
+
+    def test_a_blocked_person_is_refused_and_remembered(self, tmp_path) -> None:
+        gateway, calls = self._gateway(tmp_path, lambda uid: False)
+
+        ok, reason = gateway.authorize("u1")
+        gateway.authorize("u1")
+
+        assert ok is False
+        assert "не зарегистрирован или заблокирован" in reason
+        assert calls == ["u1"]
+
+    def test_a_broken_registry_cools_down_without_dolba(self, tmp_path) -> None:
+        def broken(uid: str) -> bool:
+            raise RuntimeError("реестр лёг")
+
+        gateway, calls = self._gateway(tmp_path, broken)
+
+        ok, reason = gateway.authorize("u1")
+        ok_second, _ = gateway.authorize("u2")  # другой человек — тоже отказ
+
+        assert ok is False and ok_second is False
+        assert "реестр недоступен" in reason
+        assert calls == ["u1"]  # после поломки — ни одного нового звонка
+
+    def test_without_a_checker_the_registry_is_off(self, tmp_path) -> None:
+        gateway = Gateway(lambda: [], KeyStore(tmp_path))
+        assert gateway.authorize("u1") == (True, "")
+
+
+class TestAccessOverHttp:
+    def test_a_blocked_person_gets_403_with_a_clear_reason(self, tmp_path) -> None:
+        from storage.usertokens import UserTokens
+
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        gateway = Gateway(
+            lambda: [_entry()],
+            KeyStore(tmp_path),
+            user_tokens=tokens,
+            access_checker=lambda uid: False,
+        )
+        server = _Server(("127.0.0.1", 0), _Handler)
+        server.gateway = gateway
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            with httpx.Client(base_url=base) as client:
+                response = client.get(
+                    "/v1/models", headers={"Authorization": f"Bearer {token}"}
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        assert response.status_code == 403
+        assert "заблокирован" in response.text

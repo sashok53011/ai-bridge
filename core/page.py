@@ -151,10 +151,12 @@ def _provider_row(
                 f'<button type="submit" class="ghost danger">убрать</button></form>'
             )
 
+    # Адрес провайдера на страницах не показывается никому — ни человеку,
+    # ни админу: витрина делится названием, адрес живёт только в формах
+    # админа (добавить/править), иначе управлять каталогом нечем.
     return (
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
-        f'<td class="name">{name} {" ".join(badges)}</td>'
-        f'<td class="url">{escape(entry["url"])}{links_html}</td>'
+        f'<td class="name">{name} {" ".join(badges)}{links_html}</td>'
         f'<td class="model">{escape(entry.get("model") or "—")}{facts_html}</td>'
         f'<td class="stats">{escape(stats_text)}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
@@ -185,7 +187,7 @@ def catalogue_page(
         for entry in providers
     )
     if not rows:
-        rows = '<tr><td colspan="6" class="empty">каталог пуст</td></tr>'
+        rows = '<tr><td colspan="5" class="empty">каталог пуст</td></tr>'
 
     notice_html = (
         f'<p class="notice{" bad" if notice_bad else ""}">{escape(notice)}</p>'
@@ -263,7 +265,7 @@ def catalogue_page(
 {notice_html}
 {address_html}
 <table>
-<tr><th>провайдер</th><th>адрес</th><th>модель</th><th>проверки</th><th>ключ</th><th></th></tr>
+<tr><th>провайдер</th><th>модель</th><th>проверки</th><th>ключ</th><th></th></tr>
 {rows}
 </table>
 
@@ -527,27 +529,32 @@ def token_created_page(token: str, name: str) -> str:
 
 
 def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> str:
-    """Пользователи приставки: список и удаление (модерация)."""
+    """Пользователи приставки: блокировка и удаление (модерация)."""
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     if users:
-        rows = "\n".join(
-            (
-                f'<tr><td>{escape(str(item.get("email") or ""))}</td>'
+        rows = []
+        for item in users:
+            mine = str(item.get("id")) == current_id
+            blocked = bool(item.get("blocked"))
+            badge = ' <span class="badge badge-dead">заблокирован</span>' if blocked else ""
+            controls = "<td></td>" if mine else (
+                f'<td><form method="post" action="/users/block">'
+                f'<input type="hidden" name="id" value="{escape(str(item.get("id")), quote=True)}">'
+                f'<button type="submit" class="ghost">'
+                f'{"разблокировать" if blocked else "заблокировать"}</button></form> '
+                f'<form method="post" action="/users/delete">'
+                f'<input type="hidden" name="id" value="{escape(str(item.get("id")), quote=True)}">'
+                f'<button type="submit" class="ghost danger">удалить</button></form></td>'
+            )
+            rows.append(
+                f'<tr><td>{escape(str(item.get("email") or ""))}{badge}</td>'
                 f'<td>{escape(str(item.get("role") or ""))}</td>'
                 f'<td>{escape(str(item.get("lastLogin") or "")[:10])}</td>'
-                + (
-                    "<td></td>"
-                    if str(item.get("id")) == current_id
-                    else f'<td><form method="post" action="/users/delete">'
-                    f'<input type="hidden" name="id" value="{escape(str(item.get("id")), quote=True)}">'
-                    f'<button type="submit" class="ghost danger">удалить</button></form></td>'
-                )
-                + "</tr>"
+                f"{controls}</tr>"
             )
-            for item in users
-        )
+        rows_html = "\n".join(rows)
     else:
-        rows = '<tr><td colspan="4" class="empty">никто ещё не регистрировался</td></tr>'
+        rows_html = '<tr><td colspan="4" class="empty">никто ещё не регистрировался</td></tr>'
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -556,18 +563,19 @@ def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> 
 <title>Пользователи — AI-приставка</title>
 <style>
 {_style()}
-  table {{ border-collapse: collapse; width: 100%; max-width: 40rem; }}
+  table {{ border-collapse: collapse; width: 100%; max-width: 44rem; }}
   th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
 </style>
 </head>
 <h1>Пользователи</h1>
 {_nav(can_edit=True)}
 {notice_html}
-<p class="role">Регистрация открыта, защита — модерация: удалённый человек
-теряет доступ и своё пространство на этом устройстве.</p>
+<p class="role">Регистрация открыта; защита — модерация: заблокированный
+не пускается ни одной приставкой (проверка перед каждым запросом),
+удалённый теряет аккаунт и своё пространство на этом устройстве.</p>
 <table>
 <tr><th>почта</th><th>роль</th><th>последний вход</th><th></th></tr>
-{rows}
+{rows_html}
 </table>
 <p><a href="/">← назад в каталог</a></p>
 </body>

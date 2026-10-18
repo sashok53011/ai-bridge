@@ -96,6 +96,68 @@ class PocketBase:
         """Удаляет аккаунт человека на сервере — модерация админом."""
         self._request("DELETE", f"/api/collections/users/records/{user_id}")
 
+    # -------------------------------------------------------- реестр доступа
+
+    def access_state(self, user_id: str) -> str:
+        """Состояние человека в реестре: 'ok', 'missing' или 'blocked'.
+
+        Приставка сверяется с сервером каталога перед каждым запросом —
+        онлайн-проверка «зарегистрирован и не заблокирован». Сервер молчит
+        или отваливается — ServerError: вызывающий закрывается, а не гадает.
+        """
+        try:
+            body = self._request("GET", f"/api/collections/users/records/{user_id}")
+        except ServerError as exc:
+            if "HTTP 404" in str(exc):
+                return "missing"
+            raise
+        return "blocked" if (body or {}).get("blocked") else "ok"
+
+    def set_blocked(self, user_id: str, blocked: bool) -> None:
+        """Блокировка аккаунта: обратимая, в отличие от удаления."""
+        self._request(
+            "PATCH", f"/api/collections/users/records/{user_id}", json={"blocked": bool(blocked)}
+        )
+
+    def people(self) -> list[dict]:
+        """Все аккаунты людей: [{id, email, blocked}] — для страницы админа."""
+        body = self._request("GET", "/api/collections/users/records") or {}
+        items = body.get("items") or []
+        return [
+            {
+                "id": str(item.get("id") or ""),
+                "email": str(item.get("email") or ""),
+                "blocked": bool(item.get("blocked")),
+            }
+            for item in items
+            if isinstance(item, dict) and item.get("id")
+        ]
+
+    def ensure_blocked_field(self) -> bool:
+        """Поле blocked в коллекции людей: создаёт при первом запуске.
+
+        Возвращает True, если поле создалось; если сервер отказал —
+        проверка «заблокирован» просто не сработает (деградация, не падение).
+        """
+        try:
+            collection = self._request("GET", "/api/collections/users") or {}
+        except ServerError:
+            return False
+        fields = collection.get("fields") or []
+        if any(isinstance(field, dict) and field.get("name") == "blocked" for field in fields):
+            return False
+        fields.append({"name": "blocked", "type": "bool", "required": False})
+        payload = {
+            key: collection.get(key)
+            for key in ("name", "type", "fields", "indexes")
+            if key in collection
+        }
+        try:
+            self._request("PUT", "/api/collections/users", json=payload)
+        except ServerError:
+            return False
+        return True
+
     def _remember(self, body: dict[str, Any]) -> None:
         self._token = str(body.get("token") or "")
         record = body.get("record") or {}

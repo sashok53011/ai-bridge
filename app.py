@@ -304,6 +304,13 @@ def _serve(
     profile = users.get(admin_id) or {}
     users.remember(admin_id, profile.get("email") or admin_email, role="admin")
 
+    if server.ensure_blocked_field():
+        print("реестр доступа: поле blocked добавлено в аккаунты", flush=True)
+
+    def access_checker(user_id: str) -> bool:
+        """Онлайн-проверка реестра: зарегистрирован и не заблокирован."""
+        return server.access_state(user_id) == "ok"
+
     state = {"providers": providers, "server_flags": server_flags}
 
     def refresh_loop() -> None:
@@ -371,6 +378,7 @@ def _serve(
         user_tokens=user_tokens,
         context_for_user=context_for_user,
         api_gate=users.api_enabled,
+        access_checker=access_checker,
     )
 
 

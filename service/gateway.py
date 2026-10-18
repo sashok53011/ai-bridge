@@ -105,6 +105,14 @@ def test_chat(
     return {"question": question, "answer": answer or "(пустой ответ)", "error": ""}
 
 
+#: Как часто приставка переспрашивает реестр доступа о человеке (секунды).
+#: Десятки запросов человека в окне = один поход к серверу каталога.
+ACCESS_TTL = 300.0
+
+#: Память о недоступном реестре (секунды): не долбить сервер каждый запрос.
+ACCESS_DOWN = 60.0
+
+
 def _error_body(message: str, *, kind: str = "invalid_request_error", code: str | None = None) -> bytes:
     """Ошибка в формате, который понимают OpenAI-клиенты."""
     payload = {"error": {"message": message, "type": kind, "param": None, "code": code}}
@@ -155,6 +163,7 @@ class Gateway:
         user_tokens=None,  # storage.usertokens.UserTokens | None
         context_for_user: Callable[[str], tuple[Callable[[], list[dict]], object] | None] | None = None,
         api_gate: Callable[[str], bool] | None = None,
+        access_checker: Callable[[str], bool] | None = None,
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -164,6 +173,10 @@ class Gateway:
         self._user_tokens = user_tokens
         self._context_for_user = context_for_user
         self._api_gate = api_gate
+        self._access_checker = access_checker
+        # Реестр доступа: {человек: (время, годен?)} и память о поломке.
+        self._access_cache: dict[str, tuple[float, bool]] = {}
+        self._access_down_until = 0.0
         # Кэш live-списков моделей: {провайдер: (время, [модели])}.
         self._live_cache: dict[str, tuple[float, list[str]]] = {}
         self._cache_lock = threading.Lock()
@@ -211,6 +224,34 @@ class Gateway:
         if not self._token:
             return True, "", ""
         return hmac.compare_digest(value.encode("utf-8"), self._token.encode("utf-8")), "", ""
+
+    def authorize(self, user_id: str) -> tuple[bool, str]:
+        """Пропустить ли человека: зарегистрирован и не заблокирован.
+
+        Реестр — сервер каталога; его ответ помнится ACCESS_TTL секунд
+        на человека (десятки запросов = один поход), ошибка реестра —
+        пауза ACCESS_DOWN, без долба по каждому запросу. Без
+        ``access_checker`` (тесты, режим без реестра) пускают всех.
+        """
+        if not user_id or self._access_checker is None:
+            return True, ""
+        now = time.monotonic()
+        if now < self._access_down_until:
+            return False, "доступ не подтверждён: реестр недоступен, попробуйте через минуту"
+        cached = self._access_cache.get(user_id)
+        if cached and now - cached[0] < ACCESS_TTL:
+            return cached[1], (
+                "" if cached[1] else "нет доступа: аккаунт не зарегистрирован или заблокирован"
+            )
+        try:
+            ok = bool(self._access_checker(user_id))
+        except Exception:  # noqa: BLE001 — любая битость реестра = пауза, а не паника
+            self._access_down_until = now + ACCESS_DOWN
+            return False, "доступ не подтверждён: реестр недоступен, попробуйте через минуту"
+        self._access_cache[user_id] = (now, ok)
+        return ok, (
+            "" if ok else "нет доступа: аккаунт не зарегистрирован или заблокирован"
+        )
 
     def _context(self, user_id: str) -> tuple[Callable[[], list[dict]], object]:
         """(список провайдеров, ключи) для владельца токена."""
@@ -415,20 +456,24 @@ class _Handler(BaseHTTPRequestHandler):
     def gateway(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
 
-    def _reject_unauthorized(self, reason: str = "") -> None:
-        """401 в формате, который понимают OpenAI-клиенты."""
+    def _reject_unauthorized(self, reason: str = "", *, status: int = 401) -> None:
+        """Отказ в формате, который понимают OpenAI-клиенты.
+
+        401 — «нет токена», 403 — «токен есть, но доступа нет»
+        (не зарегистрирован, заблокирован, реестр молчит).
+        """
         message = reason or (
             "приставка ждёт свой токен в Authorization: Bearer <токен>; "
             "взять его: страница «приложения и токены»"
         )
         self._send(
-            401,
+            status,
             "application/json",
             [
                 _error_body(
                     message,
-                    kind="authentication_error",
-                    code="missing_token",
+                    kind="authentication_error" if status == 401 else "permission_error",
+                    code="missing_token" if status == 401 else "access_denied",
                 )
             ],
         )
@@ -495,6 +540,10 @@ class _Handler(BaseHTTPRequestHandler):
             if not allowed:
                 self._reject_unauthorized(reason)
                 return
+            ok, access_reason = self.gateway.authorize(user_id)
+            if not ok:
+                self._reject_unauthorized(access_reason, status=403)
+                return
             self._send_json(200, self.gateway.models_payload(user_id))
             return
         if path.startswith("/v1/"):
@@ -527,6 +576,10 @@ class _Handler(BaseHTTPRequestHandler):
         allowed, user_id, reason = self.gateway.authenticate(self.headers.get("Authorization", ""))
         if not allowed:
             self._reject_unauthorized(reason)
+            return
+        ok, access_reason = self.gateway.authorize(user_id)
+        if not ok:
+            self._reject_unauthorized(access_reason, status=403)
             return
 
         try:
@@ -574,19 +627,21 @@ def serve(
     user_tokens=None,
     context_for_user=None,
     api_gate=None,
+    access_checker=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
     ``ui`` — service.webui.WebUi: страница на том же порту, что и API.
     ``token`` — токен приставки; если задан, /v1/* требует его в заголовке.
     ``user_tokens`` + ``context_for_user`` — персональные токены людей,
-    ``api_gate`` — их тумблер «доступ приложений».
+    ``api_gate`` — их тумблер «доступ приложений», ``access_checker`` —
+    онлайн-проверка реестра (зарегистрирован/заблокирован).
     Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
     gateway = Gateway(
         entries_provider, keys, timeout=timeout, token=token,
         user_tokens=user_tokens, context_for_user=context_for_user,
-        api_gate=api_gate,
+        api_gate=api_gate, access_checker=access_checker,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

@@ -61,6 +61,7 @@ class _CatalogueMock:
 
         self.puts: list[list[dict]] = []
         self.deleted: list[str] = []
+        self.blocked = False
         state = {"providers": [dict(entry) for entry in entries]}
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -77,6 +78,19 @@ class _CatalogueMock:
                 return httpx.Response(
                     200, json={"canEdit": can_edit, "updated": "", "providers": state["providers"]}
                 )
+            if request.url.path == "/api/collections/users/records" and request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "items": [
+                            {"id": _GUEST, "email": "guest@mail", "blocked": self.blocked}
+                        ]
+                    },
+                )
+            if request.method == "PATCH" and "/api/collections/users/records/" in request.url.path:
+                body = _json.loads(request.content)
+                self.blocked = bool(body.get("blocked"))
+                return httpx.Response(200, json={"id": _GUEST, **body})
             if request.method == "DELETE" and "/api/collections/users/records/" in request.url.path:
                 self.deleted.append(request.url.path.rsplit("/", 1)[-1])
                 return httpx.Response(200, json={})
@@ -416,3 +430,29 @@ class TestAdminPeople:
         assert deleted.status_code == 303
         assert catalogue.deleted == [_GUEST]
         assert UserStore().get(_GUEST) is None
+
+    def test_the_admin_blocks_and_unblocks(self, harness) -> None:
+        catalogue, base = harness([_entry()])
+        UserStore().remember(_GUEST, "guest@mail")
+
+        with _client(base) as client:
+            _as_admin(client)
+            client.post("/users/block", data={"id": _GUEST})
+            assert catalogue.blocked is True
+            marked = client.get("/users")
+            assert "заблокирован" in marked.text
+            assert "разблокировать" in marked.text
+
+            client.post("/users/block", data={"id": _GUEST})
+            assert catalogue.blocked is False
+
+    def test_the_admin_cannot_block_themselves(self, harness) -> None:
+        catalogue, base = harness([_entry()])
+        UserStore().remember(_ADMIN, "a@b.c", role="admin")
+
+        with _client(base) as client:
+            _as_admin(client)
+            response = client.post("/users/block", data={"id": _ADMIN})
+
+        assert response.status_code == 303
+        assert catalogue.blocked is False

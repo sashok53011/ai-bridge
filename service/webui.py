@@ -308,10 +308,22 @@ class WebUi:
             if not is_admin:
                 self._forbidden(handler, "список людей — только администратору")
                 return
+            remote: dict[str, dict] = {}
+            try:
+                remote = {item["id"]: item for item in self._server.people()}
+            except ServerError:
+                remote = {}  # реестр молчит — покажем хотя бы локальные профили
+            people = [
+                {
+                    **profile,
+                    "blocked": bool(remote.get(str(profile.get("id")), {}).get("blocked")),
+                }
+                for profile in self._users.list_all()
+            ]
             self._send_html(
                 handler,
                 200,
-                users_page(self._users.list_all(), current_id=str(viewer["id"]), notice=notice),
+                users_page(people, current_id=str(viewer["id"]), notice=notice),
             )
             return
 
@@ -580,6 +592,24 @@ class WebUi:
                 return
             notice = f"{result['entry']['name']}: {result['note'] or result['error']}"
             self._redirect(handler, notice)
+            return
+
+        if clean == "/users/block":
+            target = field("id")
+            if target == user_id:
+                self._redirect(handler, "себя заблокировать нельзя", bad=True)
+                return
+            try:
+                remote = {item["id"]: item for item in self._server.people()}
+                blocked = not bool(remote.get(target, {}).get("blocked"))
+                self._server.set_blocked(target, blocked)
+            except ServerError as exc:
+                self._redirect(handler, f"на реестре не получилось ({exc})", bad=True)
+                return
+            self._redirect(
+                handler,
+                "заблокирован — не пускает ни одна приставка" if blocked else "разблокирован",
+            )
             return
 
         if clean == "/users/delete":

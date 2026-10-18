@@ -34,11 +34,16 @@ def _entry(**kwargs) -> dict:
 
 
 class TestCataloguePage:
-    def test_every_provider_is_a_row_with_its_address(self) -> None:
+    def test_every_provider_is_a_row_with_its_name(self) -> None:
         page = catalogue_page([_entry(), _entry(id="b", name="B", url="https://b/v1")])
         assert "Ollama" in page
-        assert "http://localhost:11434/v1" in page
-        assert "https://b/v1" in page
+        assert "B" in page
+
+    def test_addresses_are_hidden_everywhere(self) -> None:
+        """Адрес провайдера не показывается никому — только в формах админа."""
+        page = catalogue_page([_entry(url="http://secret-endpoint.internal:9999/v1")])
+        assert "secret-endpoint" not in page
+        assert "http://" not in page
 
     def test_a_switched_on_provider_carries_its_badge(self) -> None:
         page = catalogue_page([_entry(enabled=True)])
@@ -54,9 +59,10 @@ class TestCataloguePage:
         assert "<script>alert" not in page
         assert "&lt;script&gt;" in page
 
-    def test_a_foreign_url_is_escaped_too(self) -> None:
+    def test_a_foreign_url_never_reaches_the_page(self) -> None:
+        """URL не рендерится вовсе — даже с дурными схемами нет шанса."""
         page = catalogue_page([_entry(url='http://x/" onmouseover="evil()')])
-        assert 'onmouseover="evil()' not in page
+        assert "onmouseover" not in page
 
     def test_the_add_form_is_an_admin_affair(self) -> None:
         page = catalogue_page([_entry()], can_edit=True)
@@ -298,6 +304,21 @@ class TestUsersPage:
     def test_the_admin_cannot_delete_themselves(self) -> None:
         page = users_page([{"id": "u0", "email": "me@b.c", "role": "admin"}], current_id="u0")
         assert 'action="/users/delete"' not in page
+
+    def test_a_blocked_person_is_marked_and_can_be_unblocked(self) -> None:
+        page = users_page(
+            [{"id": "u1", "email": "x@y.z", "role": "user", "blocked": True}],
+            current_id="u0",
+        )
+        assert "заблокирован" in page
+        assert "разблокировать" in page
+
+    def test_an_active_person_can_be_blocked(self) -> None:
+        page = users_page(
+            [{"id": "u1", "email": "x@y.z", "role": "user"}],
+            current_id="u0",
+        )
+        assert 'action="/users/block"' in page
 
 
 class TestPickAndTestPages:
