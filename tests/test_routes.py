@@ -3,6 +3,7 @@
 from core.routes import (
     advertised_models,
     enabled,
+    is_local_url,
     request_needs,
     route,
     should_fallback,
@@ -111,6 +112,34 @@ class TestFallback:
     def test_a_bad_request_stays_where_it_is(self) -> None:
         for status in (400, 404, 413, 422):
             assert should_fallback(status) is False
+
+
+class TestIsLocalUrl:
+    """Локальные адреса — ждём их дольше (холодная загрузка модели)."""
+
+    def test_local_addresses(self) -> None:
+        for url in (
+            "http://localhost:11434/v1",
+            "http://127.0.0.1:1234/v1",
+            "http://192.168.0.133:11434/v1",
+            "http://10.0.0.5:11434/v1",
+            "http://172.20.0.3:11434/v1",
+            "http://nas.local:11434/v1",
+            "http://[::1]:11434/v1",
+        ):
+            assert is_local_url(url) is True, url
+
+    def test_internet_addresses(self) -> None:
+        for url in (
+            "https://api.openai.com/v1",
+            "https://8.8.8.8/v1",
+            "http://example.com/v1",
+        ):
+            assert is_local_url(url) is False, url
+
+    def test_garbage_is_not_local(self) -> None:
+        assert is_local_url("") is False
+        assert is_local_url("не адрес") is False
 
 
 class TestRequestNeeds:

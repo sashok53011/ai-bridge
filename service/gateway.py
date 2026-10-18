@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 from core.models import union_models
-from core.routes import advertised_models, request_needs, route, should_fallback
+from core.routes import advertised_models, is_local_url, request_needs, route, should_fallback
 from providers.client import NeedsKeyError, Provider, ServerError
 
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
@@ -35,6 +35,10 @@ _MODELS_TTL = 600.0
 
 #: Таймаут вытягивания списка моделей у одного провайдера.
 _MODELS_FETCH_TIMEOUT = 8.0
+
+#: Таймаут чата для локальных провайдеров (секунды): холодная загрузка
+#: модели в память Ollama/LM Studio — до пяти минут, ждём с запасом.
+LOCAL_TIMEOUT = 600.0
 
 #: Вопрос тестового чата: крошечный, но настоящий.
 DEFAULT_QUESTION = "Привет! Ответь одним словом: всё ли работает?"
@@ -135,6 +139,10 @@ def test_chat(
         return fail("у провайдера не выбрана модель — выберите её кнопкой «модель»")
     if not key:
         return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    if is_local_url(str(entry.get("url") or "")):
+        # Локальная модель может грузиться в память до пяти минут.
+        timeout = max(timeout, LOCAL_TIMEOUT)
 
     try:
         response = make_provider(entry["url"], timeout=timeout).forward_chat(
@@ -412,6 +420,16 @@ class Gateway:
         )
         return {"object": "list", "data": models} if models else _NO_MODELS
 
+    def _chat_timeout(self, entry: dict) -> float:
+        """Таймаут чата для одного провайдера.
+
+        Локальные модели загружаются в память на первом запросе — им
+        ждём до LOCAL_TIMEOUT; остальные работают с настроенным.
+        """
+        if is_local_url(str(entry.get("url") or "")):
+            return max(self._timeout, LOCAL_TIMEOUT)
+        return self._timeout
+
     def chat(self, body: bytes, requested_model: str, user_id: str = ""):
         """Проксирует чат по цепочке маршрутов.
 
@@ -448,7 +466,7 @@ class Gateway:
                 continue
 
             key = keys.get(entry["id"])
-            client = self._provider_factory(entry["url"], timeout=self._timeout)
+            client = self._provider_factory(entry["url"], timeout=self._chat_timeout(entry))
             try:
                 response = client.forward_chat(
                     _with_model(body, attempt["model"]),

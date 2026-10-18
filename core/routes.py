@@ -12,6 +12,9 @@
 
 from __future__ import annotations
 
+import ipaddress
+from urllib.parse import urlparse
+
 from core.models import offers_model
 
 #: На такие ответы провайдера стоит переключаться дальше. 401/403 —
@@ -20,6 +23,26 @@ from core.models import offers_model
 #: другое), 402 — пустой баланс у провайдеров вроде OpenRouter;
 #: остальные 4xx — вина клиента, и приставка честно возвращает их как есть.
 FALLBACK_STATUSES = (401, 402, 403, 429, 500, 502, 503, 504)
+
+
+def is_local_url(url: str) -> bool:
+    """Локальный ли адрес провайдера (своя сеть, не интернет).
+
+    У локальных моделей (Ollama, LM Studio) первый запрос может ждать,
+    пока модель загрузится в память, — до пяти минут; для таких
+    провайдеров таймаут чата берётся длиннее.
+    """
+    host = (urlparse(str(url or "")).hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if host.endswith(".local"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False
 
 
 def enabled(entries: list[dict]) -> list[dict]:

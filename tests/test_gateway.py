@@ -682,6 +682,43 @@ class TestApiGate:
         assert (allowed, user_id, reason) == (False, "", "")
 
 
+class TestLocalTimeout:
+    """Локальная модель может грузиться в память до пяти минут."""
+
+    def test_local_providers_get_the_patient_timeout(self, tmp_path) -> None:
+        gateway = Gateway(lambda: [], KeyStore(tmp_path), timeout=180.0)
+
+        assert gateway._chat_timeout({"url": "http://192.168.0.133:11434/v1"}) == 600.0
+        assert gateway._chat_timeout({"url": "http://localhost:1234/v1"}) == 600.0
+
+    def test_remote_providers_keep_the_configured_timeout(self, tmp_path) -> None:
+        gateway = Gateway(lambda: [], KeyStore(tmp_path), timeout=180.0)
+
+        assert gateway._chat_timeout({"url": "https://api.openai.com/v1"}) == 180.0
+        assert gateway._chat_timeout({"url": "https://8.8.8.8/v1"}) == 180.0
+
+    def test_a_bigger_setting_is_never_shrunk(self, tmp_path) -> None:
+        gateway = Gateway(lambda: [], KeyStore(tmp_path), timeout=900.0)
+
+        assert gateway._chat_timeout({"url": "http://127.0.0.1:1/v1"}) == 900.0
+
+    def test_the_test_chat_waits_for_a_cold_local_model(self) -> None:
+        seen: dict = {}
+
+        class _Fake:
+            def forward_chat(self, body, *, api_key, timeout, stream):
+                seen["timeout"] = timeout
+                import httpx as _httpx
+
+                return _httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+        entry = _entry(url="http://192.168.0.133:11434/v1")
+        result = run_test_chat(entry, "sk", make_provider=lambda url, **kw: _Fake())
+
+        assert result["answer"] == "ок"
+        assert seen["timeout"] == 600.0
+
+
 class TestAccessRegistry:
     """Онлайн-проверка реестра: зарегистрирован/заблокирован, с кэшем."""
 
