@@ -69,6 +69,26 @@ def merge_view(
         viewer_id=viewer_id or server.user_id,
         is_superuser=can_edit,
     )
+
+    # Личный выбор модели — как ключ: чужой не трогает. Отметка «picked»
+    # (флаг в снапшоте) отличает осознанный выбор от автоматически
+    # сохранённой серверной модели; флаг несётся через пересборку,
+    # иначе один просмотр страницы его бы съедал.
+    personal = {entry["id"]: entry for entry in local if entry.get("picked")}
+    if personal:
+        listed = [
+            (
+                {
+                    **entry,
+                    "model": personal[entry["id"]].get("model") or entry.get("model"),
+                    "picked": True,
+                }
+                if entry["id"] in personal and personal[entry["id"]].get("model")
+                else entry
+            )
+            for entry in listed
+        ]
+
     wanted = with_local_enabled(listed, local)
     store.save(wanted)
     return wanted
@@ -362,6 +382,14 @@ def set_model(
         return {"code": 2, "error": error, "entry": None}
 
     new_entry = next(entry for entry in updated if entry["id"] == provider_id)
+    if not can_edit:
+        # Личный выбор: помечаем осознанным (picked) — переживёт
+        # обновление каталога, как ключи и переключатели.
+        updated = [
+            {**entry, "picked": True} if entry["id"] == provider_id else entry
+            for entry in updated
+        ]
+        new_entry = next(entry for entry in updated if entry["id"] == provider_id)
     (snapshot or Snapshot()).save(updated)
 
     try:

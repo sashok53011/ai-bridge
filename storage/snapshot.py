@@ -44,6 +44,9 @@ class Snapshot:
             # кто-то вписал его руками.
             entry["enabled"] = isinstance(item, dict) and item.get("enabled") is True
             entry["mine"] = isinstance(item, dict) and item.get("mine") is True
+            # picked — «модель выбрана человеком лично» (не просто сохранена
+            # серверная): такой выбор переживает обновление каталога.
+            entry["picked"] = isinstance(item, dict) and item.get("picked") is True
             result.append(entry)
         return result
 
@@ -59,6 +62,7 @@ class Snapshot:
                 continue
             entry["enabled"] = bool(item.get("enabled"))
             entry["mine"] = bool(item.get("mine"))
+            entry["picked"] = bool(item.get("picked"))
             clean.append(entry)
         payload = json.dumps(clean, ensure_ascii=False, indent=2)
         self.path.write_text(payload, encoding="utf-8")

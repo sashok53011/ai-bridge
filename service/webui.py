@@ -544,6 +544,11 @@ class WebUi:
             if updated is None:
                 self._redirect(handler, error or "не получилось", bad=True)
                 return
+            # Отметка личного выбора: переживёт обновление каталога.
+            updated = [
+                {**item, "picked": True} if item["id"] == provider_id else item
+                for item in updated
+            ]
             space.snapshot.save(updated)
             self._event("модель", str(viewer.get("email") or ""), f"{entry['name']} -> {model}")
             self._redirect(handler, f"{entry['name']}: модель {model}")

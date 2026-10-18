@@ -315,3 +315,91 @@ class TestRemove:
 
         assert result["code"] == 0
         assert Snapshot().load() == []
+
+
+class TestPersonalModel:
+    """Модель — личный выбор: переживает пересборку каталога.
+
+    Регрессия 19.10.2026: человек выбрал модель на странице, а merge
+    затирал выбор серверной — проверка и /v1 продолжали стучаться к
+    старой, несуществующей модели.
+    """
+
+    def test_a_chosen_model_survives_a_catalogue_refresh(self, _device) -> None:
+        server = _Server(can_edit=False)
+        server.client.fetch_catalogue()
+        snapshot = Snapshot()
+        ops.merge_view(
+            server.client, [_entry()], can_edit=False, server_flags={}, snapshot=snapshot
+        )
+        snapshot.save(
+            [{**entry, "model": "qwen3:0.6b", "picked": True} for entry in snapshot.load()]
+        )
+
+        wanted = ops.merge_view(
+            server.client, [_entry(model="llama3.2")], can_edit=False,
+            server_flags={}, snapshot=snapshot,
+        )
+
+        assert wanted[0]["model"] == "qwen3:0.6b"
+
+    def test_an_admins_catalogue_change_does_not_clobber_the_choice(self, _device) -> None:
+        server = _Server(can_edit=False)
+        server.client.fetch_catalogue()
+        snapshot = Snapshot()
+        ops.merge_view(
+            server.client, [_entry()], can_edit=False, server_flags={}, snapshot=snapshot
+        )
+        snapshot.save(
+            [{**entry, "model": "qwen3:0.6b", "picked": True} for entry in snapshot.load()]
+        )
+
+        wanted = ops.merge_view(
+            server.client, [_entry(model="выбранная-админом")], can_edit=False,
+            server_flags={}, snapshot=snapshot,
+        )
+
+        assert wanted[0]["model"] == "qwen3:0.6b"
+
+    def test_a_different_model_without_the_mark_is_not_a_choice(self, _device) -> None:
+        """Регрессия: разные данные без отметки picked — это не выбор, а мусор."""
+        server = _Server(can_edit=False)
+        server.client.fetch_catalogue()
+        snapshot = Snapshot()
+        snapshot.save([_entry(model="кто-что-попало")])
+
+        wanted = ops.merge_view(
+            server.client, [_entry(model="server-model")], can_edit=False,
+            server_flags={}, snapshot=snapshot,
+        )
+
+        assert wanted[0]["model"] == "server-model"
+
+    def test_without_a_choice_the_server_model_wins(self, _device) -> None:
+        server = _Server(can_edit=False)
+        server.client.fetch_catalogue()
+        snapshot = Snapshot()
+        ops.merge_view(
+            server.client, [_entry(model="server-model")], can_edit=False,
+            server_flags={}, snapshot=snapshot,
+        )
+
+        wanted = ops.merge_view(
+            server.client, [_entry(model="server-model-2")], can_edit=False,
+            server_flags={}, snapshot=snapshot,
+        )
+
+        assert wanted[0]["model"] == "server-model-2"
+
+    def test_an_empty_snapshot_model_is_not_an_override(self, _device) -> None:
+        server = _Server(can_edit=False)
+        server.client.fetch_catalogue()
+        snapshot = Snapshot()
+        snapshot.save([_entry(model="")])
+
+        wanted = ops.merge_view(
+            server.client, [_entry(model="server-model")], can_edit=False,
+            server_flags={}, snapshot=snapshot,
+        )
+
+        assert wanted[0]["model"] == "server-model"

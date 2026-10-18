@@ -341,9 +341,12 @@ class TestPersonalSpace:
         with _client(base) as client:
             _as_guest(client)
             client.post("/pick/ollama", data={"model": "qwen3:0.6b"})
+            page = client.get("/")  # выбор должен сразу жить в каталоге
 
         guest = Snapshot(user_dir(_GUEST, _root())).load()
         assert guest[0]["model"] == "qwen3:0.6b"
+        assert guest[0]["picked"] is True  # отметка осознанного выбора
+        assert "qwen3:0.6b" in page.text
         assert Snapshot(_root()).load() == []  # каталог не тронут
 
 
