@@ -35,17 +35,26 @@ def _style() -> str:
   label { display: block; margin: .5rem 0; }"""
 
 
-def _copyable(value: str) -> str:
-    """Поле с адресом: клик выделяет и копирует в буфер.
+#: Крошечный скрипт копирования: кнопка кладёт адрес в буфер, при отказе
+#: (старый браузер, http) выделяет текст — останется Ctrl+C. Весь остальной
+#: странице JavaScript не нужен.
+COPY_SCRIPT = """<script>
+function cp(el, id) {
+  var node = document.getElementById(id);
+  var done = function() { el.textContent = 'скопировано ✓'; setTimeout(function() { el.textContent = 'копировать'; }, 2000); };
+  if (navigator.clipboard) { navigator.clipboard.writeText(node.textContent).then(done, function() { select(node); }); }
+  else { select(node); }
+  function select(n) { var r = document.createRange(); r.selectNodeContents(n); window.getSelection().removeAllRanges(); window.getSelection().addRange(r); }
+}
+</script>"""
 
-    Без JavaScript страница работает: поле просто выделяется, дальше
-    Ctrl+C — как обычно. Копирование по клику — прогрессивное улучшение.
-    """
+
+def _copy_line(value: str, node_id: str) -> str:
+    """Адрес + кнопка «копировать»: текст не редактируется, кнопка — в буфер."""
     return (
-        f'<input readonly class="copy" value="{escape(value, quote=True)}" '
-        f'onclick="this.select(); navigator.clipboard && '
-        f'navigator.clipboard.writeText(this.value)" '
-        f'title="клик — копировать в буфер">'
+        f'<span class="addr"><code id="{escape(node_id, quote=True)}">{escape(value)}</code> '
+        f'<button type="button" class="ghost" onclick="cp(this, '
+        f"'{escape(node_id, quote=True)}')\">копировать</button></span>"
     )
 
 
@@ -189,10 +198,11 @@ def catalogue_page(
     # своим пространством (ключ, модель, вкл).
     address_html = (
         '<p class="role">Для приложений (тип endpoint — OpenAI): '
-        f"{_copyable(app_address)}</p>"
+        f"{_copy_line(app_address, 'v1addr')}</p>"
         if app_address
         else ""
     )
+    copy_script = COPY_SCRIPT if app_address else ""
     add_html = ""
     if can_edit:
         add_html = """<details>
@@ -239,7 +249,7 @@ def catalogue_page(
   .notice.bad {{ background: rgba(160, 48, 48, .15); }}
   .role {{ opacity: .6; font-size: .85rem; }}
   .nav {{ font-size: .9rem; }}
-  input.copy {{ width: 24rem; max-width: 100%; font-family: monospace; }}
+  .addr code {{ font-family: monospace; user-select: all; }}
   .add {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #8884; }}
   .add input {{ margin: .2rem; padding: .3rem; }}
   details {{ margin-top: 1rem; }}
@@ -261,6 +271,7 @@ def catalogue_page(
 
 <p class="role">Ключи хранятся только на этом устройстве и уходят напрямую провайдеру —
 на сервер каталога они не попадают никогда.</p>
+{copy_script}
 </body>
 </html>"""
 
@@ -440,11 +451,13 @@ def tokens_page(
         else "доступ приложений ВЫКЛЮЧЕН — ни один токен не пройдёт"
     )
     address_html = ""
+    copy_script = ""
     if app_address:
+        copy_script = COPY_SCRIPT
         address_html = f"""<h2>Настройка в приложении</h2>
 <p class="role">Тип endpoint — <b>OpenAI</b>. Адрес вставьте в поле
-«custom base URL» (клик по полю копирует в буфер), а ключом будет ваш токен ниже.</p>
-<p>{_copyable(app_address)}</p>"""
+«custom base URL», а ключом будет ваш токен ниже.</p>
+<p>{_copy_line(app_address, "v1big")}</p>"""
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -461,6 +474,7 @@ def tokens_page(
   h2 {{ font-size: 1.1rem; margin-top: 1.6rem; }}
   .api {{ background: rgba(42, 128, 60, .10); padding: .6rem .8rem; border-radius: .4rem; }}
   .api.off {{ background: rgba(160, 48, 48, .15); }}
+  .addr code {{ font-family: monospace; user-select: all; }}
 </style>
 </head>
 <body>
@@ -484,6 +498,7 @@ def tokens_page(
 <p class="role">Токен показывается один раз при создании — скопируйте.
 Отозванный токен перестаёт работать мгновенно.</p>
 <p><a href="/">← назад в каталог</a></p>
+{copy_script}
 </body>
 </html>"""
 

@@ -382,7 +382,7 @@ class TestTokens:
             _as_guest(client)
             page = client.get("/")
         port = base.rsplit(":", 1)[1]
-        assert f'value="http://127.0.0.1:{port}/v1"' in page.text
+        assert f">http://127.0.0.1:{port}/v1<" in page.text
 
     def test_the_api_switch_flips_the_flag(self, harness) -> None:
         users = UserStore()

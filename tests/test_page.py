@@ -203,12 +203,15 @@ class TestProviderLinks:
 class TestAppAddress:
     def test_the_catalogue_shows_a_copyable_endpoint_line(self) -> None:
         page = catalogue_page([_entry()], app_address="https://ai.devhorizon.online/v1")
-        assert 'value="https://ai.devhorizon.online/v1"' in page
-        assert "clipboard" in page  # клик копирует в буфер
-        assert "клик — копировать" in page
+        assert ">https://ai.devhorizon.online/v1<" in page  # текст, не поле ввода
+        assert 'id="v1addr"' in page
+        assert "копировать" in page  # отдельная кнопка
+        assert "function cp(" in page  # и скрипт копирования
 
     def test_no_address_no_line(self) -> None:
-        assert "clipboard" not in catalogue_page([_entry()])
+        page = catalogue_page([_entry()])
+        assert "function cp(" not in page
+        assert "копировать</button>" not in page
 
     def test_the_tokens_page_is_a_setup_guide_with_a_switch(self) -> None:
         page = tokens_page(
@@ -217,7 +220,9 @@ class TestAppAddress:
             api_on=True,
         )
         assert "Приложения и токены" in page
-        assert 'value="https://ai.devhorizon.online/v1"' in page
+        assert ">https://ai.devhorizon.online/v1<" in page
+        assert 'id="v1big"' in page
+        assert "function cp(" in page
         assert 'action="/tokens/api"' in page
         assert "выключить доступ" in page
         assert "OpenAI" in page  # тип endpoint для настройки
