@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from providers.client import Provider
-from service.gateway import Gateway, _Handler, _Server
+from service.gateway import Gateway, _Handler, _Server, _hidden_error
 from service.gateway import test_chat as run_test_chat  # имя «test_*» путает pytest
 from storage.keys import KeyStore
 
@@ -359,6 +359,13 @@ class TestTestChat:
         assert "не выбрана модель" in run_test_chat(_entry(model=""), "sk")["error"]
         assert "нужен ключ" in run_test_chat(_entry(), "")["error"]
 
+    def test_a_hidden_error_in_a_200_is_reported_not_swallowed(self) -> None:
+        fake = _FakeModel({"error": {"message": "insufficient quota"}})
+
+        result = run_test_chat(_entry(), "sk", make_provider=lambda url, **kw: fake)
+
+        assert "quota" in result["error"]
+
 
 class TestProxyTransparency:
     """Клиент должен знать, кто реально ответил, — не только журнал приставки."""
@@ -435,6 +442,93 @@ class TestProxyTransparency:
         assert "ни один провайдер не ответил" in text
         assert "Ollama" in text and "HTTP 429" in text
         assert "OpenAI" in text and "HTTP 500" in text
+
+
+class TestHiddenErrors:
+    """Шлюзы иногда отвечают 200, а кладут в JSON ошибку — это отказ."""
+
+    @staticmethod
+    def _two() -> list[dict]:
+        return [
+            _entry(),  # первый по приоритету, ответит «скрытой ошибкой»
+            _entry(
+                id="openai",
+                name="OpenAI",
+                url="https://api.openai.test/v1",
+                model="gpt-4o-mini",
+                fallbackPriority=9,
+            ),
+        ]
+
+    def test_a_200_with_an_error_body_hands_over_to_the_next(self, harness) -> None:
+        h = harness(
+            self._two(),
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    200, json={"error": {"message": "insufficient quota"}}
+                ),
+                "https://api.openai.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "ok"}}]}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=json.dumps({"messages": []}))
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "OpenAI"
+
+    def test_the_reason_lands_in_the_error_when_nobody_answers(self, harness) -> None:
+        h = harness(
+            self._two(),
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    200, json={"error": {"message": "quota exceeded"}}
+                ),
+                "https://api.openai.test": lambda req: httpx.Response(
+                    200, json={"error": {"message": "also broken"}}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=json.dumps({"messages": []}))
+
+        assert response.status_code == 502
+        assert "скрытая ошибка" in response.text
+        assert "quota exceeded" in response.text
+
+    def test_a_healthy_200_is_not_disturbed(self, harness) -> None:
+        h = harness(
+            [_entry()],
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "привет"}}]}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=json.dumps({"messages": []}))
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "Ollama"
+
+
+class TestHiddenErrorShapes:
+    """Что считается ошибкой, а что здоровым ответом."""
+
+    def test_error_objects_are_failures(self) -> None:
+        assert "quota" in _hidden_error(b'{"error": {"message": "quota"}}')
+        assert "упал" in _hidden_error('{"error": "упал"}'.encode("utf-8"))
+        assert "скрытая ошибка" in _hidden_error(b'{"type": "error", "message": "x"}')
+
+    def test_a_chat_answer_is_not_an_error(self) -> None:
+        healthy = b'{"choices": [{"message": {"content": "ok"}}]}'
+        assert _hidden_error(healthy) == ""
+
+    def test_garbage_and_empty_bodies_are_not_errors(self) -> None:
+        assert _hidden_error(b"") == ""
+        assert _hidden_error("<html>привет</html>".encode("utf-8")) == ""
+        assert _hidden_error(b'{"junk": 1}') == ""
 
 
 class TestApiGate:

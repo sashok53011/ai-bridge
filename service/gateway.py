@@ -40,6 +40,31 @@ _MODELS_FETCH_TIMEOUT = 8.0
 DEFAULT_QUESTION = "Привет! Ответь одним словом: всё ли работает?"
 
 
+def _hidden_error(payload: bytes) -> str:
+    """Скрытая ошибка внутри 200-ответа: пустая строка — ответ здоров.
+
+    Часть шлюзов отвечает HTTP 200, а кладёт в JSON объект ошибки
+    ({"error": {...}} или {"type": "error"} без choices) — для прокси
+    это отказ, а не чат: такого провайдера надо переключать.
+    """
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(data, dict) or "choices" in data:
+        return ""
+    error = data.get("error")
+    if isinstance(error, dict):
+        detail = str(error.get("message") or error.get("type") or error)
+    elif isinstance(error, str):
+        detail = error
+    elif data.get("type") == "error" or data.get("object") == "error":
+        detail = str(data.get("message") or "провайдер сообщил об ошибке")
+    else:
+        return ""
+    return f"скрытая ошибка в ответе 200: {detail[:200]}"
+
+
 def test_chat(
     entry: dict,
     key: str,
@@ -88,8 +113,13 @@ def test_chat(
         detail = response.read().decode("utf-8", errors="replace")[:300]
         return fail(f"HTTP {response.status_code}: {detail}".strip())
 
+    payload = response.read()
+    hidden = _hidden_error(payload)
+    if hidden:
+        return fail(hidden)
+
     try:
-        data = response.json()
+        data = json.loads(payload.decode("utf-8"))
         message = data["choices"][0].get("message") or {}
         answer = (message.get("content") or "").strip()
         if not answer:
@@ -398,6 +428,24 @@ class Gateway:
 
             content_type = response.headers.get("content-type", "application/json")
 
+            if response.status_code < 400 and "text/event-stream" not in content_type:
+                # Успех (не-поток): тело читаем целиком и проверяем на
+                # скрытую ошибку — шлюзы вроде отвечают 200, а кладут
+                # {"error":}. Ошибки клиента (4xx без фолбэка) идут как есть.
+                payload = response.read()
+                response.close()
+                hidden = _hidden_error(payload)
+                if hidden:
+                    problems.append(f"{entry['name']}: {hidden}")
+                    continue
+
+                def chunks(body=payload):
+                    yield body
+
+                return response.status_code, content_type, chunks(), entry["name"], attempt["model"]
+
+            # Поток начат — ошибку в его середине переключить уже нельзя:
+            # клиент начал получать данные. Это честное ограничение прокси.
             def chunks(resp=response):
                 try:
                     yield from resp.iter_bytes()
