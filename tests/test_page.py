@@ -10,6 +10,7 @@ from core.page import (
     edit_page,
     key_page,
     login_page,
+    logs_page,
     pick_model_page,
     signup_page,
     test_page as chat_test_page,  # имя «test_*» путает pytest с тестами
@@ -376,6 +377,37 @@ class TestAddPage:
     def test_the_destination_note_matches_the_role(self) -> None:
         assert "видят только вы" in add_page(is_admin=False)
         assert "видят все" in add_page(is_admin=True)
+
+
+class TestLogsPage:
+    def test_events_render_newest_first(self) -> None:
+        # Список приходит отсортированным (новые сверху) — как из журнала.
+        page = logs_page(
+            [
+                {"ts": "2026-10-18T12:01:00Z", "kind": "чат", "user": "u1", "text": "qwen3 через Ollama"},
+                {"ts": "2026-10-18T12:00:00Z", "kind": "вход", "user": "a@b.c", "text": "вышел"},
+            ]
+        )
+        assert page.index("qwen3 через Ollama") < page.index("вышел")  # новые сверху
+        assert "12:01:00" in page  # время без даты — дата в логе и так видна
+
+    def test_the_page_refreshes_itself(self) -> None:
+        page = logs_page([])
+        assert 'http-equiv="refresh" content="5"' in page
+
+    def test_autoscroll_button_shows_the_state(self) -> None:
+        assert "автоскролл: вкл" in logs_page([], autoscroll=True)
+        assert "автоскролл: выкл" in logs_page([], autoscroll=False)
+
+    def test_foreign_words_cannot_break_the_table(self) -> None:
+        page = logs_page(
+            [{"ts": "2026-10-18T12:00:00Z", "kind": "x", "user": "<img src=x>", "text": "<b>жирный</b>"}]
+        )
+        assert "<img" not in page
+        assert "&lt;img" in page
+
+    def test_an_empty_journal_says_so(self) -> None:
+        assert "событий пока нет" in logs_page([])
 
 
 class TestProviderVitrine:

@@ -62,6 +62,7 @@ def _nav(*, can_edit: bool) -> str:
     """Верхняя строка: личные разделы и выход."""
     links = ['<a href="/tokens">приложения и токены</a>']
     if can_edit:
+        links.append('<a href="/logs">журнал</a>')
         links.append('<a href="/users">пользователи</a>')
     links.append(
         '<form method="post" action="/logout" style="display:inline">'
@@ -629,6 +630,59 @@ def token_created_page(token: str, name: str) -> str:
 <p class="role">Скопируйте сейчас: показывается один раз. В приложении укажите
 адрес приставки <code>/v1</code> и этот токен в Authorization.</p>
 <p><a href="/tokens">← к токенам</a></p>
+</body>
+</html>"""
+
+
+def logs_page(events: list[dict], *, autoscroll: bool = False, notice: str = "") -> str:
+    """Журнал событий: таблица, новые сверху, обновление раз в 5 секунд.
+
+    Без JavaScript страница работает: обновление — meta-refresh; кнопка
+    autoscroll кладёт флаг в cookie, а сам скролл к свежим (наверх) делает
+    крошечный скрипт — без него остаётся обычное поведение браузера.
+    """
+    rows = "\n".join(
+        f'<tr><td class="ts">{escape(str(item.get("ts") or "")[11:19])}</td>'
+        f'<td class="kind">{escape(str(item.get("kind") or ""))}</td>'
+        f'<td>{escape(str(item.get("user") or ""))}</td>'
+        f'<td class="text">{escape(str(item.get("text") or ""))}</td></tr>'
+        for item in events
+    ) or '<tr><td colspan="4" class="empty">событий пока нет</td></tr>'
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="5">
+<title>Журнал — AI-приставка</title>
+<style>
+{_style()}
+  body {{ max-width: 62rem; }}
+  table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
+  th, td {{ text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #8884; }}
+  td.ts {{ white-space: nowrap; font-family: monospace; }}
+  td.kind {{ white-space: nowrap; }}
+  td.text {{ word-break: break-word; }}
+</style>
+</head>
+<h1>Журнал</h1>
+{_nav(can_edit=True)}
+{notice_html}
+<p><form method="post" action="/logs/autoscroll" style="display:inline">
+  <button type="submit" class="ghost">автоскролл: {"вкл" if autoscroll else "выкл"}</button>
+</form>
+<form method="post" action="/logs/clear" style="display:inline">
+  <button type="submit" class="ghost danger">очистить</button>
+</form>
+<span class="role">обновляется само раз в 5 секунд</span></p>
+<table>
+<tr><th>время</th><th>тип</th><th>кто</th><th>событие</th></tr>
+{rows}
+</table>
+<script>
+if (document.cookie.indexOf("ai_bridge_autoscroll=on") >= 0) window.scrollTo(0, 0);
+</script>
 </body>
 </html>"""
 

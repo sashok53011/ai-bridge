@@ -347,6 +347,48 @@ class TestPersonalSpace:
         assert Snapshot(_root()).load() == []  # каталог не тронут
 
 
+class TestLogs:
+    def test_the_log_is_admin_only(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/logs")
+        assert page.status_code == 403
+
+    def test_the_admin_sees_a_live_journal(self, harness) -> None:
+        from service.eventlog import EventLog
+
+        log = EventLog()
+        _, base = harness([_entry()], event_log=log)
+        with _client(base) as client:
+            _as_admin(client)
+            client.post("/toggle/ollama")
+            page = client.get("/logs")
+
+        assert "тумблер" in page.text
+        assert 'http-equiv="refresh"' in page.text
+
+    def test_a_login_lands_in_the_journal(self, harness) -> None:
+        from service.eventlog import EventLog
+
+        log = EventLog()
+        _, base = harness([_entry()], event_log=log)
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+
+        kinds = [event["kind"] for event in log.recent()]
+        assert "вход" in kinds
+
+    def test_autoscroll_remembers_the_choice(self, harness) -> None:
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_admin(client)
+            response = client.post("/logs/autoscroll")
+
+        assert response.status_code == 303
+        assert "ai_bridge_autoscroll=on" in response.headers.get("set-cookie", "")
+
+
 class TestAdminWritesKeepCatalogue:
     """Регрессия 16.10.2026: админская запись строится по свежему серверному списку."""
 

@@ -26,6 +26,7 @@ from typing import Callable
 from core.models import union_models
 from core.routes import advertised_models, is_local_url, request_needs, route, should_fallback
 from providers.client import NeedsKeyError, Provider, ServerError
+from service.eventlog import bodies_enabled
 
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
 _NO_MODELS = {"object": "list", "data": []}
@@ -238,6 +239,7 @@ class Gateway:
         context_for_user: Callable[[str], tuple[Callable[[], list[dict]], object] | None] | None = None,
         api_gate: Callable[[str], bool] | None = None,
         access_checker: Callable[[str], bool] | None = None,
+        event_log=None,  # service.eventlog.EventLog | None
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -248,6 +250,7 @@ class Gateway:
         self._context_for_user = context_for_user
         self._api_gate = api_gate
         self._access_checker = access_checker
+        self._event_log = event_log
         # Реестр доступа: {человек: (время, годен?)} и память о поломке.
         self._access_cache: dict[str, tuple[float, bool]] = {}
         self._access_down_until = 0.0
@@ -376,6 +379,13 @@ class Gateway:
 
         threading.Thread(target=loop, daemon=True).start()
 
+    # ------------------------------------------------------------ журнал
+
+    def note(self, kind: str, user: str, text: str, **fields) -> None:
+        """Событие в журнал приставки; без журнала — молча пропускаем."""
+        if self._event_log is not None:
+            self._event_log.record(kind, user, text, **fields)
+
     # ------------------------------------------------------------ решения
 
     def models_payload(self, user_id: str = "") -> dict:
@@ -443,6 +453,7 @@ class Gateway:
         entries = entries_provider()
         needs = _needs_of(body)
         attempts = route(entries, requested_model, needs=needs)
+        started = time.monotonic()
         if not attempts:
             available = ", ".join(model["id"] for model in advertised_models(entries))
             message = f"модель «{requested_model or '—'}» не обслуживается"
@@ -455,10 +466,33 @@ class Gateway:
                 message += f"; доступны: {available}"
             else:
                 message += "; ни один провайдер не включён"
+            self.note("чат", user_id or "—", f"нет маршрута: {message[:150]}")
             return 502, "application/json", [_error_body(message, code="model_not_available")], "", ""
 
         by_id = {entry["id"]: entry for entry in entries}
         problems: list[str] = []
+
+        def served(status, content_type, entry, model, chunks, resp_body: bytes = b""):
+            """Успех: отдаём ответ и пишем событие в журнал."""
+            duration = round(time.monotonic() - started, 1)
+            fields: dict = {
+                "model": model,
+                "provider": entry["name"],
+                "status": status,
+                "duration": duration,
+                "attempts": len(problems) + 1,
+            }
+            if bodies_enabled():
+                fields["req"] = body[:500].decode("utf-8", errors="replace")
+                if resp_body:
+                    fields["resp"] = resp_body[:500].decode("utf-8", errors="replace")
+            self.note(
+                "чат",
+                user_id or "—",
+                f"{model} через {entry['name']} · HTTP {status} · {duration}s",
+                **fields,
+            )
+            return status, content_type, chunks, entry["name"], model
 
         for attempt in attempts:
             entry = by_id.get(attempt["providerId"])
@@ -500,12 +534,13 @@ class Gateway:
                 def chunks_400(body=raw):
                     yield body
 
-                return (
+                return served(
                     400,
                     response.headers.get("content-type", "application/json"),
-                    chunks_400(),
-                    entry["name"],
+                    entry,
                     attempt["model"],
+                    chunks_400(),
+                    raw,
                 )
 
             content_type = response.headers.get("content-type", "application/json")
@@ -524,7 +559,7 @@ class Gateway:
                 def chunks(body=payload):
                     yield body
 
-                return response.status_code, content_type, chunks(), entry["name"], attempt["model"]
+                return served(response.status_code, content_type, entry, attempt["model"], chunks(), payload)
 
             # Поток начат — ошибку в его середине переключить уже нельзя:
             # клиент начал получать данные. Это честное ограничение прокси.
@@ -534,12 +569,18 @@ class Gateway:
                 finally:
                     resp.close()
 
-            return response.status_code, content_type, chunks(), entry["name"], attempt["model"]
+            return served(response.status_code, content_type, entry, attempt["model"], chunks())
 
         message = "ни один провайдер не ответил"
         if problems:
             # Все попытки с причинами: диагностика в одну строку.
             message += ": " + "; ".join(problems[:6])
+        self.note(
+            "чат",
+            user_id or "—",
+            f"не получились все попытки: {'; '.join(problems[:4])}"[:400],
+            status=502,
+        )
         return 502, "application/json", [_error_body(message, kind="api_error", code="upstream_failed")], "", ""
 
 
@@ -668,12 +709,15 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/v1/models", "/models"):
             allowed, user_id, reason = self.gateway.authenticate(self.headers.get("Authorization", ""))
             if not allowed:
+                self.gateway.note("модели", "—", "отказ без токена", status=401)
                 self._reject_unauthorized(reason)
                 return
             ok, access_reason = self.gateway.authorize(user_id)
             if not ok:
+                self.gateway.note("модели", user_id, f"доступ не подтверждён: {access_reason}", status=403)
                 self._reject_unauthorized(access_reason, status=403)
                 return
+            self.gateway.note("модели", user_id, "запрошен список")
             self._send_json(200, self.gateway.models_payload(user_id))
             return
         if path.startswith("/v1/"):
@@ -705,10 +749,12 @@ class _Handler(BaseHTTPRequestHandler):
 
         allowed, user_id, reason = self.gateway.authenticate(self.headers.get("Authorization", ""))
         if not allowed:
+            self.gateway.note("чат", "—", "отказ без токена", status=401)
             self._reject_unauthorized(reason)
             return
         ok, access_reason = self.gateway.authorize(user_id)
         if not ok:
+            self.gateway.note("чат", user_id, f"доступ не подтверждён: {access_reason}", status=403)
             self._reject_unauthorized(access_reason, status=403)
             return
 
@@ -758,6 +804,7 @@ def serve(
     context_for_user=None,
     api_gate=None,
     access_checker=None,
+    event_log=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
@@ -765,13 +812,14 @@ def serve(
     ``token`` — токен приставки; если задан, /v1/* требует его в заголовке.
     ``user_tokens`` + ``context_for_user`` — персональные токены людей,
     ``api_gate`` — их тумблер «доступ приложений», ``access_checker`` —
-    онлайн-проверка реестра (зарегистрирован/заблокирован).
+    онлайн-проверка реестра (зарегистрирован/заблокирован),
+    ``event_log`` — журнал событий для страницы «Журнал».
     Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
     gateway = Gateway(
         entries_provider, keys, timeout=timeout, token=token,
         user_tokens=user_tokens, context_for_user=context_for_user,
-        api_gate=api_gate, access_checker=access_checker,
+        api_gate=api_gate, access_checker=access_checker, event_log=event_log,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

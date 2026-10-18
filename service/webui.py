@@ -32,6 +32,7 @@ from core.page import (
     edit_page,
     key_page,
     login_page,
+    logs_page,
     pick_model_page,
     signup_page,
     test_page,
@@ -50,6 +51,9 @@ from storage.users import UserStore
 #: Имя cookie входа; значение — id сессии, срок — до закрытия браузера.
 _COOKIE_NAME = "ai_bridge_session"
 
+#: Имя cookie автоскролла журнала.
+_AUTOSCROLL_COOKIE = "ai_bridge_autoscroll"
+
 
 def _same(left: str, right: str) -> bool:
     """Сравнение секретов без утечки и без TypeError на не-ASCII."""
@@ -63,7 +67,8 @@ class WebUi:
     ``spaces`` — личные пространства; ``server`` — клиент каталога
     (проверка логинов и админ-действия); ``admin_id`` — суперпользо­ватель
     приставки; ``device_token`` — его аварийный токен. ``authenticator``
-    и ``signup_hook`` подменяются в тестах.
+    и ``signup_hook`` подменяются в тестах; ``event_log`` — журнал
+    событий (кто заходил, на что нажал).
     """
 
     def __init__(
@@ -81,6 +86,7 @@ class WebUi:
         make_provider=None,
         authenticator: Callable[[str, str], tuple[str, str, bool]] | None = None,
         signup_hook: Callable[[str, str], None] | None = None,
+        event_log=None,  # service.eventlog.EventLog | None
     ) -> None:
         self._providers_source = providers_source
         self._server = server
@@ -94,6 +100,12 @@ class WebUi:
         self._make_provider = make_provider
         self._authenticator = authenticator or self._authenticate_on_server
         self._signup_hook = signup_hook or self._signup_on_server
+        self._log = event_log
+
+    def _event(self, kind: str, user: str, text: str, **fields) -> None:
+        """Одно событие в журнал; без журнала — молча пропускаем."""
+        if self._log is not None:
+            self._log.record(kind, user, text, **fields)
 
     # ------------------------------------------------------------ вход
 
@@ -268,6 +280,7 @@ class WebUi:
         role = str(viewer.get("role") or "")
         is_admin = role == ROLE_ADMIN
         space = self._spaces.for_user(str(viewer["id"]))
+        self._event("страница", str(viewer.get("email") or ""), clean or "/")
 
         if clean in ("/", "/index.html"):
             try:
@@ -329,6 +342,20 @@ class WebUi:
                 handler,
                 200,
                 users_page(people, current_id=str(viewer["id"]), notice=notice),
+            )
+            return
+
+        if clean == "/logs":
+            if not is_admin:
+                self._forbidden(handler, "журнал — только администратору")
+                return
+            autoscroll = any(
+                part.strip() == f"{_AUTOSCROLL_COOKIE}=on"
+                for part in (handler.headers.get("Cookie") or "").split(";")
+            )
+            events = self._log.recent(200) if self._log is not None else []
+            self._send_html(
+                handler, 200, logs_page(events, autoscroll=autoscroll, notice=notice)
             )
             return
 
@@ -422,6 +449,7 @@ class WebUi:
 
         if clean == "/logout":
             self._sessions.drop(self._session_cookie(handler))
+            self._event("вход", str(viewer.get("email") or ""), "вышел")
             handler.send_response(303)
             handler.send_header("Location", "/login")
             handler.send_header(
@@ -455,6 +483,7 @@ class WebUi:
             notice = f"{entry['name']}: {word}"
             if result["error"]:
                 notice = result["error"]
+            self._event("тумблер", str(viewer.get("email") or ""), notice)
             self._redirect(handler, notice)
             return
 
@@ -469,7 +498,9 @@ class WebUi:
                 self._server, entry, space.keys.get(provider_id),
                 report_for=user_id, **kwargs,
             )
-            self._redirect(handler, self._check_notice(entry, result))
+            notice = self._check_notice(entry, result)
+            self._event("проверка", str(viewer.get("email") or ""), notice)
+            self._redirect(handler, notice)
             return
 
         if clean.startswith("/test/"):
@@ -481,6 +512,12 @@ class WebUi:
             outcome = test_chat(
                 entry, space.keys.get(provider_id),
                 **({} if self._make_provider is None else {"make_provider": self._make_provider}),
+            )
+            self._event(
+                "тест",
+                str(viewer.get("email") or ""),
+                f"{entry['name']}: "
+                + (f"ответ от {entry.get('model', '')}" if not outcome["error"] else outcome["error"]),
             )
             self._send_html(
                 handler,
@@ -508,6 +545,7 @@ class WebUi:
                 self._redirect(handler, error or "не получилось", bad=True)
                 return
             space.snapshot.save(updated)
+            self._event("модель", str(viewer.get("email") or ""), f"{entry['name']} -> {model}")
             self._redirect(handler, f"{entry['name']}: модель {model}")
             return
 
@@ -518,12 +556,18 @@ class WebUi:
                 self._not_found(handler)
                 return
             space.keys.set(provider_id, field("api_key"))
+            self._event("ключ", str(viewer.get("email") or ""), f"{entry['name']}: сохранён")
             self._redirect(handler, f"{entry['name']}: ключ сохранён в вашем пространстве")
             return
 
         if clean == "/tokens/api":
             turned_on = not self._users.api_enabled(user_id)
             self._users.set_api(user_id, turned_on)
+            self._event(
+                "доступ приложений",
+                str(viewer.get("email") or ""),
+                "включён" if turned_on else "выключен",
+            )
             self._redirect(
                 handler,
                 "доступ приложений включён — токены работают"
@@ -538,11 +582,13 @@ class WebUi:
                 self._redirect(handler, "назовите токен", bad=True)
                 return
             token = self._user_tokens.create(user_id, name)
+            self._event("токен", str(viewer.get("email") or ""), f"создан «{name}»")
             self._send_html(handler, 200, token_created_page(token, name))
             return
 
         if clean == "/tokens/revoke":
             if self._user_tokens.revoke(user_id, field("tail")):
+                self._event("токен", str(viewer.get("email") or ""), "отозван")
                 self._redirect(handler, "токен отозван")
             else:
                 self._redirect(handler, "такого токена нет", bad=True)
@@ -613,6 +659,11 @@ class WebUi:
             if result["entry"] is None:
                 self._redirect(handler, result["error"] or "не получилось", bad=True)
                 return
+            self._event(
+                "провайдер",
+                str(viewer.get("email") or ""),
+                f"добавлен {result['entry']['name']}: {result['note'] or result['error']}",
+            )
             self._redirect(handler, f"{result['entry']['name']}: {result['note'] or result['error']}")
             return
 
@@ -635,6 +686,7 @@ class WebUi:
                 snapshot=admin_space.snapshot, key_store=admin_space.keys,
             )
             notice = (result["note"] and f"{entry['name']}: {result['note']}") or ""
+            self._event("провайдер", str(viewer.get("email") or ""), notice or result["error"])
             self._redirect(handler, result["error"] or notice)
             return
 
@@ -657,6 +709,12 @@ class WebUi:
                 provider_id, changes, can_edit=True, snapshot=admin_space.snapshot,
             )
             notice = f"{entry['name']}: сохранено" if result["error"] is None else result["error"]
+            self._event(
+                "правка",
+                str(viewer.get("email") or ""),
+                notice,
+                **{key: value for key, value in changes.items() if value},
+            )
             self._redirect(handler, notice)
             return
 
@@ -676,6 +734,11 @@ class WebUi:
                 handler,
                 "заблокирован — не пускает ни одна приставка" if blocked else "разблокирован",
             )
+            self._event(
+                "блокировка",
+                str(viewer.get("email") or ""),
+                f"{target}: {'заблокирован' if blocked else 'разблокирован'}",
+            )
             return
 
         if clean == "/users/delete":
@@ -691,7 +754,31 @@ class WebUi:
             self._user_tokens.drop_user(target)
             self._sessions.drop_user(target)
             self._users.purge(target)
+            self._event("удаление", str(viewer.get("email") or ""), f"пользователь {target} удалён")
             self._redirect(handler, "пользователь удалён: аккаунт, токены и пространство")
+            return
+
+        if clean == "/logs/autoscroll":
+            currently_on = any(
+                part.strip() == f"{_AUTOSCROLL_COOKIE}=on"
+                for part in (handler.headers.get("Cookie") or "").split(";")
+            )
+            value = "off" if currently_on else "on"
+            handler.send_response(303)
+            handler.send_header("Location", "/logs")
+            handler.send_header(
+                "Set-Cookie", f"{_AUTOSCROLL_COOKIE}={value}; Path=/; Max-Age=31536000"
+            )
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            self._event("журнал", str(viewer.get("email") or ""), f"автоскролл {value}")
+            return
+
+        if clean == "/logs/clear":
+            if self._log is not None:
+                self._log.clear()
+            self._event("журнал", str(viewer.get("email") or ""), "очищен")
+            self._redirect(handler, "журнал очищен")
             return
 
         self._not_found(handler)
@@ -704,10 +791,12 @@ class WebUi:
             if self._device_token and _same(token, self._device_token):
                 owner = self._user_tokens.owner(self._device_token) or self._admin_id
                 profile = self._users.get(owner) or {}
+                self._event("вход", str(profile.get("email") or "админ"), "вход по токену")
                 self._start_session(
                     handler, {"id": owner, "email": profile.get("email", ""), "role": ROLE_ADMIN}
                 )
                 return
+            self._event("вход", "—", "отказ: неверный токен")
             self._send_html(handler, 200, login_page("неверный токен"))
             return
 
@@ -718,6 +807,7 @@ class WebUi:
         try:
             user_id, email, can_edit = self._authenticator(email, password)
         except ServerError:
+            self._event("вход", email or "—", "отказ: почта или пароль не подошли")
             self._send_html(handler, 200, login_page("почта или пароль не подошли"))
             return
         if not user_id:
@@ -725,6 +815,7 @@ class WebUi:
             return
         role = ROLE_ADMIN if can_edit else "user"
         self._users.remember(user_id, email, role=role)
+        self._event("вход", email, "успешный вход")
         self._start_session(handler, {"id": user_id, "email": email, "role": role})
 
     def _post_signup(self, handler: BaseHTTPRequestHandler, field) -> None:
@@ -738,8 +829,10 @@ class WebUi:
         try:
             self._signup_hook(email, password)
         except ServerError as exc:
+            self._event("регистрация", email or "—", f"отказ: {exc}")
             self._send_html(handler, 200, signup_page(f"регистрация не прошла: {exc}"))
             return
+        self._event("регистрация", email, "аккаунт создан")
         try:
             user_id, email, can_edit = self._authenticator(email, password)
         except ServerError:

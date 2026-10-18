@@ -284,6 +284,7 @@ def _serve(
     import time
 
     from service import autopilot
+    from service.eventlog import EventLog
     from service.gateway import serve as run_server
     from service.space import Spaces, migrate_device_space
     from service.webui import WebUi
@@ -292,6 +293,7 @@ def _serve(
     from storage.users import UserStore
 
     root = default_dir()
+    event_log = EventLog(root)
     admin_id = server.user_id
     spaces = Spaces(root, admin_id=admin_id)
     sessions = SessionStore(root)
@@ -355,6 +357,7 @@ def _serve(
         admin_id=admin_id,
         device_token=token,
         bound_host=host,
+        event_log=event_log,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
@@ -379,6 +382,7 @@ def _serve(
         context_for_user=context_for_user,
         api_gate=users.api_enabled,
         access_checker=access_checker,
+        event_log=event_log,
     )
 
 
