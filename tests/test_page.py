@@ -191,18 +191,27 @@ class TestKeyPage:
 
 
 class TestProviderLinks:
-    def test_the_row_links_to_login_and_key_pages_when_known(self) -> None:
+    def test_login_and_key_links_are_action_buttons(self) -> None:
+        """Вход у провайдера и получение ключа — кнопками в ряду действий."""
         page = catalogue_page(
             [_entry(loginUrl="https://o.com/login", getApiKeyUrl="https://o.com/keys")]
         )
-        assert 'href="https://o.com/login"' in page
-        assert 'href="https://o.com/keys"' in page
-        assert "получить ключ" in page
+        assert 'class="btn-ghost" href="https://o.com/login"' in page
+        assert "вход у провайдера" in page
+        assert 'class="btn-ghost" href="https://o.com/keys"' in page
+        assert "где взять ключ" in page
 
-    def test_no_fields_no_links(self) -> None:
+    def test_no_fields_no_buttons(self) -> None:
         page = catalogue_page([_entry()])
-        assert "получить ключ" not in page
-        assert "страница логина" not in page
+        assert "где взять ключ" not in page
+        assert "вход у провайдера" not in page
+
+    def test_a_dangerous_scheme_is_not_a_button(self) -> None:
+        page = catalogue_page(
+            [_entry(loginUrl="javascript:alert(1)", getApiKeyUrl="ftp://чужое")]
+        )
+        assert "javascript:" not in page
+        assert "ftp:" not in page
 
 
 class TestAppAddress:

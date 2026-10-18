@@ -125,31 +125,16 @@ def _provider_row(
     ]
     facts_html = f'<span class="facts">{" · ".join(facts)}</span>' if facts else ""
 
-    # Страница провайдера с описанием моделей и ценами — ссылка рядом.
+    # Страница провайдера с описанием моделей и ценами — ссылка под моделью.
     if _safe_url(entry.get("infoUrl")):
         facts_html += (
             f'<span class="facts"><a href="{escape(_safe_url(entry["infoUrl"]), quote=True)}" '
             f'target="_blank" rel="noopener">описание и цены</a></span>'
         )
 
-    # Ссылки на самого провайдера: где войти и где взять ключ — из полей каталога.
-    provider_links = []
-    if _safe_url(entry.get("loginUrl")):
-        provider_links.append(
-            f'<a href="{escape(_safe_url(entry["loginUrl"]), quote=True)}" '
-            f'target="_blank" rel="noopener">страница логина</a>'
-        )
-    if _safe_url(entry.get("getApiKeyUrl")):
-        provider_links.append(
-            f'<a href="{escape(_safe_url(entry["getApiKeyUrl"]), quote=True)}" '
-            f'target="_blank" rel="noopener">получить ключ</a>'
-        )
-    links_html = (
-        f'<span class="facts">{" · ".join(provider_links)}</span>' if provider_links else ""
-    )
-
     # Действие над строкой. Админ правит определение (править/убрать),
-    # человек ведёт своё пространство: ключ, тест, своя модель.
+    # человек ведёт своё пространство: ключ, тест, своя модель. Вход к
+    # провайдеру и получение ключа — кнопками: это витрина провайдера.
     toggle_label = "выключить" if entry.get("enabled") else "включить"
     entry_id = escape(entry["id"], quote=True)
     actions = [
@@ -162,6 +147,16 @@ def _provider_row(
         f'<form method="post" action="/test/{entry_id}">'
         f'<button type="submit" class="ghost">тест</button></form>',
     ]
+    if _safe_url(entry.get("loginUrl")):
+        actions.append(
+            f'<a class="btn-ghost" href="{escape(_safe_url(entry["loginUrl"]), quote=True)}" '
+            f'target="_blank" rel="noopener">вход у провайдера</a>'
+        )
+    if _safe_url(entry.get("getApiKeyUrl")):
+        actions.append(
+            f'<a class="btn-ghost" href="{escape(_safe_url(entry["getApiKeyUrl"]), quote=True)}" '
+            f'target="_blank" rel="noopener">где взять ключ</a>'
+        )
     if can_edit:
         actions.append(f'<a class="btn-ghost" href="/edit/{entry_id}">править</a>')
         if can_remove(entry, is_superuser=can_edit):
@@ -175,7 +170,7 @@ def _provider_row(
     # админа (добавить/править), иначе управлять каталогом нечем.
     return (
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
-        f'<td class="name">{logo_html}{name} {" ".join(badges)}{links_html}</td>'
+        f'<td class="name">{logo_html}{name} {" ".join(badges)}</td>'
         f'<td class="model">{escape(entry.get("model") or "—")}{facts_html}</td>'
         f'<td class="stats">{escape(stats_text)}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
