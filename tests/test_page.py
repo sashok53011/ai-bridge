@@ -400,6 +400,28 @@ class TestLogsPage:
         assert page.index("qwen3 через Ollama") < page.index("вышел")  # новые сверху
         assert "12:01:00" in page  # время без даты — дата в логе и так видна
 
+    def test_request_and_response_bodies_are_shown(self) -> None:
+        page = logs_page(
+            [
+                {
+                    "ts": "2026-10-19T10:00:00Z", "kind": "чат", "user": "u1",
+                    "text": "модель через Ollama",
+                    "req": '{"messages": [{"content": "привет"}]}',
+                    "resp": "и ответ модели",
+                }
+            ]
+        )
+        assert "привет" in page
+        assert "и ответ модели" in page
+        assert "запрос:" in page
+        assert "ответ:" in page
+
+    def test_events_without_bodies_stay_clean(self) -> None:
+        page = logs_page(
+            [{"ts": "2026-10-19T10:00:00Z", "kind": "вход", "user": "u", "text": "вышел"}]
+        )
+        assert "запрос:" not in page
+
     def test_the_page_refreshes_itself(self) -> None:
         page = logs_page([])
         assert 'http-equiv="refresh" content="5"' in page

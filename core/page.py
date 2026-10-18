@@ -629,6 +629,24 @@ def token_created_page(token: str, name: str) -> str:
 </html>"""
 
 
+def _log_row(item: dict) -> str:
+    """Строка журнала: событие плюс тела запроса/ответа, если записаны."""
+    extra = ""
+    for key, label in (("req", "запрос"), ("resp", "ответ")):
+        value = str(item.get(key) or "")
+        if value:
+            extra += (
+                f'<div class="body" title="{escape(value, quote=True)}">'
+                f"{escape(label)}: {escape(value[:300])}</div>"
+            )
+    return (
+        f'<tr><td class="ts">{escape(str(item.get("ts") or "")[11:19])}</td>'
+        f'<td class="kind">{escape(str(item.get("kind") or ""))}</td>'
+        f'<td>{escape(str(item.get("user") or ""))}</td>'
+        f'<td class="text">{escape(str(item.get("text") or ""))}{extra}</td></tr>'
+    )
+
+
 def logs_page(
     events: list[dict],
     *,
@@ -643,13 +661,9 @@ def logs_page(
     крошечный скрипт — без него остаётся обычное поведение браузера.
     ``bodies`` — пишутся ли тела запросов (кнопка переключает до рестарта).
     """
-    rows = "\n".join(
-        f'<tr><td class="ts">{escape(str(item.get("ts") or "")[11:19])}</td>'
-        f'<td class="kind">{escape(str(item.get("kind") or ""))}</td>'
-        f'<td>{escape(str(item.get("user") or ""))}</td>'
-        f'<td class="text">{escape(str(item.get("text") or ""))}</td></tr>'
-        for item in events
-    ) or '<tr><td colspan="4" class="empty">событий пока нет</td></tr>'
+    rows = "\n".join(_log_row(item) for item in events) or (
+        '<tr><td colspan="4" class="empty">событий пока нет</td></tr>'
+    )
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     bodies_note = (
         '<p class="notice">тела запросов и ответов пишутся на диск — '
@@ -672,6 +686,7 @@ def logs_page(
   td.ts {{ white-space: nowrap; font-family: monospace; }}
   td.kind {{ white-space: nowrap; }}
   td.text {{ word-break: break-word; }}
+  td.body {{ font-family: monospace; font-size: .8em; opacity: .7; word-break: break-all; white-space: pre-wrap; }}
 </style>
 </head>
 <h1>Журнал</h1>
