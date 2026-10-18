@@ -456,6 +456,7 @@ def _sync_shape(entry: dict) -> dict:
         "pricing": entry.get("pricing", ""),
         "context": entry.get("context", ""),
         "capabilities": entry.get("capabilities", ""),
+        "infoUrl": entry.get("infoUrl", ""),
     }
 
 

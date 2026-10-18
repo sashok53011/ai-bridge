@@ -235,13 +235,20 @@ def add(
     can_edit: bool,
     snapshot: Snapshot | None = None,
     key_store: KeyStore | None = None,
+    sync: bool = True,
+    author_id: str = "",
+    details: dict | None = None,
 ) -> dict:
-    """Добавляет провайдера: человеку — предложение, админу — в каталог.
+    """Добавляет провайдера: человеку — в личное пространство, админу — в каталог.
 
-    Суперпользо­вателю каталог уходит целиком из **серверного** списка
-    (его PUT заменяет каталог), локальные выжившие туда не тащим.
+    Суперпользо­вателю каталог уходит целиком из **свежего серверного**
+    списка (его PUT заменяет каталог). ``sync=False`` — запись живёт только
+    на устройстве (личное пространство человека), сервер не трогается.
+    ``details`` — дополнительные поля определения (справка, логотипы…).
     """
     raw: dict = {"name": name, "url": url, "model": model}
+    if details:
+        raw.update(details)
     if provider_id:
         raw["id"] = provider_id
     if priority is not None:
@@ -254,6 +261,9 @@ def add(
     entry, error = propose(raw)
     if entry is None:
         return {"code": 2, "error": error, "entry": None, "note": None}
+
+    if author_id:
+        entry = {**entry, "authorId": author_id}
 
     if any(existing["id"] == entry["id"] for existing in wanted):
         return {
@@ -290,6 +300,15 @@ def add(
     (snapshot or Snapshot()).save(merged)
     if key:
         (key_store or KeyStore()).set(entry["id"], key)
+
+    if not sync:
+        # Личное пространство человека: сервер не трогается вовсе.
+        return {
+            "code": 0,
+            "error": None,
+            "entry": entry,
+            "note": "добавлено в ваше пространство — видят только вы",
+        }
 
     try:
         if can_edit:

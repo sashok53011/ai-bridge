@@ -196,6 +196,27 @@ class TestAdd:
         assert result["code"] == 2
         assert "занят" in result["error"]
 
+    def test_a_person_adds_locally_without_touching_the_server(self, _device) -> None:
+        """sync=False — запись живёт в личном пространстве, сервер не трогается."""
+        server = _Server(can_edit=False)
+        before = len(server.seen)
+
+        result = ops.add(
+            server.client, [], [],
+            name="Мой LMS", url="http://127.0.0.1:1234/v1", model="qwen3",
+            can_edit=False, sync=False, author_id="u7",
+            details={"infoUrl": "https://o.com/pricing", "pricing": "$0.1/1M"},
+        )
+
+        assert result["code"] == 0
+        assert "видят только вы" in result["note"]
+        assert len(server.seen) == before  # ни одного запроса к серверу
+        saved = Snapshot().load()[0]
+        assert saved["authorId"] == "u7"
+        assert saved["infoUrl"] == "https://o.com/pricing"
+        assert saved["pricing"] == "$0.1/1M"
+        assert KeyStore().get("moy-lms") == ""  # ключ не передавался — и не нужен был
+
 
 class TestSetModel:
     def test_a_superuser_changes_the_catalogue_model(self, _device) -> None:

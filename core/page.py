@@ -105,6 +105,17 @@ def _provider_row(
     counter = for_line(stats or {}, entry["id"], entry.get("model", ""))
     stats_text = format_stats(counter) or "—"
 
+    # Логотип: первая валидная ссылка из списка, если админ заполнил.
+    logo_html = ""
+    for line in str(entry.get("logoUrl") or "").splitlines():
+        candidate = _safe_url(line)
+        if candidate:
+            logo_html = (
+                f'<img class="logo" src="{escape(candidate, quote=True)}" alt="" '
+                f'onerror="this.remove()"> '
+            )
+            break
+
     # Справка о модели: контекст, цена, способности — если админ заполнил.
     facts = [
         escape(entry[key])
@@ -112,6 +123,13 @@ def _provider_row(
         if entry.get(key)
     ]
     facts_html = f'<span class="facts">{" · ".join(facts)}</span>' if facts else ""
+
+    # Страница провайдера с описанием моделей и ценами — ссылка рядом.
+    if _safe_url(entry.get("infoUrl")):
+        facts_html += (
+            f'<span class="facts"><a href="{escape(_safe_url(entry["infoUrl"]), quote=True)}" '
+            f'target="_blank" rel="noopener">описание и цены</a></span>'
+        )
 
     # Ссылки на самого провайдера: где войти и где взять ключ — из полей каталога.
     provider_links = []
@@ -156,7 +174,7 @@ def _provider_row(
     # админа (добавить/править), иначе управлять каталогом нечем.
     return (
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
-        f'<td class="name">{name} {" ".join(badges)}{links_html}</td>'
+        f'<td class="name">{logo_html}{name} {" ".join(badges)}{links_html}</td>'
         f'<td class="model">{escape(entry.get("model") or "—")}{facts_html}</td>'
         f'<td class="stats">{escape(stats_text)}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
@@ -196,8 +214,8 @@ def catalogue_page(
     )
     role_html = f'<p class="role">{escape(role)}</p>' if role else ""
 
-    # Добавление провайдеров — привилегия админа: человек управляет лишь
-    # своим пространством (ключ, модель, вкл).
+    # Добавить провайдера может каждый: админ — в каталог для всех,
+    # человек — в своё личное пространство (форма рассказывает разницу).
     address_html = (
         '<p class="role">Для приложений (тип endpoint — OpenAI): '
         f"{_copy_line(app_address, 'v1addr')}</p>"
@@ -205,19 +223,7 @@ def catalogue_page(
         else ""
     )
     copy_script = COPY_SCRIPT if app_address else ""
-    add_html = ""
-    if can_edit:
-        add_html = """<details>
-<summary>Добавить провайдера</summary>
-<form method="post" action="/add">
-  <input name="name" placeholder="Имя" required>
-  <input name="url" type="url" placeholder="https://…/v1" required>
-  <input name="model" placeholder="модель" required>
-  <input name="api_key" type="password" placeholder="ключ (останется на устройстве)" autocomplete="off">
-  <button type="submit">добавить</button>
-</form>
-<p class="role">администратору — запись в каталог для всех.</p>
-</details>"""
+    add_html = '<p class="add"><a class="btn-ghost" href="/add">+ добавить провайдера</a></p>'
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -245,6 +251,7 @@ def catalogue_page(
   button.link {{ border: none; padding: 0; font-size: .9rem; text-decoration: underline; color: inherit; }}
   .actions {{ white-space: nowrap; }}
   .facts {{ display: block; font-size: .8em; opacity: .7; }}
+  img.logo {{ height: 1.2em; vertical-align: middle; }}
   a.btn-ghost {{ display: inline-block; padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; text-decoration: none; color: inherit; }}
   .empty {{ opacity: .6; }}
   .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
@@ -301,11 +308,16 @@ def edit_page(entry: dict, *, notice: str = "") -> str:
             field("Приоритет", "fallbackPriority", str(entry.get("fallbackPriority", 0))),
             field("Страница логина", "loginUrl", entry.get("loginUrl", "")),
             field("Где взять ключ", "getApiKeyUrl", entry.get("getApiKeyUrl", "")),
+            field("Страница с описанием и ценами", "infoUrl", entry.get("infoUrl", "")),
             field("Контекст", "context", entry.get("context", ""), placeholder="128K"),
             field("Цена", "pricing", entry.get("pricing", ""), placeholder="$0.1/1M вход, $0.4/1M выход"),
             field(
                 "Способности", "capabilities", entry.get("capabilities", ""),
                 placeholder="vision, thinking, tools",
+            ),
+            (
+                '<label>Логотипы (URL провайдера по строке)'
+                f'<textarea name="logoUrl" rows="3">{escape(entry.get("logoUrl", ""))}</textarea></label>'
             ),
         ]
     )
@@ -320,7 +332,7 @@ def edit_page(entry: dict, *, notice: str = "") -> str:
   :root {{ color-scheme: light dark; }}
   body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 34rem; padding: 0 1rem; }}
   label {{ display: block; margin: .5rem 0; }}
-  input {{ width: 100%; padding: .35rem; }}
+  input, textarea {{ width: 100%; padding: .35rem; }}
   button {{ margin-top: .8rem; padding: .3rem .9rem; }}
   .role {{ opacity: .6; font-size: .85rem; }}
   .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
@@ -338,6 +350,99 @@ def edit_page(entry: dict, *, notice: str = "") -> str:
 <p class="role">Цена и контекст — справка для выбора модели, её видят все.
 Способности — через запятую: vision, thinking, tools. Пустое поле не стирает
 значение.</p>
+</body>
+</html>"""
+
+
+def add_page(
+    *,
+    values: dict | None = None,
+    models: list[str] | None = None,
+    models_error: str = "",
+    is_admin: bool = False,
+    notice: str = "",
+) -> str:
+    """Форма добавления провайдера: полная, как у правки, плюс ключ и модели.
+
+    ``values`` — уже введённое (после «показать модели» ничего не теряется);
+    ``models`` — список с сервера (тогда модель выбирается из списка);
+    ``models_error`` — почему список не получился (подсказка человеку).
+    """
+    v = values or {}
+
+    def field(label: str, name: str, *, placeholder: str = "", value: str = "") -> str:
+        return (
+            f'<label>{escape(label)}'
+            f'<input name="{name}" value="{escape(str(value), quote=True)}" '
+            f'placeholder="{escape(placeholder, quote=True)}"></label>'
+        )
+
+    if models is not None:
+        options = list(models)
+        current = str(v.get("model") or "")
+        if current and current not in options:
+            options.insert(0, current)
+        opts = "\n    ".join(
+            f'<option value="{escape(option, quote=True)}"'
+            f'{" selected" if option == current else ""}>{escape(option)}</option>'
+            for option in options
+        )
+        model_control = f'<label>Модель<select name="model">\n    {opts}\n  </select></label>'
+    else:
+        model_control = field(
+            "Модель", "model", value=str(v.get("model") or ""), placeholder="qwen3:0.6b"
+        )
+
+    fetch_note = (
+        escape(models_error)
+        if models_error
+        else "Кнопка «показать модели» запросит список у провайдера — она ниже, под полем модели."
+    )
+    destination = (
+        "попадёт в каталог — видят все"
+        if is_admin
+        else "попадёт в ваше личное пространство — видят только вы"
+    )
+    notice_html = f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Новый провайдер — AI-приставка</title>
+<style>
+{_style()}
+  body {{ max-width: 34rem; }}
+  input, select, textarea {{ width: 100%; padding: .35rem; font-family: monospace; }}
+  button {{ margin: .3rem .3rem 0 0; }}
+</style>
+</head>
+<h1>Новый провайдер</h1>
+{_nav(can_edit=is_admin)}
+{notice_html}
+<form method="post" action="/add">
+  {field("Название", "name", value=str(v.get("name") or ""), placeholder="Мой LMS")}
+  {field("Адрес (базовый, без /chat/completions)", "url", value=str(v.get("url") or ""), placeholder="https://…/v1")}
+  {field("API-ключ (останется на устройстве)", "api_key", value="", placeholder="sk-…")}
+  {model_control}
+  <button type="submit" name="action" value="fetch">показать модели</button>
+  {field("Страница логина провайдера", "loginUrl", value=str(v.get("loginUrl") or ""))}
+  {field("Где получить ключ", "getApiKeyUrl", value=str(v.get("getApiKeyUrl") or ""))}
+  {field("Страница с описанием и ценами", "infoUrl", value=str(v.get("infoUrl") or ""))}
+  <label>Логотипы (URL провайдера по строке)
+  <textarea name="logoUrl" rows="3">{escape(str(v.get("logoUrl") or ""))}</textarea></label>
+  {field("Контекст", "context", value=str(v.get("context") or ""), placeholder="128K")}
+  {field("Цена", "pricing", value=str(v.get("pricing") or ""), placeholder="$0.1/1M вход, $0.4/1M выход")}
+  {field("Способности", "capabilities", value=str(v.get("capabilities") or ""), placeholder="vision, thinking, tools")}
+  <button type="submit" name="action" value="save">сохранить</button>
+  <a href="/">назад</a>
+</form>
+<p class="role">{destination}. Ключ уходит только к провайдеру, на сервер каталога не попадает никогда.</p>
+<p class="role">{fetch_note}</p>
+<p class="role">Цена, контекст и способности — справка для выбора модели: заполните
+значениями выбранной модели, её увидят все. Если провайдер не отдаёт список
+моделей без ключа — введите ключ выше и нажмите «показать модели» ещё раз.</p>
 </body>
 </html>"""
 
@@ -590,10 +695,14 @@ def pick_model_page(
     current: str = "",
     notice: str = "",
     can_edit: bool = False,
+    facts: str = "",
 ) -> str:
     """Выбор своей модели провайдера: список живых моделей радиокнопками."""
     notice_html = (
         f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
+    )
+    facts_html = (
+        f'<p class="role">Справка о текущей модели: {escape(facts)}</p>' if facts else ""
     )
     if models:
         rows = "\n".join(
@@ -625,6 +734,7 @@ def pick_model_page(
 <h1>Модель: {escape(provider_name)}</h1>
 {_nav(can_edit=can_edit)}
 <p class="role">Какую модель обслуживать по умолчанию — выбор ваш, личный.</p>
+{facts_html}
 {notice_html}
 {body}
 <p><a href="/">← назад в каталог</a></p>

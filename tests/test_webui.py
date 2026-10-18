@@ -285,16 +285,46 @@ class TestPersonalSpace:
         assert guest.load()[0]["enabled"] is True
         assert Snapshot(_root()).load() == []  # пространство админа не тронуто
 
-    def test_a_guest_cannot_edit_add_or_see_people(self, harness) -> None:
+    def test_a_guest_cannot_edit_others_or_see_people(self, harness) -> None:
         _, base = harness([_entry()])
         with _client(base) as client:
             _as_guest(client)
             edit = client.post("/edit/ollama", data={"name": "X"})
-            add = client.post("/add", data={"name": "X", "url": "http://x/v1", "model": "m"})
             people = client.get("/users")
         assert edit.status_code == 403
-        assert add.status_code == 403
         assert people.status_code == 403
+
+    def test_a_guest_adds_a_personal_provider(self, harness) -> None:
+        """Добавленное человеком живёт в ЕГО пространстве, каталог не тронут."""
+        from storage.snapshot import Snapshot
+
+        _, base = harness([_entry()])
+        with _client(base) as client:
+            _as_guest(client)
+            response = client.post(
+                "/add",
+                data={
+                    "name": "Мой LMS",
+                    "url": "http://192.168.0.50:1234/v1",
+                    "model": "qwen3",
+                    "api_key": "sk-mine",
+                    "action": "save",
+                    "infoUrl": "https://o.com/pricing",
+                    "pricing": "$0.1/1M",
+                },
+            )
+        assert response.status_code == 303
+
+        personal = Snapshot(user_dir(_GUEST, _root())).load()
+        mine = next(item for item in personal if item["id"] == "moy-lms")
+        assert mine["origin"] == "user"
+        assert mine["authorId"] == _GUEST
+        assert mine["enabled"] is True
+        assert mine["infoUrl"] == "https://o.com/pricing"  # справка доехала
+        assert mine["pricing"] == "$0.1/1M"
+        assert Snapshot(_root()).load() == []  # админский каталог не тронут
+
+        assert Spaces().for_user(_GUEST).keys.get("moy-lms") == "sk-mine"
 
     def test_a_guests_key_stays_in_their_keystore(self, harness) -> None:
         _, base = harness([_entry()])
@@ -456,3 +486,55 @@ class TestAdminPeople:
 
         assert response.status_code == 303
         assert catalogue.blocked is False
+
+
+class TestAddFlow:
+    """«Показать модели»: список у провайдера, всё введённое не теряется."""
+
+    @staticmethod
+    def _good_provider(url, **kwargs):
+        class _Provider:
+            def fetch_models(self, key=""):
+                return [{"name": "qwen3-0.6b"}, {"name": "llama3"}]
+
+        return _Provider()
+
+    @staticmethod
+    def _keyless_provider(url, **kwargs):
+        from providers.client import NeedsKeyError
+
+        class _Provider:
+            def fetch_models(self, key=""):
+                raise NeedsKeyError("без ключа провайдер отвечает 401")
+
+        return _Provider()
+
+    def test_fetch_shows_a_select_and_keeps_everything_entered(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._good_provider)
+
+        with _client(base) as client:
+            _as_guest(client)
+            response = client.post(
+                "/add",
+                data={
+                    "name": "X",
+                    "url": "http://new.test/v1",
+                    "action": "fetch",
+                },
+            )
+
+        assert '<select name="model">' in response.text
+        assert ">qwen3-0.6b</option>" in response.text
+        assert 'value="http://new.test/v1"' in response.text  # адрес не потерян
+
+    def test_a_keyless_list_gets_a_hint_not_a_dead_end(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._keyless_provider)
+
+        with _client(base) as client:
+            _as_guest(client)
+            response = client.post(
+                "/add",
+                data={"name": "X", "url": "http://new.test/v1", "action": "fetch"},
+            )
+
+        assert "введите API-ключ" in response.text

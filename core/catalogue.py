@@ -74,6 +74,8 @@ def normalize(entry: object) -> dict | None:
         "pricing": _text(entry.get("pricing")),
         "context": _text(entry.get("context")),
         "capabilities": _text(entry.get("capabilities")),
+        # Страница провайдера с описанием моделей и ценами — витрина.
+        "infoUrl": _text(entry.get("infoUrl")),
     }
 
 
@@ -191,6 +193,12 @@ def propose(raw: object) -> tuple[dict | None, str]:
             "fallbackPriority": raw.get("fallbackPriority"),
             "loginUrl": raw.get("loginUrl"),
             "getApiKeyUrl": raw.get("getApiKeyUrl"),
+            # Справка о модели и витрина провайдера — как в форме правки.
+            "pricing": raw.get("pricing"),
+            "context": raw.get("context"),
+            "capabilities": raw.get("capabilities"),
+            "logoUrl": raw.get("logoUrl"),
+            "infoUrl": raw.get("infoUrl"),
             "status": STATUS_ACTIVE,
             # Предложение всегда идёт от автора; админ публикует его позже.
             "origin": "user",
@@ -276,6 +284,8 @@ EDITABLE_FIELDS = (
     "fallbackPriority",
     "loginUrl",
     "getApiKeyUrl",
+    "logoUrl",
+    "infoUrl",
     "pricing",
     "context",
     "capabilities",

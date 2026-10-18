@@ -5,6 +5,7 @@
 """
 
 from core.page import (
+    add_page,
     catalogue_page,
     edit_page,
     key_page,
@@ -64,15 +65,12 @@ class TestCataloguePage:
         page = catalogue_page([_entry(url='http://x/" onmouseover="evil()')])
         assert "onmouseover" not in page
 
-    def test_the_add_form_is_an_admin_affair(self) -> None:
-        page = catalogue_page([_entry()], can_edit=True)
-        assert 'action="/add"' in page
-        assert 'name="name"' in page
-        assert 'name="url"' in page
-        assert 'name="model"' in page
-        assert 'name="api_key"' in page
-        # Человек управляет лишь своим пространством — каталог не его.
-        assert 'action="/add"' not in catalogue_page([_entry()], can_edit=False)
+    def test_everyone_gets_an_add_link_not_a_form(self) -> None:
+        """Добавить может каждый: со страницы — ссылка на полную форму."""
+        for can_edit in (True, False):
+            page = catalogue_page([_entry()], can_edit=can_edit)
+            assert 'href="/add"' in page
+            assert 'action="/add"' not in page  # форма живёт на отдельной странице
 
     def test_every_row_can_be_toggled_and_checked(self) -> None:
         page = catalogue_page([_entry()])
@@ -328,6 +326,13 @@ class TestPickAndTestPages:
         assert "checked" in page
         assert 'action="/pick/ollama"' in page
 
+    def test_picking_shows_the_current_facts(self) -> None:
+        page = pick_model_page(
+            "Ollama", "ollama", ["qwen3"], facts="128K · $0.1/1M · vision"
+        )
+        assert "Справка о текущей модели" in page
+        assert "$0.1/1M" in page
+
     def test_picking_without_models_points_at_the_key(self) -> None:
         page = pick_model_page("OpenAI", "openai", [])
         assert "проверьте ключ" in page
@@ -337,3 +342,59 @@ class TestPickAndTestPages:
         assert "ок" in ok
         bad = chat_test_page("Ollama", "qwen3", "привет", error="нет ключа")
         assert "нет ключа" in bad
+
+
+class TestAddPage:
+    def test_the_form_is_full_and_preserves_values(self) -> None:
+        page = add_page(
+            values={
+                "name": "Мой LMS",
+                "url": "http://x/v1",
+                "model": "qwen3",
+                "logoUrl": "https://a/logo.png\nhttps://b/logo2.png",
+            }
+        )
+        for name in (
+            "name", "url", "api_key", "model", "loginUrl", "getApiKeyUrl",
+            "infoUrl", "pricing", "context", "capabilities", "logoUrl",
+        ):
+            assert f'name="{name}"' in page
+        assert 'value="Мой LMS"' in page
+        assert "показать модели" in page
+        assert "https://a/logo.png" in page
+
+    def test_models_become_a_select_and_keep_an_unknown_value(self) -> None:
+        page = add_page(values={"model": "custom"}, models=["qwen3", "llama3"])
+        assert '<select name="model">' in page
+        assert ">qwen3</option>" in page
+        assert 'value="custom"' in page  # введённая вручную модель не теряется
+
+    def test_a_keyless_provider_gets_a_help_line(self) -> None:
+        page = add_page(models_error="без ключа список недоступен")
+        assert "без ключа список недоступен" in page
+
+    def test_the_destination_note_matches_the_role(self) -> None:
+        assert "видят только вы" in add_page(is_admin=False)
+        assert "видят все" in add_page(is_admin=True)
+
+
+class TestProviderVitrine:
+    def test_the_first_logo_becomes_an_image(self) -> None:
+        page = catalogue_page(
+            [_entry(logoUrl="https://cdn.example/logo.png\nhttps://x/2.png")]
+        )
+        assert '<img class="logo" src="https://cdn.example/logo.png"' in page
+
+    def test_a_dangerous_logo_scheme_is_not_an_image(self) -> None:
+        page = catalogue_page([_entry(logoUrl="javascript:alert(1)")])
+        assert "<img" not in page
+
+    def test_info_url_is_a_link(self) -> None:
+        page = catalogue_page([_entry(infoUrl="https://o.com/pricing")])
+        assert "описание и цены" in page
+        assert 'href="https://o.com/pricing"' in page
+
+    def test_edit_form_carries_logo_and_info(self) -> None:
+        page = edit_page(_entry(logoUrl="https://a/l.png", infoUrl="https://o.com/p"))
+        assert 'name="logoUrl"' in page
+        assert 'name="infoUrl"' in page

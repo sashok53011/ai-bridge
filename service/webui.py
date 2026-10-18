@@ -27,6 +27,7 @@ from typing import Callable
 from core.accounts import ROLE_ADMIN, make_session
 from core.catalogue import set_model as set_model_data
 from core.page import (
+    add_page,
     catalogue_page,
     edit_page,
     key_page,
@@ -38,7 +39,7 @@ from core.page import (
     tokens_page,
     users_page,
 )
-from providers.client import PocketBase, Provider, ServerError
+from providers.client import NeedsKeyError, PocketBase, Provider, ServerError
 from service import ops
 from service.gateway import test_chat
 from service.space import Spaces
@@ -304,6 +305,10 @@ class WebUi:
             )
             return
 
+        if clean == "/add":
+            self._send_html(handler, 200, add_page(is_admin=is_admin))
+            return
+
         if clean == "/users":
             if not is_admin:
                 self._forbidden(handler, "список людей — только администратору")
@@ -367,6 +372,11 @@ class WebUi:
                 self._not_found(handler)
                 return
             models = self._models_of(entry, space.keys.get(provider_id))
+            facts = " · ".join(
+                str(entry[key])
+                for key in ("context", "pricing", "capabilities")
+                if entry.get(key)
+            )
             self._send_html(
                 handler,
                 200,
@@ -375,6 +385,7 @@ class WebUi:
                     current=entry.get("model", ""),
                     notice=notice if notice_bad else "",
                     can_edit=is_admin,
+                    facts=facts,
                 ),
             )
             return
@@ -537,6 +548,74 @@ class WebUi:
                 self._redirect(handler, "такого токена нет", bad=True)
             return
 
+        if clean == "/add":
+            values = {
+                name: field(name)
+                for name in (
+                    "name", "url", "model", "api_key", "loginUrl", "getApiKeyUrl",
+                    "logoUrl", "infoUrl", "pricing", "context", "capabilities",
+                )
+            }
+            if field("action") == "fetch":
+                models: list[str] = []
+                error = ""
+                if not values["url"]:
+                    error = "введите адрес провайдера — по нему запросим модели"
+                else:
+                    factory = self._make_provider or Provider
+                    try:
+                        models = [
+                            item["name"]
+                            for item in factory(values["url"], timeout=15.0).fetch_models(
+                                values["api_key"]
+                            )
+                        ]
+                        if not models:
+                            error = "провайдер не вернул ни одной модели"
+                    except NeedsKeyError:
+                        error = (
+                            "без ключа список недоступен — введите API-ключ "
+                            "и нажмите кнопку ещё раз"
+                        )
+                    except Exception as exc:  # noqa: BLE001 — причина уходит в подсказку
+                        error = f"список не получился ({exc})"
+                self._send_html(
+                    handler,
+                    200,
+                    add_page(
+                        values=values,
+                        models=models if models else None,
+                        models_error=error,
+                        is_admin=is_admin,
+                    ),
+                )
+                return
+            result = ops.add(
+                self._server,
+                self._entries_for(viewer),
+                self._providers_source(),
+                name=values["name"],
+                url=values["url"],
+                model=values["model"],
+                key=values["api_key"],
+                login_url=values["loginUrl"],
+                key_url=values["getApiKeyUrl"],
+                details={
+                    key: values[key]
+                    for key in ("logoUrl", "infoUrl", "pricing", "context", "capabilities")
+                },
+                can_edit=is_admin,
+                snapshot=space.snapshot,
+                key_store=space.keys,
+                sync=is_admin,
+                author_id="" if is_admin else user_id,
+            )
+            if result["entry"] is None:
+                self._redirect(handler, result["error"] or "не получилось", bad=True)
+                return
+            self._redirect(handler, f"{result['entry']['name']}: {result['note'] or result['error']}")
+            return
+
         # -------------------------------------------------------- только админ
         if not is_admin:
             self._forbidden(handler, "это действие — только администратору")
@@ -569,7 +648,8 @@ class WebUi:
                 name: field(name)
                 for name in (
                     "name", "url", "model", "fallbackPriority",
-                    "loginUrl", "getApiKeyUrl", "context", "pricing", "capabilities",
+                    "loginUrl", "getApiKeyUrl", "logoUrl", "infoUrl",
+                    "context", "pricing", "capabilities",
                 )
             }
             result = ops.edit(
@@ -577,20 +657,6 @@ class WebUi:
                 provider_id, changes, can_edit=True, snapshot=admin_space.snapshot,
             )
             notice = f"{entry['name']}: сохранено" if result["error"] is None else result["error"]
-            self._redirect(handler, notice)
-            return
-
-        if clean == "/add":
-            result = ops.add(
-                self._server, self._entries_for(viewer), self._providers_source(),
-                name=field("name"), url=field("url"), model=field("model"),
-                key=field("api_key"), can_edit=True,
-                snapshot=admin_space.snapshot, key_store=admin_space.keys,
-            )
-            if result["entry"] is None:
-                self._redirect(handler, result["error"] or "не получилось", bad=True)
-                return
-            notice = f"{result['entry']['name']}: {result['note'] or result['error']}"
             self._redirect(handler, notice)
             return
 
