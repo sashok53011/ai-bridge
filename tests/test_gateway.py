@@ -358,3 +358,80 @@ class TestTestChat:
     def test_no_model_or_no_key_is_honest(self) -> None:
         assert "не выбрана модель" in run_test_chat(_entry(model=""), "sk")["error"]
         assert "нужен ключ" in run_test_chat(_entry(), "")["error"]
+
+
+class TestProxyTransparency:
+    """Клиент должен знать, кто реально ответил, — не только журнал приставки."""
+
+    def _two(self) -> list[dict]:
+        return [
+            _entry(),  # первый по приоритету, ответит отказом
+            _entry(
+                id="openai",
+                name="OpenAI",
+                url="https://api.openai.test/v1",
+                model="gpt-4o-mini",
+                fallbackPriority=9,
+            ),
+        ]
+
+    def test_a_served_response_carries_provider_and_model_headers(self, harness) -> None:
+        h = harness(
+            self._two(),
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    429, json={"error": {"message": "insufficient quota"}}
+                ),
+                "https://api.openai.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "ok"}}]}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post(
+                "/v1/chat/completions", content=json.dumps({"messages": [{"role": "user", "content": "привет"}]})
+            )
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "OpenAI"
+        assert response.headers["x-ai-bridge-model"] == "gpt-4o-mini"
+
+    def test_a_quota_exhausted_provider_hands_over_to_the_next(self, harness) -> None:
+        """402 (пустой баланс) — тоже повод переключиться, как и 429."""
+        h = harness(
+            self._two(),
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    402, json={"error": {"message": "no credits"}}
+                ),
+                "https://api.openai.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "ok"}}]}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=json.dumps({"messages": []}))
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "OpenAI"
+
+    def test_when_nobody_answers_the_error_lists_every_attempt(self, harness) -> None:
+        h = harness(
+            self._two(),
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    429, json={"error": {"message": "quota"}}
+                ),
+                "https://api.openai.test": lambda req: httpx.Response(
+                    500, json={"error": {"message": "сломался"}}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=json.dumps({"messages": []}))
+
+        assert response.status_code == 502
+        text = response.text
+        assert "ни один провайдер не ответил" in text
+        assert "Ollama" in text and "HTTP 429" in text
+        assert "OpenAI" in text and "HTTP 500" in text

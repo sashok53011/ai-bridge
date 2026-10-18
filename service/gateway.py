@@ -301,9 +301,11 @@ class Gateway:
     def chat(self, body: bytes, requested_model: str, user_id: str = ""):
         """Проксирует чат по цепочке маршрутов.
 
-        Возвращает ``(status, content_type, chunks, provider_name)`` —
-        куски ответа отдаются как есть, в том числе поток SSE. Если никто
-        не справился — ``(502, ..., [описание])``.
+        Возвращает ``(status, content_type, chunks, provider_name, model)`` —
+        куски ответа отдаются как есть, в том числе поток SSE; имя
+        провайдера и модель уходят клиенту заголовками, чтобы смена
+        провайдера была видна. Если никто не справился —
+        ``(502, ..., [описание со всеми попытками])``.
         """
         entries_provider, keys = self._context(user_id)
         entries = entries_provider()
@@ -315,10 +317,10 @@ class Gateway:
                 message += f"; доступны: {available}"
             else:
                 message += "; ни один провайдер не включён"
-            return 502, "application/json", [_error_body(message, code="model_not_available")], ""
+            return 502, "application/json", [_error_body(message, code="model_not_available")], "", ""
 
         by_id = {entry["id"]: entry for entry in entries}
-        last_problem = ""
+        problems: list[str] = []
 
         for attempt in attempts:
             entry = by_id.get(attempt["providerId"])
@@ -335,14 +337,14 @@ class Gateway:
                     stream=True,
                 )
             except ServerError as exc:
-                last_problem = f"{entry['name']}: {exc}"
+                problems.append(f"{entry['name']}: {exc}")
                 continue
 
             if response.status_code >= 400 and should_fallback(response.status_code):
                 # Тело читаем до конца: соединение с отказавшим провайдером
                 # надо закрыть, а причина пригодится, если никто не справится.
-                detail = response.read().decode("utf-8", errors="replace")[:300]
-                last_problem = f"{entry['name']}: HTTP {response.status_code} {detail}".strip()
+                detail = response.read().decode("utf-8", errors="replace")[:200]
+                problems.append(f"{entry['name']}: HTTP {response.status_code} {detail}".strip())
                 response.close()
                 continue
 
@@ -354,12 +356,13 @@ class Gateway:
                 finally:
                     resp.close()
 
-            return response.status_code, content_type, chunks(), entry["name"]
+            return response.status_code, content_type, chunks(), entry["name"], attempt["model"]
 
         message = "ни один провайдер не ответил"
-        if last_problem:
-            message += f": {last_problem}"
-        return 502, "application/json", [_error_body(message, kind="api_error", code="upstream_failed")], ""
+        if problems:
+            # Все попытки с причинами: диагностика в одну строку.
+            message += ": " + "; ".join(problems[:6])
+        return 502, "application/json", [_error_body(message, kind="api_error", code="upstream_failed")], "", ""
 
 
 class _Server(ThreadingHTTPServer):
@@ -422,9 +425,11 @@ class _Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------------------------------ ответы
 
-    def _send(self, status: int, content_type: str, chunks) -> None:
+    def _send(self, status: int, content_type: str, chunks, *, extra_headers: dict | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         if "event-stream" not in content_type:
             # Поток SSE идёт до закрытия соединения, остальное — с длиной.
             payload = b"".join(chunks)
@@ -531,12 +536,19 @@ class _Handler(BaseHTTPRequestHandler):
             requested = json.loads(body.decode("utf-8")).get("model", "")
         except (ValueError, AttributeError):
             requested = ""
-        status, content_type, chunks, provider_name = self.gateway.chat(
+        status, content_type, chunks, provider_name, used_model = self.gateway.chat(
             body, str(requested), user_id
         )
         if provider_name:
-            self.log_message("%s -> %s", "chat/completions", provider_name)
-        self._send(status, content_type, chunks)
+            self.log_message("%s -> %s %s", "chat/completions", provider_name, used_model)
+        # Клиент видит, кто реально обслужил запрос: провайдер может
+        # смениться (квота, лимит, поломка) — и это не должно быть тайной.
+        extra = (
+            {"x-ai-bridge-provider": provider_name, "x-ai-bridge-model": used_model}
+            if provider_name
+            else None
+        )
+        self._send(status, content_type, chunks, extra_headers=extra)
 
 
 def serve(

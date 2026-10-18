@@ -96,8 +96,10 @@ class TestRoute:
 
 
 class TestFallback:
-    def test_overload_auth_faults_and_server_errors_switch_the_provider(self) -> None:
-        for status in (401, 403, 429, 500, 502, 503, 504):
+    def test_overload_auth_faults_quota_and_server_errors_switch_the_provider(self) -> None:
+        # 429 — лимит или исчерпанная квота (OpenAI так отвечает за оба),
+        # 402 — пустой баланс у провайдеров вроде OpenRouter.
+        for status in (401, 402, 403, 429, 500, 502, 503, 504):
             assert should_fallback(status) is True
 
     def test_a_bad_request_stays_where_it_is(self) -> None:
