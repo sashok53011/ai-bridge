@@ -391,6 +391,32 @@ class TestLogs:
         assert response.status_code == 303
         assert "ai_bridge_autoscroll=on" in response.headers.get("set-cookie", "")
 
+    def test_the_log_page_does_not_record_itself(self, harness) -> None:
+        from service.eventlog import EventLog
+
+        log = EventLog()
+        _, base = harness([_entry()], event_log=log)
+        with _client(base) as client:
+            _as_admin(client)
+            for _ in range(3):
+                client.get("/logs")  # meta-refresh порождал мусор каждые 5 секунд
+
+        texts = [event["text"] for event in log.recent()]
+        assert not any(text == "/logs" for text in texts)
+
+    def test_the_bodies_button_turns_recording_on(self, harness) -> None:
+        from service.eventlog import EventLog
+
+        log = EventLog()
+        _, base = harness([_entry()], event_log=log)
+        with _client(base) as client:
+            _as_admin(client)
+            assert "тела запросов: выкл" in client.get("/logs").text
+
+            client.post("/logs/bodies")
+            assert log.bodies is True
+            assert "тела запросов: вкл" in client.get("/logs").text
+
 
 class TestAdminWritesKeepCatalogue:
     """Регрессия 16.10.2026: админская запись строится по свежему серверному списку."""

@@ -40,7 +40,16 @@ class EventLog:
         self.path = self.directory / "events.jsonl"
         self._lock = threading.Lock()
         self._recent: list[dict] = []
+        # Тела запросов/ответов: значение по умолчанию — из окружения;
+        # переключается кнопкой на странице журнала (до перезапуска).
+        self.bodies = bodies_enabled()
         self._load_recent()
+
+    def toggle_bodies(self) -> bool:
+        """Кнопка «тела запросов»: включает/выключает запись тел."""
+        with self._lock:
+            self.bodies = not self.bodies
+            return self.bodies
 
     def _load_recent(self) -> None:
         """Последние события из файла — журнал переживает перезапуск."""

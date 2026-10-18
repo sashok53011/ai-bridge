@@ -26,7 +26,6 @@ from typing import Callable
 from core.models import union_models
 from core.routes import advertised_models, is_local_url, request_needs, route, should_fallback
 from providers.client import NeedsKeyError, Provider, ServerError
-from service.eventlog import bodies_enabled
 
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
 _NO_MODELS = {"object": "list", "data": []}
@@ -386,6 +385,12 @@ class Gateway:
         if self._event_log is not None:
             self._event_log.record(kind, user, text, **fields)
 
+    def _bodies_on(self) -> bool:
+        """Записывать ли тела запросов/ответов (кнопка на странице журнала)."""
+        if self._event_log is None:
+            return False
+        return bool(self._event_log.bodies)
+
     # ------------------------------------------------------------ решения
 
     def models_payload(self, user_id: str = "") -> dict:
@@ -454,6 +459,10 @@ class Gateway:
         needs = _needs_of(body)
         attempts = route(entries, requested_model, needs=needs)
         started = time.monotonic()
+        # Тело запроса для журнала — если включена кнопка «тела запросов».
+        body_fields = (
+            {"req": body[:500].decode("utf-8", errors="replace")} if self._bodies_on() else {}
+        )
         if not attempts:
             available = ", ".join(model["id"] for model in advertised_models(entries))
             message = f"модель «{requested_model or '—'}» не обслуживается"
@@ -466,7 +475,7 @@ class Gateway:
                 message += f"; доступны: {available}"
             else:
                 message += "; ни один провайдер не включён"
-            self.note("чат", user_id or "—", f"нет маршрута: {message[:150]}")
+            self.note("чат", user_id or "—", f"нет маршрута: {message[:150]}", **body_fields)
             return 502, "application/json", [_error_body(message, code="model_not_available")], "", ""
 
         by_id = {entry["id"]: entry for entry in entries}
@@ -481,11 +490,10 @@ class Gateway:
                 "status": status,
                 "duration": duration,
                 "attempts": len(problems) + 1,
+                **body_fields,
             }
-            if bodies_enabled():
-                fields["req"] = body[:500].decode("utf-8", errors="replace")
-                if resp_body:
-                    fields["resp"] = resp_body[:500].decode("utf-8", errors="replace")
+            if resp_body:
+                fields["resp"] = resp_body[:500].decode("utf-8", errors="replace")
             self.note(
                 "чат",
                 user_id or "—",
@@ -580,6 +588,7 @@ class Gateway:
             user_id or "—",
             f"не получились все попытки: {'; '.join(problems[:4])}"[:400],
             status=502,
+            **body_fields,
         )
         return 502, "application/json", [_error_body(message, kind="api_error", code="upstream_failed")], "", ""
 

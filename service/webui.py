@@ -280,7 +280,10 @@ class WebUi:
         role = str(viewer.get("role") or "")
         is_admin = role == ROLE_ADMIN
         space = self._spaces.for_user(str(viewer["id"]))
-        self._event("страница", str(viewer.get("email") or ""), clean or "/")
+        # Просмотр самого журнала не пишется: страница обновляется каждые
+        # 5 секунд и засоряла бы журнал самим собой.
+        if clean != "/logs":
+            self._event("страница", str(viewer.get("email") or ""), clean or "/")
 
         if clean in ("/", "/index.html"):
             try:
@@ -355,7 +358,14 @@ class WebUi:
             )
             events = self._log.recent(200) if self._log is not None else []
             self._send_html(
-                handler, 200, logs_page(events, autoscroll=autoscroll, notice=notice)
+                handler,
+                200,
+                logs_page(
+                    events,
+                    autoscroll=autoscroll,
+                    bodies=bool(self._log.bodies) if self._log is not None else False,
+                    notice=notice,
+                ),
             )
             return
 
@@ -777,6 +787,24 @@ class WebUi:
             handler.send_header("Content-Length", "0")
             handler.end_headers()
             self._event("журнал", str(viewer.get("email") or ""), f"автоскролл {value}")
+            return
+
+        if clean == "/logs/bodies":
+            if self._log is None:
+                self._redirect(handler, "журнал не подключён", bad=True)
+                return
+            turned_on = self._log.toggle_bodies()
+            self._event(
+                "журнал",
+                str(viewer.get("email") or ""),
+                f"тела запросов {'включены' if turned_on else 'выключены'}",
+            )
+            self._redirect(
+                handler,
+                "тела запросов пишутся — не оставляйте включённым надолго"
+                if turned_on
+                else "запись тел выключена",
+            )
             return
 
         if clean == "/logs/clear":

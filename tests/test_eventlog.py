@@ -73,3 +73,13 @@ class TestEventLog:
 
         assert event["kind"] == "вход"  # в память попало, файл молчит
         assert log.recent()
+
+    def test_bodies_toggle_flips_the_state(self, tmp_path) -> None:
+        log = EventLog(tmp_path)
+        assert log.bodies is False  # по умолчанию выключено
+
+        assert log.toggle_bodies() is True
+        assert log.bodies is True
+
+        assert log.toggle_bodies() is False
+        assert log.bodies is False

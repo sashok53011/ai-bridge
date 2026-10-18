@@ -408,6 +408,12 @@ class TestLogsPage:
         assert "автоскролл: вкл" in logs_page([], autoscroll=True)
         assert "автоскролл: выкл" in logs_page([], autoscroll=False)
 
+    def test_the_bodies_button_shows_the_state_and_a_warning(self) -> None:
+        on = logs_page([], bodies=True)
+        assert "тела запросов: вкл" in on
+        assert "чужая переписка" in on  # честное предупреждение
+        assert "тела запросов: выкл" in logs_page([], bodies=False)
+
     def test_foreign_words_cannot_break_the_table(self) -> None:
         page = logs_page(
             [{"ts": "2026-10-18T12:00:00Z", "kind": "x", "user": "<img src=x>", "text": "<b>жирный</b>"}]

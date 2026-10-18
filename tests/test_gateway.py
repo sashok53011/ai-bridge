@@ -636,6 +636,52 @@ class TestHiddenErrorShapes:
         assert _hidden_error(b'{"junk": 1}') == ""
 
 
+class TestBodiesInTheJournal:
+    """Кнопка «тела запросов»: тело пишется только когда включена."""
+
+    def _chat_event(self, tmp_path, *, bodies: bool) -> dict:
+        from service.eventlog import EventLog
+        from storage.usertokens import UserTokens
+
+        log = EventLog(tmp_path)
+        log.bodies = bodies
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        gateway = Gateway(
+            lambda: [_entry()],
+            KeyStore(tmp_path),
+            user_tokens=tokens,
+            event_log=log,
+        )
+        server = _Server(("127.0.0.1", 0), _Handler)
+        server.gateway = gateway
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            with httpx.Client(base_url=base) as client:
+                client.post(
+                    "/v1/chat/completions",
+                    content=json.dumps(
+                        {"messages": [{"role": "user", "content": "привет"}]},
+                        ensure_ascii=False,
+                    ),
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+        return next(event for event in log.recent() if event["kind"] == "чат")
+
+    def test_bodies_off_means_no_bodies(self, tmp_path) -> None:
+        event = self._chat_event(tmp_path, bodies=False)
+        assert "req" not in event
+
+    def test_bodies_on_records_a_fragment(self, tmp_path) -> None:
+        event = self._chat_event(tmp_path, bodies=True)
+        assert "привет" in event.get("req", "")
+
+
 class TestApiGate:
     """Тумблер «доступ приложений»: выключил — ни один токен не пройдёт."""
 

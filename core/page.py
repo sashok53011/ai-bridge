@@ -629,12 +629,19 @@ def token_created_page(token: str, name: str) -> str:
 </html>"""
 
 
-def logs_page(events: list[dict], *, autoscroll: bool = False, notice: str = "") -> str:
+def logs_page(
+    events: list[dict],
+    *,
+    autoscroll: bool = False,
+    bodies: bool = False,
+    notice: str = "",
+) -> str:
     """Журнал событий: таблица, новые сверху, обновление раз в 5 секунд.
 
     Без JavaScript страница работает: обновление — meta-refresh; кнопка
     autoscroll кладёт флаг в cookie, а сам скролл к свежим (наверх) делает
     крошечный скрипт — без него остаётся обычное поведение браузера.
+    ``bodies`` — пишутся ли тела запросов (кнопка переключает до рестарта).
     """
     rows = "\n".join(
         f'<tr><td class="ts">{escape(str(item.get("ts") or "")[11:19])}</td>'
@@ -644,6 +651,12 @@ def logs_page(events: list[dict], *, autoscroll: bool = False, notice: str = "")
         for item in events
     ) or '<tr><td colspan="4" class="empty">событий пока нет</td></tr>'
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    bodies_note = (
+        '<p class="notice">тела запросов и ответов пишутся на диск — '
+        'не оставляйте включённым постоянно: это чужая переписка</p>'
+        if bodies
+        else ""
+    )
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -667,10 +680,14 @@ def logs_page(events: list[dict], *, autoscroll: bool = False, notice: str = "")
 <p><form method="post" action="/logs/autoscroll" style="display:inline">
   <button type="submit" class="ghost">автоскролл: {"вкл" if autoscroll else "выкл"}</button>
 </form>
+<form method="post" action="/logs/bodies" style="display:inline">
+  <button type="submit" class="ghost">тела запросов: {"вкл" if bodies else "выкл"}</button>
+</form>
 <form method="post" action="/logs/clear" style="display:inline">
   <button type="submit" class="ghost danger">очистить</button>
 </form>
 <span class="role">обновляется само раз в 5 секунд</span></p>
+{bodies_note}
 <table>
 <tr><th>время</th><th>тип</th><th>кто</th><th>событие</th></tr>
 {rows}
