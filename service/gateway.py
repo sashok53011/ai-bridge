@@ -24,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 from core.models import union_models
-from core.routes import advertised_models, route, should_fallback
+from core.routes import advertised_models, request_needs, route, should_fallback
 from providers.client import NeedsKeyError, Provider, ServerError
 
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
@@ -63,6 +63,42 @@ def _hidden_error(payload: bytes) -> str:
     else:
         return ""
     return f"скрытая ошибка в ответе 200: {detail[:200]}"
+
+
+def _needs_of(body: bytes) -> tuple[str, ...]:
+    """Требования запроса (vision/tools) из его тела; не-JSON — пусто."""
+    try:
+        data = json.loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ()
+    return request_needs(data)
+
+
+#: Понятные фразы отказа из-за неподдерживаемых возможностей (400).
+_CAPABILITY_HINTS = (
+    "image_url is not supported",
+    "images are not supported",
+    "does not support image",
+    "does not support tool",
+    "does not support function",
+    "tool use is not supported",
+    "no tools support",
+    "no image input",
+)
+
+
+def _capability_refusal(payload: bytes) -> str:
+    """Провайдер отверг запрос из-за невозможностей модели (400).
+
+    Узкая эвристика: многие шлюзы отвечают понятными фразами
+    («image_url is not supported», «does not support tools») — такое
+    стоит переключить на подходящую модель, а не отдавать клиенту.
+    """
+    text = payload.decode("utf-8", errors="replace").lower()
+    for hint in _CAPABILITY_HINTS:
+        if hint in text:
+            return f"модель отвергла запрос ({hint})"
+    return ""
 
 
 def test_chat(
@@ -387,10 +423,16 @@ class Gateway:
         """
         entries_provider, keys = self._context(user_id)
         entries = entries_provider()
-        attempts = route(entries, requested_model)
+        needs = _needs_of(body)
+        attempts = route(entries, requested_model, needs=needs)
         if not attempts:
             available = ", ".join(model["id"] for model in advertised_models(entries))
             message = f"модель «{requested_model or '—'}» не обслуживается"
+            if needs:
+                message += (
+                    f"; запрос требует: {', '.join(needs)} — включите провайдера "
+                    "с такими способностями (поле «Способности»)"
+                )
             if available:
                 message += f"; доступны: {available}"
             else:
@@ -425,6 +467,28 @@ class Gateway:
                 problems.append(f"{entry['name']}: HTTP {response.status_code} {detail}".strip())
                 response.close()
                 continue
+
+            if response.status_code == 400:
+                # Ответ 400: либо вина клиента (идёт как есть), либо
+                # понятный отказ модели за отсутствие картинок/инструментов —
+                # такое честнее переключить на подходящую модель.
+                raw = response.read()
+                refusal = _capability_refusal(raw)
+                if refusal:
+                    problems.append(f"{entry['name']}: {refusal}")
+                    response.close()
+                    continue
+
+                def chunks_400(body=raw):
+                    yield body
+
+                return (
+                    400,
+                    response.headers.get("content-type", "application/json"),
+                    chunks_400(),
+                    entry["name"],
+                    attempt["model"],
+                )
 
             content_type = response.headers.get("content-type", "application/json")
 

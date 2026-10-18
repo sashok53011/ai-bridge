@@ -30,6 +30,55 @@ def enabled(entries: list[dict]) -> list[dict]:
     )
 
 
+def request_needs(data: object) -> tuple[str, ...]:
+    """Что просит запрос: ("vision",) и/или ("tools",); пусто — ничего особого.
+
+    Распознаём стандартные признаки OpenAI-формата: сообщения с картинками
+    (image_url / input_image) и инструменты (tools / tool_choice). Требование
+    сохраняется при переключении провайдеров: кормить картинкой модель
+    без vision — пустая трата времени.
+    """
+    if not isinstance(data, dict):
+        return ()
+    needs: list[str] = []
+    if _asks_for_images(data):
+        needs.append("vision")
+    if _asks_for_tools(data):
+        needs.append("tools")
+    return tuple(needs)
+
+
+def _asks_for_images(data: dict) -> bool:
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and str(part.get("type") or "") in (
+                    "image_url",
+                    "input_image",
+                ):
+                    return True
+    return False
+
+
+def _asks_for_tools(data: dict) -> bool:
+    tools = data.get("tools")
+    if isinstance(tools, list) and tools:
+        return True
+    return bool(data.get("tool_choice"))
+
+
+def _capable(entry: dict, needs: tuple[str, ...]) -> bool:
+    """Есть ли у записи все нужные способности (текст «Способности»)."""
+    caps = str(entry.get("capabilities") or "").lower()
+    return all(word in caps for word in needs)
+
+
 def advertised_models(entries: list[dict]) -> list[dict]:
     """Модели, которые приставка предлагает клиентам.
 
@@ -44,8 +93,12 @@ def advertised_models(entries: list[dict]) -> list[dict]:
     return [{"id": model, "owned_by": provider_id} for model, provider_id in seen.items()]
 
 
-def route(entries: list[dict], requested: str = "") -> list[dict]:
+def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = ()) -> list[dict]:
     """Цепочка попыток для запроса: [{providerId, model}, ...].
+
+    ``needs`` — требования самого запроса (vision/tools): когда модель
+    отказала и мы переключаемся, дальше по приоритету идут только модели
+    с нужными способностями — кормить картинкой модель без vision глупо.
 
     Пустая цепочка — обслужить нечим: ни одного включённого провайдера
     с подходящей моделью.
@@ -55,13 +108,16 @@ def route(entries: list[dict], requested: str = "") -> list[dict]:
     if not chain:
         return []
 
-    # Модель не названа: каждый включённый со своей настроенной моделью.
+    def attempt(entry: dict) -> dict:
+        return {"providerId": entry["id"], "model": str(entry.get("model") or "").strip()}
+
+    # Модель не названа: каждый включённый со своей настроенной моделью;
+    # при наличии требований — только подходящие по способностям.
     if not wanted:
-        return [
-            {"providerId": entry["id"], "model": str(entry.get("model") or "").strip()}
-            for entry in chain
-            if str(entry.get("model") or "").strip()
-        ]
+        pool = [entry for entry in chain if str(entry.get("model") or "").strip()]
+        if needs:
+            pool = [entry for entry in pool if _capable(entry, needs)]
+        return [attempt(entry) for entry in pool]
 
     # Полное совпадение (включая «префикс/модель» в имени самой модели)
     # важнее разбора префикса как провайдера: у openrouter модель
@@ -69,20 +125,28 @@ def route(entries: list[dict], requested: str = "") -> list[dict]:
     matches = [
         entry for entry in chain if offers_model(str(entry.get("model") or ""), [wanted])
     ]
-    if matches:
-        return [
-            {"providerId": entry["id"], "model": str(entry.get("model") or "").strip()}
-            for entry in matches
-        ]
 
     # «ollama/qwen3» — явный выбор провайдера для модели не из каталога.
-    prefix, slash, rest = wanted.partition("/")
-    if slash and rest.strip():
-        for entry in chain:
-            if entry["id"] == prefix.strip().lower():
-                return [{"providerId": entry["id"], "model": rest.strip()}]
+    if not matches:
+        prefix, slash, rest = wanted.partition("/")
+        if slash and rest.strip():
+            for entry in chain:
+                if entry["id"] == prefix.strip().lower():
+                    return [{"providerId": entry["id"], "model": rest.strip()}]
 
-    return []
+    attempts = [attempt(entry) for entry in matches]
+    seen = {item["providerId"] for item in attempts}
+
+    # Требование запроса сохраняется при переключении: дальше по
+    # приоритету — только модели с нужными способностями.
+    if needs:
+        for entry in chain:
+            if entry["id"] in seen or not str(entry.get("model") or "").strip():
+                continue
+            if _capable(entry, needs):
+                attempts.append(attempt(entry))
+                seen.add(entry["id"])
+    return attempts
 
 
 def should_fallback(status: int) -> bool:

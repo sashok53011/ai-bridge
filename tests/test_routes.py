@@ -1,6 +1,12 @@
 """Маршрутизация: кому достаётся запрос и когда стоит переключаться."""
 
-from core.routes import advertised_models, enabled, route, should_fallback
+from core.routes import (
+    advertised_models,
+    enabled,
+    request_needs,
+    route,
+    should_fallback,
+)
 
 
 def _entry(**kwargs) -> dict:
@@ -105,3 +111,73 @@ class TestFallback:
     def test_a_bad_request_stays_where_it_is(self) -> None:
         for status in (400, 404, 413, 422):
             assert should_fallback(status) is False
+
+
+class TestRequestNeeds:
+    """Что просил запрос: картинки, инструменты — ничего особого."""
+
+    def test_images_mean_vision(self) -> None:
+        body = {
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "что на картинке?"},
+                    {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                ]}
+            ]
+        }
+        assert request_needs(body) == ("vision",)
+
+    def test_tools_mean_tools(self) -> None:
+        assert request_needs({"messages": [], "tools": [{"type": "function"}]}) == ("tools",)
+        assert request_needs({"messages": [], "tool_choice": "auto"}) == ("tools",)
+
+    def test_a_plain_request_needs_nothing(self) -> None:
+        assert request_needs({"messages": [{"role": "user", "content": "привет"}]}) == ()
+        assert request_needs({"messages": []}) == ()
+        assert request_needs(None) == ()
+        assert request_needs("мусор") == ()
+
+
+class TestRouteKeepsRequirements:
+    """Переключение не теряет требование: vision остаётся vision."""
+
+    def _mixed(self) -> list[dict]:
+        return [
+            _entry(id="plain", name="Plain", model="m-plain", fallbackPriority=1),
+            _entry(
+                id="vis", name="Vis", model="m-vis", fallbackPriority=2,
+                capabilities="vision",
+            ),
+            _entry(
+                id="both", name="Both", model="m-both", fallbackPriority=3,
+                capabilities="vision, tools",
+            ),
+        ]
+
+    def test_a_vision_chain_skips_plain_models(self) -> None:
+        attempts = route(self._mixed(), "m-vis", needs=("vision",))
+        assert [item["providerId"] for item in attempts] == ["vis", "both"]
+
+    def test_an_unnamed_vision_request_picks_capable_models(self) -> None:
+        attempts = route(self._mixed(), "", needs=("vision",))
+        assert [item["providerId"] for item in attempts] == ["vis", "both"]
+
+    def test_an_unknown_named_model_with_images_still_finds_vision(self) -> None:
+        attempts = route(self._mixed(), "нет-такой", needs=("vision",))
+        assert [item["providerId"] for item in attempts] == ["vis", "both"]
+
+    def test_tools_chain_prefers_models_with_tools(self) -> None:
+        attempts = route(self._mixed(), "", needs=("tools",))
+        assert [item["providerId"] for item in attempts] == ["both"]
+
+    def test_without_requirements_behaviour_is_unchanged(self) -> None:
+        # Названная модель — только точные совпадения, как и раньше.
+        assert [i["providerId"] for i in route(self._mixed(), "m-vis")] == ["vis"]
+        # Неназванная — все с настроенными моделями.
+        assert [i["providerId"] for i in route(self._mixed(), "")] == ["plain", "vis", "both"]
+
+    def test_an_explicit_provider_prefix_is_respected(self) -> None:
+        # Явный выбор провайдера («провайдер/своя-модель») — одиночная попытка,
+        # даже если запрос с картинками: человек знает, что делает.
+        attempts = route(self._mixed(), "plain/super-new", needs=("vision",))
+        assert attempts == [{"providerId": "plain", "model": "super-new"}]

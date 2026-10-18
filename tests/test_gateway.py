@@ -444,6 +444,111 @@ class TestProxyTransparency:
         assert "OpenAI" in text and "HTTP 500" in text
 
 
+class TestCapabilityFallback:
+    """Требование запроса (картинка/инструменты) сохраняется при переключении."""
+
+    VISION_BODY = json.dumps(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "что на картинке?"},
+                        {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                    ],
+                }
+            ]
+        }
+    )
+
+    @staticmethod
+    def _mixed() -> list[dict]:
+        return [
+            _entry(id="vis", name="Vis", url="https://vis.test/v1", model="m-vis",
+                   fallbackPriority=1, capabilities="vision"),
+            _entry(id="plain", name="Plain", url="https://plain.test/v1", model="m-plain",
+                   fallbackPriority=2),
+            _entry(id="both", name="Both", url="https://both.test/v1", model="m-both",
+                   fallbackPriority=3, capabilities="vision, tools"),
+        ]
+
+    def test_a_vision_fallback_lands_on_a_vision_model(self, harness) -> None:
+        h = harness(
+            self._mixed(),
+            {
+                "https://vis.test": lambda req: httpx.Response(
+                    429, json={"error": {"message": "quota"}}
+                ),
+                "https://both.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "вижу"}}]}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=self.VISION_BODY)
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "Both"
+
+    def test_a_vision_request_never_lands_on_a_plain_model(self, harness) -> None:
+        def boom(req):
+            raise httpx.ConnectError("оба мертвы")
+
+        h = harness(
+            self._mixed(),
+            {
+                "https://vis.test": lambda req: httpx.Response(
+                    429, json={"error": {"message": "quota"}}
+                ),
+                "https://both.test": boom,
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=self.VISION_BODY)
+
+        # Plain-модель в цепочку vision-запроса не попала: видно по причинам.
+        assert response.status_code == 502
+        assert "Plain" not in response.text
+
+    def test_a_400_refusal_about_images_hands_over(self, harness) -> None:
+        h = harness(
+            [
+                _entry(id="vis", name="Vis", url="https://vis.test/v1", model="m-vis",
+                       fallbackPriority=1, capabilities="vision"),
+                _entry(id="both", name="Both", url="https://both.test/v1", model="m-both",
+                       fallbackPriority=2, capabilities="vision, tools"),
+            ],
+            {
+                "https://vis.test": lambda req: httpx.Response(
+                    400, json={"error": {"message": "image_url is not supported by this model"}}
+                ),
+                "https://both.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "вижу"}}]}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=self.VISION_BODY)
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "Both"
+
+    def test_a_plain_400_still_goes_to_the_client(self, harness) -> None:
+        h = harness(
+            [_entry()],
+            {
+                "http://ollama.test": lambda req: httpx.Response(
+                    400, json={"error": {"message": "messages is required"}}
+                ),
+            },
+        )
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=json.dumps({"wrong": True}))
+
+        assert response.status_code == 400
+        assert "messages is required" in response.text
+
+
 class TestHiddenErrors:
     """Шлюзы иногда отвечают 200, а кладут в JSON ошибку — это отказ."""
 
