@@ -102,15 +102,23 @@ class PocketBase:
         """Состояние человека в реестре: 'ok', 'missing' или 'blocked'.
 
         Приставка сверяется с сервером каталога перед каждым запросом —
-        онлайн-проверка «зарегистрирован и не заблокирован». Сервер молчит
+        онлайн-проверка «зарегистрирован и не заблокирован». Суперпользо­ватель
+        живёт в отдельной коллекции `_superusers`: не найден в `users` —
+        проверяем там, он зарегистрирован по определению. Сервер молчит
         или отваливается — ServerError: вызывающий закрывается, а не гадает.
         """
         try:
             body = self._request("GET", f"/api/collections/users/records/{user_id}")
         except ServerError as exc:
-            if "HTTP 404" in str(exc):
-                return "missing"
-            raise
+            if "HTTP 404" not in str(exc):
+                raise
+            try:
+                self._request("GET", f"/api/collections/_superusers/records/{user_id}")
+            except ServerError as inner:
+                if "HTTP 404" in str(inner):
+                    return "missing"
+                raise
+            return "ok"
         return "blocked" if (body or {}).get("blocked") else "ok"
 
     def set_blocked(self, user_id: str, blocked: bool) -> None:

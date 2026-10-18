@@ -27,7 +27,12 @@ class TestRegistry:
 
     @staticmethod
     def _client(
-        *, blocked: bool = False, missing: bool = False, broken: bool = False, has_field: bool = True
+        *,
+        blocked: bool = False,
+        missing: bool = False,
+        broken: bool = False,
+        has_field: bool = True,
+        superuser: bool = False,
     ) -> PocketBase:
         import json as _json
 
@@ -41,6 +46,10 @@ class TestRegistry:
                 )
             if broken:
                 return httpx.Response(500, json={"message": "сломалось"})
+            if path == "/api/collections/_superusers/records/u1":
+                if superuser:
+                    return httpx.Response(200, json={"id": "u1", "email": "a@b.c"})
+                return httpx.Response(404, json={"message": "not found"})
             if path == "/api/collections/users/records/u1":
                 if missing:
                     return httpx.Response(404, json={"message": "not found"})
@@ -80,6 +89,10 @@ class TestRegistry:
 
     def test_a_deleted_person_is_missing(self) -> None:
         assert self._client(missing=True).access_state("u1") == "missing"
+
+    def test_a_superuser_is_registered_by_definition(self) -> None:
+        """Суперпользо­ватель живёт в отдельной коллекции — и он в порядке."""
+        assert self._client(missing=True, superuser=True).access_state("u1") == "ok"
 
     def test_a_blocked_person_is_blocked(self) -> None:
         assert self._client(blocked=True).access_state("u1") == "blocked"
