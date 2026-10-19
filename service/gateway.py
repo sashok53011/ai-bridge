@@ -105,7 +105,9 @@ def _absorb_usage(state: dict, line: str) -> None:
         state["usage"] = usage
 
 
-#: Понятные фразы отказа из-за неподдерживаемых возможностей (400).
+#: Понятные фразы отказа из-за невозможностей модели (400): не умеет
+#: картинки/инструменты — или вообще несовместимый канал (live-модели
+#: Gemini отвечают только через WebSocket).
 _CAPABILITY_HINTS = (
     "image_url is not supported",
     "images are not supported",
@@ -115,6 +117,9 @@ _CAPABILITY_HINTS = (
     "tool use is not supported",
     "no tools support",
     "no image input",
+    "only supports real-time bidirectional streaming",
+    "bidi generatecontent",
+    "bidigeneratecontent",
 )
 
 
@@ -122,8 +127,9 @@ def _capability_refusal(payload: bytes) -> str:
     """Провайдер отверг запрос из-за невозможностей модели (400).
 
     Узкая эвристика: многие шлюзы отвечают понятными фразами
-    («image_url is not supported», «does not support tools») — такое
-    стоит переключить на подходящую модель, а не отдавать клиенту.
+    («image_url is not supported», «does not support tools», «только
+    через WebSocket») — такое стоит переключить на подходящую модель,
+    а не отдавать клиенту.
     """
     text = payload.decode("utf-8", errors="replace").lower()
     for hint in _CAPABILITY_HINTS:

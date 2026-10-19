@@ -589,6 +589,40 @@ class TestCapabilityFallback:
         assert response.status_code == 200
         assert response.headers["x-ai-bridge-provider"] == "Both"
 
+    def test_a_400_refusal_about_websocket_only_models_switches(self, harness) -> None:
+        """Live-модель Gemini отвечает только через WebSocket — отказ
+        по существу (модель не может обслужить наш канал), цепочка
+        продолжает следующей включённой моделью."""
+        h = harness(
+            [
+                _entry(id="gemini", name="Google Gemini", url="https://gemini.test/v1",
+                       model="models/gemini-3.1-flash-live-preview", fallbackPriority=1),
+                _entry(id="local", name="Local", url="http://local.test/v1",
+                       model="qwen3:0.6b", fallbackPriority=9),
+            ],
+            {
+                "https://gemini.test": lambda req: httpx.Response(
+                    400, json={"error": {"message": (
+                        "models/gemini-3.1-flash-live-preview only supports real-time "
+                        "bidirectional streaming via WebSocket (bidiGenerateContent). "
+                        "Please use the Gemini Live API (bidiGenerateContent via WebSocket) "
+                        "instead of generateContent."
+                    ), "status": "INVALID_ARGUMENT"}},
+                ),
+                "http://local.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "жив"}}]}
+                ),
+            },
+        )
+        payload = json.dumps({"model": "models/gemini-3.1-flash-live-preview"})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=payload)
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "Local"
+        # Оба провайдера получили запрос: живая-модель отвергла, локальная ответила.
+        assert [request.url.host for request in h.seen] == ["gemini.test", "local.test"]
+
     def test_a_plain_400_still_goes_to_the_client(self, harness) -> None:
         h = harness(
             [_entry()],
