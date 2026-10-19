@@ -1107,3 +1107,136 @@ class TestUsageParsing:
         _absorb_usage(state, "data: [сломанный json")
         _absorb_usage(state, 'data: {"usage": "не объект"}')
         assert state == {}
+
+
+class TestReputation:
+    """Репутация: поломки уводят модель на паузу, успех всё прощает."""
+
+    @staticmethod
+    def _build(tmp_path, entries, handlers):
+        """Гейтвей с репутацией на тестовых данных."""
+        from providers.client import Provider
+        from storage.reputation import ReputationStore
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            inner = handlers[base]
+            return Provider(url, transport=httpx.MockTransport(inner), **kwargs)
+
+        reputation = ReputationStore(tmp_path)
+        gateway = Gateway(lambda: entries, KeyStore(tmp_path), provider_factory=factory,
+                          reputation=reputation)
+        return gateway, reputation
+
+    @staticmethod
+    def _ask(gateway, model="llama3.2"):
+        return gateway.chat(json.dumps({"model": model}).encode("utf-8"), model)
+
+    @staticmethod
+    def _refusal(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400, json={"error": {"message": (
+                "models/gemini-3.1-flash-live-preview only supports real-time "
+                "bidirectional streaming via WebSocket (bidiGenerateContent)."
+            )}}
+        )
+
+    @staticmethod
+    def _ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "жив"}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    def test_faults_pause_a_model_and_the_chain_skips_it(self, tmp_path) -> None:
+        entries = [
+            _entry(id="gemini", name="Gemini", url="https://gemini.test/v1", fallbackPriority=1),
+            _entry(id="local", name="Local", url="http://local.test/v1",
+                   model="qwen3", fallbackPriority=9),
+        ]
+        seen: list[str] = []
+
+        def refusal(request: httpx.Request) -> httpx.Response:
+            seen.append("gemini")
+            return self._refusal(request)
+
+        def ok(request: httpx.Request) -> httpx.Response:
+            seen.append("local")
+            return self._ok(request)
+
+        gateway, reputation = self._build(
+            tmp_path, entries,
+            {"https://gemini.test": refusal, "http://local.test": ok},
+        )
+
+        # Три запроса: каждый раз gemini отказывает, local подхватывает.
+        for _ in range(3):
+            status, _, _, provider, _ = self._ask(gateway)
+            assert status == 200
+            assert provider == "Local"
+        assert seen == ["gemini", "local"] * 3
+        assert reputation.remaining("gemini/llama3.2") > 0  # третья поломка: пауза
+
+        # Четвёртый запрос: gemini на паузе — цепочка идёт сразу к local.
+        self._ask(gateway)
+        assert seen[-1] == "local" and "gemini" not in seen[6:]
+
+    def test_a_success_forgives_a_paused_model(self, tmp_path) -> None:
+        entries = [_entry()]
+        gateway, reputation = self._build(tmp_path, entries, {"http://ollama.test": self._ok})
+        for _ in range(3):
+            reputation.fault("ollama/llama3.2")
+        # Один провайдер — цепочка берёт и наказанную (лучше так, чем мёртвый отказ).
+        assert reputation.remaining("ollama/llama3.2") > 0
+
+        status, _, _, provider, _ = self._ask(gateway)
+
+        assert status == 200
+        assert provider == "Ollama"
+        # Удачный ответ снял наказание само.
+        assert reputation.remaining("ollama/llama3.2") == 0
+
+    def test_garbage_instead_of_json_is_a_fault(self, tmp_path) -> None:
+        entries = [
+            _entry(id="a", name="A", url="https://a.test/v1", fallbackPriority=1),
+            _entry(id="b", name="B", url="https://b.test/v1", model="m-b", fallbackPriority=2),
+        ]
+
+        def garbage(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content="<html>ой, что-то пошло не так</html>",
+                headers={"content-type": "application/json"},
+            )
+
+        gateway, reputation = self._build(
+            tmp_path, entries, {"https://a.test": garbage, "https://b.test": self._ok}
+        )
+
+        status, _, _, provider, _ = self._ask(gateway)
+
+        assert status == 200
+        assert provider == "B"  # мусор переключён, не отдан клиенту
+        assert reputation.penalized()  # мусорщика записали в штрафники
+
+    def test_a_plain_client_error_is_not_a_fault(self, tmp_path) -> None:
+        entries = [_entry()]
+        gateway, reputation = self._build(tmp_path, entries, {"http://ollama.test": self._ok})
+
+        for _ in range(5):
+            gateway.chat(b"", "")  # пустое тело — вина клиента
+
+        assert reputation.penalized() == []
+
+    def test_a_404_is_a_fault_for_the_model(self, tmp_path) -> None:
+        entries = [_entry()]
+
+        def unknown(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"message": "model not found"}})
+
+        gateway, reputation = self._build(tmp_path, entries, {"http://ollama.test": unknown})
+
+        for _ in range(3):
+            status, _, _, _, _ = self._ask(gateway)
+
+        assert status == 502  # никто не ответил
+        assert reputation.remaining("ollama/llama3.2") > 0

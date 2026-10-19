@@ -698,3 +698,62 @@ class TestStats:
 
         assert page.status_code == 200
         assert "llama3.2" in page.text
+
+
+class TestReputationPage:
+    """Секция «на паузе» на странице статистики: только админ, с кнопкой."""
+
+    @staticmethod
+    def _reputation():
+        from storage.reputation import ReputationStore
+
+        store = ReputationStore()
+        for _ in range(3):
+            store.fault("ollama/llama3.2")
+        return store
+
+    def test_the_admin_sees_paused_models_with_a_button(self, harness) -> None:
+        _, base = harness([_entry()], reputation=self._reputation())
+
+        with _client(base) as client:
+            _as_admin(client)
+            page = client.get("/stats")
+
+        assert "На паузе" in page.text
+        assert "ollama/llama3.2" in page.text
+        assert "/stats/release" in page.text
+
+    def test_a_guest_never_sees_the_section(self, harness) -> None:
+        _, base = harness([_entry()], reputation=self._reputation())
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/stats")
+
+        assert "На паузе" not in page.text
+
+    def test_release_button_forgives_and_reports(self, harness) -> None:
+        from storage.reputation import ReputationStore
+
+        store = self._reputation()
+        _, base = harness([_entry()], reputation=store)
+
+        with _client(base) as client:
+            _as_admin(client)
+            done = client.post("/stats/release", data={"key": "ollama/llama3.2"}, follow_redirects=True)
+
+        assert store.remaining("ollama/llama3.2") == 0
+        assert "прощена" in done.text
+
+    def test_a_guest_cannot_release(self, harness) -> None:
+        from storage.reputation import ReputationStore
+
+        store = self._reputation()
+        _, base = harness([_entry()], reputation=store)
+
+        with _client(base) as client:
+            _as_guest(client)
+            refused = client.post("/stats/release", data={"key": "ollama/llama3.2"})
+
+        assert refused.status_code == 403
+        assert store.remaining("ollama/llama3.2") > 0  # штрафы на месте

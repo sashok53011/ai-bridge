@@ -69,6 +69,25 @@ def _hidden_error(payload: bytes) -> str:
     return f"скрытая ошибка в ответе 200: {detail[:200]}"
 
 
+def _garbage_answer(payload: bytes, content_type: str) -> bool:
+    """Обещал JSON (content-type) — а отдал мусор или пустоту.
+
+    Узкая эвристика для репутации: шлюз сообщает «application/json»,
+    но тело не разбирается (или пустое) — ответ непригоден, это поломка
+    модели, а не запроса. Не-JSON content-type молча пропускаем: у
+    провайдера может быть своя форма, её отдаём клиенту как есть.
+    """
+    if "json" not in (content_type or "").lower():
+        return False
+    if not payload.strip():
+        return True
+    try:
+        json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return True
+    return False
+
+
 def _needs_of(body: bytes) -> tuple[str, ...]:
     """Требования запроса (vision/tools) из его тела; не-JSON — пусто."""
     try:
@@ -273,6 +292,7 @@ class Gateway:
         access_checker: Callable[[str], bool] | None = None,
         event_log=None,  # service.eventlog.EventLog | None
         usage_store=None,  # storage.usage.UsageStore | None
+        reputation=None,  # storage.reputation.ReputationStore | None
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -285,6 +305,7 @@ class Gateway:
         self._access_checker = access_checker
         self._event_log = event_log
         self._usage_store = usage_store
+        self._reputation = reputation
         # Реестр доступа: {человек: (время, годен?)} и память о поломке.
         self._access_cache: dict[str, tuple[float, bool]] = {}
         self._access_down_until = 0.0
@@ -445,6 +466,53 @@ class Gateway:
         except Exception:  # noqa: BLE001 — статистика не должна ломать чат
             pass
 
+    @staticmethod
+    def _rep_key(entry: dict, model: str) -> str:
+        return f"{entry.get('id')}/{model}"
+
+    def _fault(self, entry: dict, model: str, reason: str) -> None:
+        """Поломка модели: записать штраф; ушла на паузу — в журнал."""
+        if self._reputation is None:
+            return
+        try:
+            paused = self._reputation.fault(self._rep_key(entry, model))
+        except Exception:  # noqa: BLE001 — репутация не должна ломать чат
+            return
+        if paused:
+            self.note(
+                "пауза",
+                "—",
+                f"модель {model} ({entry.get('name') or entry.get('id')}) "
+                f"ушла на паузу: {reason}",
+            )
+
+    def _healed(self, entry: dict, model: str) -> None:
+        """Нормальный ответ немедленно снимает штрафы с модели."""
+        if self._reputation is None:
+            return
+        try:
+            self._reputation.ok(self._rep_key(entry, model))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _repute_chain(self, attempts: list[dict], by_id: dict) -> list[dict]:
+        """Отсечь модели на паузе. Но если ушли все — берём и наказанные:
+        чужой ответ лучше мёртвой ошибки, а удачный запрос снимет паузу."""
+        if self._reputation is None or not attempts:
+            return attempts
+        try:
+            free = [
+                attempt
+                for attempt in attempts
+                if self._reputation.remaining(
+                    self._rep_key(by_id.get(attempt["providerId"], {}), attempt["model"])
+                )
+                == 0
+            ]
+        except Exception:  # noqa: BLE001
+            return attempts
+        return free or attempts
+
     # ------------------------------------------------------------ решения
 
     def models_payload(self, user_id: str = "") -> dict:
@@ -533,6 +601,8 @@ class Gateway:
             return 502, "application/json", [_error_body(message, code="model_not_available")], "", ""
 
         by_id = {entry["id"]: entry for entry in entries}
+        # Модели на паузе пропускаются — если остались свободные.
+        attempts = self._repute_chain(attempts, by_id)
         problems: list[str] = []
 
         def served(
@@ -575,6 +645,9 @@ class Gateway:
                     ok=status < 400,
                     switched=bool(problems),
                 )
+            if status < 400:
+                # Живой ответ снимает с модели все прошлые штрафы.
+                self._healed(entry, model)
             return status, content_type, chunks, entry["name"], model
 
         for attempt in attempts:
@@ -600,6 +673,12 @@ class Gateway:
                 # надо закрыть, а причина пригодится, если никто не справится.
                 detail = response.read().decode("utf-8", errors="replace")[:200]
                 problems.append(f"{entry['name']}: HTTP {response.status_code} {detail}".strip())
+                if response.status_code == 404:
+                    # 404 от чата почти всегда «модель неизвестна провайдеру» —
+                    # штраф конкретной модели, не всего провайдера.
+                    self._fault(
+                        entry, attempt["model"], "HTTP 404 — модель неизвестна провайдеру"
+                    )
                 response.close()
                 continue
 
@@ -611,6 +690,7 @@ class Gateway:
                 refusal = _capability_refusal(raw)
                 if refusal:
                     problems.append(f"{entry['name']}: {refusal}")
+                    self._fault(entry, attempt["model"], refusal)
                     response.close()
                     continue
 
@@ -637,6 +717,11 @@ class Gateway:
                 hidden = _hidden_error(payload)
                 if hidden:
                     problems.append(f"{entry['name']}: {hidden}")
+                    self._fault(entry, attempt["model"], hidden)
+                    continue
+                if _garbage_answer(payload, content_type):
+                    problems.append(f"{entry['name']}: тело ответа не разбирается как JSON")
+                    self._fault(entry, attempt["model"], "мусор вместо JSON")
                     continue
 
                 def chunks(body=payload):
@@ -922,6 +1007,7 @@ def serve(
     access_checker=None,
     event_log=None,
     usage_store=None,
+    reputation=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
@@ -931,14 +1017,15 @@ def serve(
     ``api_gate`` — их тумблер «доступ приложений», ``access_checker`` —
     онлайн-проверка реестра (зарегистрирован/заблокирован),
     ``event_log`` — журнал событий для страницы «Журнал»,
-    ``usage_store`` — расходы моделей для страницы «Статистика».
+    ``usage_store`` — расходы моделей для страницы «Статистика»,
+    ``reputation`` — штрафы и паузы моделей («репутация»).
     Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
     gateway = Gateway(
         entries_provider, keys, timeout=timeout, token=token,
         user_tokens=user_tokens, context_for_user=context_for_user,
         api_gate=api_gate, access_checker=access_checker, event_log=event_log,
-        usage_store=usage_store,
+        usage_store=usage_store, reputation=reputation,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

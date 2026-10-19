@@ -288,6 +288,7 @@ def _serve(
     from service.gateway import serve as run_server
     from service.space import Spaces, migrate_device_space
     from service.webui import WebUi
+    from storage.reputation import ReputationStore
     from storage.sessions import SessionStore
     from storage.usertokens import UserTokens
     from storage.usage import UsageStore
@@ -296,6 +297,7 @@ def _serve(
     root = default_dir()
     event_log = EventLog(root)
     usage_store = UsageStore(root)
+    reputation = ReputationStore(root)
     admin_id = server.user_id
     spaces = Spaces(root, admin_id=admin_id)
     sessions = SessionStore(root)
@@ -361,6 +363,7 @@ def _serve(
         bound_host=host,
         event_log=event_log,
         usage_store=usage_store,
+        reputation=reputation,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
@@ -387,6 +390,7 @@ def _serve(
         access_checker=access_checker,
         event_log=event_log,
         usage_store=usage_store,
+        reputation=reputation,
     )
 
 

@@ -90,6 +90,7 @@ class WebUi:
         signup_hook: Callable[[str, str], None] | None = None,
         event_log=None,  # service.eventlog.EventLog | None
         usage_store=None,  # storage.usage.UsageStore | None
+        reputation=None,  # storage.reputation.ReputationStore | None
     ) -> None:
         self._providers_source = providers_source
         self._server = server
@@ -105,6 +106,7 @@ class WebUi:
         self._signup_hook = signup_hook or self._signup_on_server
         self._log = event_log
         self._usage = usage_store
+        self._reputation = reputation
 
     def _event(self, kind: str, user: str, text: str, **fields) -> None:
         """Одно событие в журнал; без журнала — молча пропускаем."""
@@ -362,10 +364,15 @@ class WebUi:
                     }
                 )
             rows.sort(key=lambda row: (-row["requests"], row["model"]))
+            penalized = (
+                self._reputation.penalized() if (self._reputation and is_admin) else []
+            )
             self._send_html(
                 handler,
                 200,
-                stats_page(rows, can_edit=is_admin, notice=notice),
+                stats_page(
+                    rows, can_edit=is_admin, notice=notice, penalized=penalized,
+                ),
             )
             return
 
@@ -817,6 +824,16 @@ class WebUi:
             self._users.purge(target)
             self._event("удаление", str(viewer.get("email") or ""), f"пользователь {target} удалён")
             self._redirect(handler, "пользователь удалён: аккаунт, токены и пространство")
+            return
+
+        if clean == "/stats/release":
+            if not is_admin or self._reputation is None:
+                self._forbidden(handler, "прощение модели — только администратору")
+                return
+            key = field("key")
+            self._reputation.release(key)
+            self._event("репутация", str(viewer.get("email") or ""), f"модель {key} прощена")
+            self._redirect(handler, f"модель {key} прощена — штрафы сняты")
             return
 
         if clean == "/logs/autoscroll":

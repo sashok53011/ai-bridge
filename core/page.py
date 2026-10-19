@@ -610,15 +610,44 @@ def tokens_page(
 
 
 def stats_page(
-    rows: list[dict], *, can_edit: bool = False, notice: str = ""
+    rows: list[dict], *, can_edit: bool = False, notice: str = "",
+    penalized: list[dict] | None = None,
 ) -> str:
     """Статистика по моделям: мои расходы, проверки сообщества, способности.
 
-    Каждому видны его собственные расходы; админу сверху — суммы «все люди».
+    Каждому видны его собственные расходы; админу сверху — суммы «все
+    люди» и секция «на паузе» с кнопкой прощения (репутация моделей).
     Строки приходят собранными (webui), здесь только разметка.
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     people_column = "<th>все люди</th>" if can_edit else ""
+
+    def paused_html() -> str:
+        """Секция «на паузе» — только админу, кнопка «вернуть» рядом."""
+        if not can_edit or not penalized:
+            return ""
+        lines = [
+            "<h2>На паузе</h2>",
+            "<p class=\"role\">Модели с штрафами за поломки. Пауза снимается "
+            "сама после нормального ответа — или кнопкой ниже.</p>",
+            "<table>",
+            "<tr><th>провайдер/модель</th><th>штрафов</th><th>блокировок</th>"
+            "<th>вернётся через</th><th></th></tr>",
+        ]
+        for row in penalized:
+            left = int(row.get("until", 0))
+            when = f"{left // 60} мин" if left else "—"
+            lines.append(
+                f'<tr><td class="model">{escape(str(row.get("key") or "—"))}</td>'
+                f'<td>{int(row.get("fails", 0))}</td>'
+                f'<td>{int(row.get("blocks", 0))}</td>'
+                f'<td>{when}</td>'
+                f'<td><form method="post" action="/stats/release" style="display:inline">'
+                f'<input type="hidden" name="key" value="{escape(str(row.get("key") or ""))}">'
+                f'<button type="submit">вернуть</button></form></td></tr>'
+            )
+        lines.append("</table>")
+        return "\n".join(lines)
 
     def cell(row: dict) -> str:
         tokens = row.get("tokens") or (0, 0)
@@ -672,6 +701,7 @@ def stats_page(
 <tr><th>модель</th><th>провайдер</th><th>мои запросы</th><th>токены в / вы</th><th>переключений</th><th>сообщество</th><th>способности</th>{people_column}</tr>
 {body}
 </table>
+{paused_html()}
 <p><a href="/">← назад в каталог</a></p>
 </body>
 </html>"""
