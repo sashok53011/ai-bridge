@@ -724,6 +724,8 @@ class WebUi:
                 provider_id, changes, can_edit=True, snapshot=admin_space.snapshot,
             )
             notice = f"{entry['name']}: сохранено" if result["error"] is None else result["error"]
+            if result["error"] is None and result.get("note"):
+                notice += f" · {result['note']}"
             self._event(
                 "правка",
                 str(viewer.get("email") or ""),

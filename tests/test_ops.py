@@ -403,3 +403,60 @@ class TestPersonalModel:
         )
 
         assert wanted[0]["model"] == "server-model"
+
+
+class TestModelChangeClearsReference:
+    """Смена модели очищает справку: цена/контекст/способности описывали старую."""
+
+    def test_changing_the_model_clears_the_reference(self, _device) -> None:
+        server = _Server(can_edit=True, providers=[_entry()])
+        entry = _entry(model="llama3.2", pricing="$1/1M", context="128K", capabilities="vision")
+
+        result = ops.edit(
+            server.client, [entry], [_entry()], "ollama",
+            {"model": "qwen3", "pricing": "$1/1M", "context": "128K", "capabilities": "vision"},
+            can_edit=True,
+        )
+
+        assert result["code"] == 0
+        assert result["entry"]["model"] == "qwen3"
+        assert result["entry"]["pricing"] == ""
+        assert result["entry"]["context"] == ""
+        assert result["entry"]["capabilities"] == ""
+        assert "справка о модели очищена" in result["note"]
+
+    def test_keeping_the_same_model_keeps_the_reference(self, _device) -> None:
+        server = _Server(can_edit=True, providers=[_entry()])
+        entry = _entry(model="llama3.2", capabilities="vision")
+
+        result = ops.edit(
+            server.client, [entry], [_entry()], "ollama",
+            {"model": "llama3.2", "name": "Новое имя"},
+            can_edit=True,
+        )
+
+        assert result["entry"]["capabilities"] == "vision"
+        assert result["note"] == ""
+
+    def test_a_plain_field_edit_keeps_everything(self, _device) -> None:
+        server = _Server(can_edit=True, providers=[_entry()])
+        entry = _entry(model="llama3.2", pricing="$1/1M", capabilities="vision")
+
+        result = ops.edit(
+            server.client, [entry], [_entry()], "ollama",
+            {"name": "Новое имя", "pricing": "$1/1M", "capabilities": "vision"},
+            can_edit=True,
+        )
+
+        assert result["entry"]["pricing"] == "$1/1M"
+        assert result["entry"]["capabilities"] == "vision"
+
+    def test_admin_set_model_clears_too(self, _device) -> None:
+        server = _Server(can_edit=True, providers=[_entry(model="llama3.2", capabilities="vision")])
+        entry = _entry(model="llama3.2", capabilities="vision")
+
+        result = ops.set_model(server.client, [entry], [_entry()], "ollama", "qwen3", can_edit=True)
+
+        assert result["entry"]["model"] == "qwen3"
+        assert result["entry"]["capabilities"] == ""
+        assert "справка" in result["note"]

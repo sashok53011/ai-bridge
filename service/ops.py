@@ -382,7 +382,21 @@ def set_model(
         return {"code": 2, "error": error, "entry": None}
 
     new_entry = next(entry for entry in updated if entry["id"] == provider_id)
-    if not can_edit:
+    note = ""
+    if can_edit:
+        # Админская смена модели в каталоге: справка описывала старую —
+        # честнее очистить, чем врать новой.
+        updated = [
+            (
+                {**entry, "pricing": "", "context": "", "capabilities": ""}
+                if entry["id"] == provider_id
+                else entry
+            )
+            for entry in updated
+        ]
+        note = "справка о модели очищена — заполните для новой"
+        new_entry = next(entry for entry in updated if entry["id"] == provider_id)
+    else:
         # Личный выбор: помечаем осознанным (picked) — переживёт
         # обновление каталога, как ключи и переключатели.
         updated = [
@@ -413,7 +427,7 @@ def set_model(
             "error": f"на сервер не ушло ({exc}) — на устройстве модель изменена",
             "entry": new_entry,
         }
-    return {"code": 0, "error": None, "entry": new_entry}
+    return {"code": 0, "error": None, "entry": new_entry, "note": note}
 
 
 def edit(
@@ -450,6 +464,23 @@ def edit(
     if updated is None:
         return {"code": 2, "error": error, "entry": None}
 
+    # Модель сменилась — справка (цена/контекст/способности) описывала
+    # старую: честнее очистить, чем врать новой. Пустые значения при
+    # обычной правке ничего не стирают — это только явная смена модели.
+    note = ""
+    if "model" in changes and str(changes["model"]).strip() != str(
+        target.get("model") or ""
+    ).strip():
+        updated = [
+            (
+                {**entry, "pricing": "", "context": "", "capabilities": ""}
+                if entry["id"] == provider_id
+                else entry
+            )
+            for entry in updated
+        ]
+        note = "справка о модели очищена — заполните для новой"
+
     new_entry = next(entry for entry in updated if entry["id"] == provider_id)
     (snapshot or Snapshot()).save(updated)
 
@@ -473,8 +504,9 @@ def edit(
             "code": 1,
             "error": f"на сервер не ушло ({exc}) — на устройстве запись изменена",
             "entry": new_entry,
+            "note": None,
         }
-    return {"code": 0, "error": None, "entry": new_entry}
+    return {"code": 0, "error": None, "entry": new_entry, "note": note}
 
 
 def remove(

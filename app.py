@@ -424,6 +424,8 @@ def _set_model_cli(
         return result["code"]
     entry = result["entry"]
     print(f"{entry['name']}: модель -> {entry['model']}")
+    if result.get("note"):
+        print(result["note"])
     return result["code"]
 
 
@@ -446,6 +448,8 @@ def _edit_cli(
     entry = result["entry"]
     shown = ", ".join(f"{key}={entry.get(key, '')}" for key in sorted(changes))
     print(f"{entry['name']}: {shown}")
+    if result.get("note"):
+        print(result["note"])
     return result["code"]
 
 

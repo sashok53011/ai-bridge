@@ -337,7 +337,7 @@ class TestPersonalSpace:
         assert KeyStore(_root()).get("ollama") == ""  # у админа чужого ключа нет
 
     def test_a_guest_picks_their_own_model(self, harness) -> None:
-        _, base = harness([_entry()])
+        _, base = harness([_entry(capabilities="vision")])
         with _client(base) as client:
             _as_guest(client)
             client.post("/pick/ollama", data={"model": "qwen3:0.6b"})
@@ -346,6 +346,7 @@ class TestPersonalSpace:
         guest = Snapshot(user_dir(_GUEST, _root())).load()
         assert guest[0]["model"] == "qwen3:0.6b"
         assert guest[0]["picked"] is True  # отметка осознанного выбора
+        assert guest[0]["capabilities"] == "vision"  # чужая справка не тронута
         assert "qwen3:0.6b" in page.text
         assert Snapshot(_root()).load() == []  # каталог не тронут
 
