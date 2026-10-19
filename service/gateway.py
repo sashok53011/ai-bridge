@@ -78,6 +78,33 @@ def _needs_of(body: bytes) -> tuple[str, ...]:
     return request_needs(data)
 
 
+def _usage_from(payload: bytes) -> dict:
+    """Сколько токенов съел запрос (поле usage в ответе); пусто — не было."""
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    usage = data.get("usage") if isinstance(data, dict) else None
+    return usage if isinstance(usage, dict) else {}
+
+
+def _absorb_usage(state: dict, line: str) -> None:
+    """Находит usage в строке SSE-потока и запоминает последний."""
+    line = line.strip()
+    if not line.startswith("data:"):
+        return
+    payload = line[5:].strip()
+    if not payload or payload == "[DONE]":
+        return
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if isinstance(usage, dict):
+        state["usage"] = usage
+
+
 #: Понятные фразы отказа из-за неподдерживаемых возможностей (400).
 _CAPABILITY_HINTS = (
     "image_url is not supported",
@@ -239,6 +266,7 @@ class Gateway:
         api_gate: Callable[[str], bool] | None = None,
         access_checker: Callable[[str], bool] | None = None,
         event_log=None,  # service.eventlog.EventLog | None
+        usage_store=None,  # storage.usage.UsageStore | None
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -250,6 +278,7 @@ class Gateway:
         self._api_gate = api_gate
         self._access_checker = access_checker
         self._event_log = event_log
+        self._usage_store = usage_store
         # Реестр доступа: {человек: (время, годен?)} и память о поломке.
         self._access_cache: dict[str, tuple[float, bool]] = {}
         self._access_down_until = 0.0
@@ -391,6 +420,25 @@ class Gateway:
             return False
         return bool(self._event_log.bodies)
 
+    def _record_usage(
+        self, user_id: str, entry: dict, model: str, usage: dict, *, ok: bool, switched: bool
+    ) -> None:
+        """Сбросить расходы запроса в статистику; ошибка — не повод падать."""
+        if self._usage_store is None or not user_id:
+            return
+        try:
+            self._usage_store.add(
+                user_id,
+                entry["id"],
+                model,
+                prompt=int(usage.get("prompt_tokens") or 0),
+                completion=int(usage.get("completion_tokens") or 0),
+                ok=ok,
+                switched=switched,
+            )
+        except Exception:  # noqa: BLE001 — статистика не должна ломать чат
+            pass
+
     # ------------------------------------------------------------ решения
 
     def models_payload(self, user_id: str = "") -> dict:
@@ -481,8 +529,17 @@ class Gateway:
         by_id = {entry["id"]: entry for entry in entries}
         problems: list[str] = []
 
-        def served(status, content_type, entry, model, chunks, resp_body: bytes = b""):
-            """Успех: отдаём ответ и пишем событие в журнал."""
+        def served(
+            status,
+            content_type,
+            entry,
+            model,
+            chunks,
+            resp_body: bytes = b"",
+            usage: dict | None = None,
+            record: bool = True,
+        ):
+            """Успех: отдаём ответ, пишем событие и считаем расходы."""
             duration = round(time.monotonic() - started, 1)
             fields: dict = {
                 "model": model,
@@ -492,6 +549,9 @@ class Gateway:
                 "attempts": len(problems) + 1,
                 **body_fields,
             }
+            if usage:
+                fields["tokens_in"] = usage.get("prompt_tokens")
+                fields["tokens_out"] = usage.get("completion_tokens")
             if resp_body:
                 fields["resp"] = resp_body[:500].decode("utf-8", errors="replace")
             self.note(
@@ -500,6 +560,15 @@ class Gateway:
                 f"{model} через {entry['name']} · HTTP {status} · {duration}s",
                 **fields,
             )
+            if record:
+                self._record_usage(
+                    user_id,
+                    entry,
+                    model,
+                    usage or {},
+                    ok=status < 400,
+                    switched=bool(problems),
+                )
             return status, content_type, chunks, entry["name"], model
 
         for attempt in attempts:
@@ -567,22 +636,54 @@ class Gateway:
                 def chunks(body=payload):
                     yield body
 
-                return served(response.status_code, content_type, entry, attempt["model"], chunks(), payload)
+                return served(
+                    response.status_code,
+                    content_type,
+                    entry,
+                    attempt["model"],
+                    chunks(),
+                    payload,
+                    usage=_usage_from(payload),
+                )
 
             # Поток начат — ошибку в его середине переключить уже нельзя:
             # клиент начал получать данные. Это честное ограничение прокси.
-            def chunks(resp=response):
+            # Usage ищем построчно по ходу: не все шлюзы отдают его в потоке.
+            stream_state: dict = {}
+
+            def chunks(resp=response, state=stream_state):
+                buffer = ""
                 try:
-                    yield from resp.iter_bytes()
+                    for piece in resp.iter_bytes():
+                        buffer += piece.decode("utf-8", errors="replace")
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            _absorb_usage(state, line)
+                        yield piece
                 finally:
                     resp.close()
+                    # Поток отдан клиенту — фиксируем расходы по его концу.
+                    self._record_usage(
+                        user_id,
+                        entry,
+                        attempt["model"],
+                        state.get("usage") or {},
+                        ok=True,
+                        switched=bool(problems),
+                    )
 
-            return served(response.status_code, content_type, entry, attempt["model"], chunks())
+            return served(
+                response.status_code, content_type, entry, attempt["model"], chunks(),
+                record=False,
+            )
 
         message = "ни один провайдер не ответил"
         if problems:
             # Все попытки с причинами: диагностика в одну строку.
             message += ": " + "; ".join(problems[:6])
+        self._record_usage(
+            user_id, {"id": "—"}, requested_model or "—", {}, ok=False, switched=False
+        )
         self.note(
             "чат",
             user_id or "—",
@@ -814,6 +915,7 @@ def serve(
     api_gate=None,
     access_checker=None,
     event_log=None,
+    usage_store=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
@@ -822,13 +924,15 @@ def serve(
     ``user_tokens`` + ``context_for_user`` — персональные токены людей,
     ``api_gate`` — их тумблер «доступ приложений», ``access_checker`` —
     онлайн-проверка реестра (зарегистрирован/заблокирован),
-    ``event_log`` — журнал событий для страницы «Журнал».
+    ``event_log`` — журнал событий для страницы «Журнал»,
+    ``usage_store`` — расходы моделей для страницы «Статистика».
     Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
     gateway = Gateway(
         entries_provider, keys, timeout=timeout, token=token,
         user_tokens=user_tokens, context_for_user=context_for_user,
         api_gate=api_gate, access_checker=access_checker, event_log=event_log,
+        usage_store=usage_store,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

@@ -840,3 +840,180 @@ class TestAccessOverHttp:
 
         assert response.status_code == 403
         assert "заблокирован" in response.text
+
+
+class TestUsageRecording:
+    """Расходы: токены и запросы падают в статистику из ответов провайдеров."""
+
+    def _gateway(self, tmp_path, entries, handlers):
+        """Шлюз с личным токеном u1 и хранилищем расходов."""
+        from providers.client import Provider
+        from storage.usertokens import UserTokens
+        from storage.usage import UsageStore
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            inner = handlers[base]
+            return Provider(url, transport=httpx.MockTransport(inner), **kwargs)
+
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        usage = UsageStore(tmp_path)
+        gateway = Gateway(
+            lambda: entries,
+            KeyStore(tmp_path),
+            provider_factory=factory,
+            user_tokens=tokens,
+            usage_store=usage,
+        )
+        return gateway, usage, token
+
+    @staticmethod
+    def _chat(gateway, token, model="llama3.2"):
+        server = _Server(("127.0.0.1", 0), _Handler)
+        server.gateway = gateway
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            base = f"http://127.0.0.1:{server.server_address[1]}"
+            with httpx.Client(base_url=base) as client:
+                return client.post(
+                    "/v1/chat/completions",
+                    content=json.dumps({"model": model, "messages": []}),
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_tokens_of_a_plain_answer_are_recorded(self, tmp_path) -> None:
+        body = json.dumps(
+            {"choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 40}}
+        ).encode("utf-8")
+
+        def ok(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+        gateway, usage, token = self._gateway(
+            tmp_path, [_entry()], {"http://ollama.test": ok}
+        )
+        response = self._chat(gateway, token)
+
+        assert response.status_code == 200
+        cell = usage.for_user("u1")["ollama/llama3.2"]
+        assert cell["requests"] == 1
+        assert cell["prompt"] == 120
+        assert cell["completion"] == 40
+
+    def test_a_fallback_counts_as_switched(self, tmp_path) -> None:
+        def broken(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, content=b'{"error": "busy"}')
+
+        body = json.dumps(
+            {"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+        ).encode("utf-8")
+
+        def ok(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=body, headers={"content-type": "application/json"})
+
+        entries = [
+            _entry(fallbackPriority=1),
+            _entry(id="b", name="B", url="https://b.test/v1", fallbackPriority=2),
+        ]
+        gateway, usage, token = self._gateway(
+            tmp_path, entries, {"http://ollama.test": broken, "https://b.test": ok}
+        )
+        self._chat(gateway, token)
+
+        cell = usage.for_user("u1")["b/llama3.2"]
+        assert cell["requests"] == 1
+        assert cell["switches"] == 1
+        assert cell["prompt"] == 10
+        assert "ollama/llama3.2" not in usage.for_user("u1")
+
+    def test_a_total_failure_is_recorded_as_a_fail(self, tmp_path) -> None:
+        def broken(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(503, content=b'{"error": "busy"}')
+
+        gateway, usage, token = self._gateway(
+            tmp_path, [_entry()], {"http://ollama.test": broken}
+        )
+        response = self._chat(gateway, token)
+
+        assert response.status_code == 502
+        cell = usage.for_user("u1")["—/llama3.2"]
+        assert cell["requests"] == 1
+        assert cell["fails"] == 1
+
+    def test_usage_found_inside_a_stream_is_recorded(self, tmp_path) -> None:
+        sse = (
+            'data: {"choices": [{"delta": {"content": "п"}}]}\n\n'
+            'data: {"choices": [], "usage": {"prompt_tokens": 7, "completion_tokens": 3}}\n\n'
+            "data: [DONE]\n\n"
+        ).encode("utf-8")
+
+        def stream(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=sse, headers={"content-type": "text/event-stream"}
+            )
+
+        gateway, usage, token = self._gateway(
+            tmp_path, [_entry()], {"http://ollama.test": stream}
+        )
+        response = self._chat(gateway, token)
+
+        assert response.status_code == 200
+        cell = usage.for_user("u1")["ollama/llama3.2"]
+        assert cell["requests"] == 1
+        assert cell["prompt"] == 7
+        assert cell["completion"] == 3
+
+    def test_no_usage_field_means_requests_only(self, tmp_path) -> None:
+        def ok(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=b'{"choices": []}', headers={"content-type": "application/json"}
+            )
+
+        gateway, usage, token = self._gateway(
+            tmp_path, [_entry()], {"http://ollama.test": ok}
+        )
+        self._chat(gateway, token)
+
+        cell = usage.for_user("u1")["ollama/llama3.2"]
+        assert cell["requests"] == 1
+        assert cell["prompt"] == 0  # провайдер не сообщил — не выдумываем
+
+
+class TestUsageParsing:
+    """Разбор usage: из тела ответа и из строк SSE-потока."""
+
+    def test_usage_is_pulled_out_of_a_json_body(self) -> None:
+        from service.gateway import _usage_from
+
+        body = b'{"choices": [], "usage": {"prompt_tokens": 5}}'
+        assert _usage_from(body) == {"prompt_tokens": 5}
+
+    def test_a_body_without_usage_is_empty(self) -> None:
+        from service.gateway import _usage_from
+
+        assert _usage_from(b'{"choices": []}') == {}
+        assert _usage_from(b"\u043d\u0435 json") == {}
+
+    def test_sse_lines_fill_the_state_until_done(self) -> None:
+        from service.gateway import _absorb_usage
+
+        state: dict = {}
+        _absorb_usage(state, 'data: {"choices": [1]}')
+        assert state == {}
+        _absorb_usage(state, 'data: {"usage": {"prompt_tokens": 9}}')
+        _absorb_usage(state, "data: [DONE]")
+        assert state["usage"] == {"prompt_tokens": 9}
+
+    def test_noise_and_lies_are_ignored(self) -> None:
+        from service.gateway import _absorb_usage
+
+        state: dict = {}
+        _absorb_usage(state, ": комментарий")
+        _absorb_usage(state, "data: [сломанный json")
+        _absorb_usage(state, 'data: {"usage": "не объект"}')
+        assert state == {}

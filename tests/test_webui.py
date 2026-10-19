@@ -610,3 +610,91 @@ class TestAddFlow:
             )
 
         assert "введите API-ключ" in response.text
+
+
+class TestStats:
+    """Страница «Статистика»: расходы по моделям, доступна всем вошедшим."""
+
+    @staticmethod
+    def _usage() -> "UsageStore":
+        from storage.usage import UsageStore
+
+        store = UsageStore()
+        store.add(_GUEST, "ollama", "llama3.2", prompt=300, completion=70)
+        store.add(_GUEST, "ollama", "llama3.2", switched=True)
+        return store
+
+    def test_an_anonymous_visitor_is_sent_to_login(self, harness) -> None:
+        _, base = harness([_entry()], usage_store=self._usage())
+
+        with _client(base) as client:
+            response = client.get("/stats")
+
+        assert "Вход" in response.text  # статистика — не для улицы
+
+    def test_a_person_sees_their_own_numbers(self, harness) -> None:
+        _, base = harness([_entry(capabilities="vision")], usage_store=self._usage())
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/stats")
+
+        assert "llama3.2" in page.text
+        assert "<td>2</td>" in page.text  # запросов: два add()
+        assert "300 / 70" in page.text  # токены в / вы
+        assert "vision" in page.text  # способности из каталога
+
+    def test_other_peoples_spending_is_not_shown(self, harness) -> None:
+        from storage.usage import UsageStore
+
+        store = self._usage()
+        store.add("кто-то", "ollama", "llama3.2", prompt=99999)
+        _, base = harness([_entry()], usage_store=store)
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/stats")
+
+        assert "99999" not in page.text  # чужие расходы — не моё дело
+
+    def test_the_admin_sees_totals_for_everyone(self, harness) -> None:
+        from storage.usage import UsageStore
+
+        store = self._usage()
+        store.add("кто-то", "ollama", "llama3.2", prompt=50)
+        _, base = harness([_entry()], usage_store=store)
+
+        with _client(base) as client:
+            _as_admin(client)
+            page = client.get("/stats")
+
+        assert "все люди" in page.text
+        assert "350/70" in page.text  # сумма моих и чужих токенов
+
+    def test_a_guest_has_no_totals_column(self, harness) -> None:
+        _, base = harness([_entry()], usage_store=self._usage())
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/stats")
+
+        assert "все люди" not in page.text
+
+    def test_the_link_lives_in_the_nav_for_everyone(self, harness) -> None:
+        _, base = harness([_entry()])
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/")
+
+        assert 'href="/stats"' in page.text
+
+    def test_without_a_store_the_page_still_renders(self, harness) -> None:
+        _, base = harness([_entry()])
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/stats")
+
+        assert page.status_code == 200
+        assert "llama3.2" in page.text

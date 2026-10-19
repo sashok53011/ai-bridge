@@ -60,7 +60,10 @@ def _copy_line(value: str, node_id: str) -> str:
 
 def _nav(*, can_edit: bool) -> str:
     """Верхняя строка: личные разделы и выход."""
-    links = ['<a href="/tokens">приложения и токены</a>']
+    links = [
+        '<a href="/stats">статистика</a>',
+        '<a href="/tokens">приложения и токены</a>',
+    ]
     if can_edit:
         links.append('<a href="/logs">журнал</a>')
         links.append('<a href="/users">пользователи</a>')
@@ -602,6 +605,74 @@ def tokens_page(
 Отозванный токен перестаёт работать мгновенно.</p>
 <p><a href="/">← назад в каталог</a></p>
 {copy_script}
+</body>
+</html>"""
+
+
+def stats_page(
+    rows: list[dict], *, can_edit: bool = False, notice: str = ""
+) -> str:
+    """Статистика по моделям: мои расходы, проверки сообщества, способности.
+
+    Каждому видны его собственные расходы; админу сверху — суммы «все люди».
+    Строки приходят собранными (webui), здесь только разметка.
+    """
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    people_column = "<th>все люди</th>" if can_edit else ""
+
+    def cell(row: dict) -> str:
+        tokens = row.get("tokens") or (0, 0)
+        tokens_text = f"{tokens[0]} / {tokens[1]}" if (tokens[0] or tokens[1]) else "—"
+        all_text = ""
+        if can_edit:
+            all_row = row.get("all") or {}
+            all_text = (
+                f"<td>{int(all_row.get('requests', 0))} · "
+                f"{int(all_row.get('prompt', 0))}/{int(all_row.get('completion', 0))}</td>"
+            )
+        caps = escape(str(row.get("caps") or "—"))
+        return (
+            f'<tr><td class="model">{escape(str(row.get("model") or "—"))}</td>'
+            f'<td>{escape(str(row.get("provider") or ""))}</td>'
+            f'<td>{int(row.get("requests", 0))}{" (" + str(row.get("fails", 0)) + " ✗)" if row.get("fails") else ""}</td>'
+            f'<td class="num">{tokens_text}</td>'
+            f'<td>{int(row.get("switches", 0))}</td>'
+            f'<td class="num">{escape(str(row.get("community") or "—"))}</td>'
+            f'<td class="caps">{caps}</td>'
+            f"{all_text}</tr>"
+        )
+
+    body = "\n".join(cell(row) for row in rows) or (
+        f'<tr><td colspan="{8 if can_edit else 7}" class="empty">пока нет ни моделей, ни запросов</td></tr>'
+    )
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>Статистика — AI-приставка</title>
+<style>
+{_style()}
+  body {{ max-width: 64rem; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8884; }}
+  th {{ font-size: .85rem; opacity: .7; }}
+  td.num {{ font-family: monospace; white-space: nowrap; }}
+  td.model {{ white-space: nowrap; }}
+  td.caps {{ opacity: .7; }}
+</style>
+</head>
+<h1>Статистика</h1>
+{_nav(can_edit=can_edit)}
+{notice_html}
+<p class="role">Твои расходы по моделей; «сообщество» — сколько людей смогли
+пользоваться моделью. Обновляется само раз в 30 секунд.</p>
+<table>
+<tr><th>модель</th><th>провайдер</th><th>мои запросы</th><th>токены в / вы</th><th>переключений</th><th>сообщество</th><th>способности</th>{people_column}</tr>
+{body}
+</table>
+<p><a href="/">← назад в каталог</a></p>
 </body>
 </html>"""
 

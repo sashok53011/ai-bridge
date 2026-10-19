@@ -35,11 +35,13 @@ from core.page import (
     logs_page,
     pick_model_page,
     signup_page,
+    stats_page,
     test_page,
     token_created_page,
     tokens_page,
     users_page,
 )
+from core.stats import format_stats, for_line
 from providers.client import NeedsKeyError, PocketBase, Provider, ServerError
 from service import ops
 from service.gateway import test_chat
@@ -87,6 +89,7 @@ class WebUi:
         authenticator: Callable[[str, str], tuple[str, str, bool]] | None = None,
         signup_hook: Callable[[str, str], None] | None = None,
         event_log=None,  # service.eventlog.EventLog | None
+        usage_store=None,  # storage.usage.UsageStore | None
     ) -> None:
         self._providers_source = providers_source
         self._server = server
@@ -101,6 +104,7 @@ class WebUi:
         self._authenticator = authenticator or self._authenticate_on_server
         self._signup_hook = signup_hook or self._signup_on_server
         self._log = event_log
+        self._usage = usage_store
 
     def _event(self, kind: str, user: str, text: str, **fields) -> None:
         """Одно событие в журнал; без журнала — молча пропускаем."""
@@ -323,6 +327,46 @@ class WebUi:
 
         if clean == "/add":
             self._send_html(handler, 200, add_page(is_admin=is_admin))
+            return
+
+        if clean == "/stats":
+            # Статистика доступна всем вошедшим: человек видит свои
+            # расходы, админ сверху — суммы по всем людям.
+            usage = self._usage.for_user(str(viewer["id"])) if self._usage else {}
+            totals = self._usage.totals() if (self._usage and is_admin) else {}
+            try:
+                community = self._server.fetch_stats()
+            except ServerError:
+                community = {}  # счётчик — украшение; без него страница живёт
+            rows = []
+            for entry in self._entries_for(viewer):
+                model = str(entry.get("model") or "")
+                key = f"{entry['id']}/{model}"
+                cell = usage.get(key) or {}
+                counter = format_stats(for_line(community, entry["id"], model))
+                all_row = totals.get(key)
+                rows.append(
+                    {
+                        "model": model or "—",
+                        "provider": entry["name"],
+                        "requests": int(cell.get("requests", 0)),
+                        "fails": int(cell.get("fails", 0)),
+                        "switches": int(cell.get("switches", 0)),
+                        "tokens": (
+                            int(cell.get("prompt", 0)),
+                            int(cell.get("completion", 0)),
+                        ),
+                        "community": counter or "—",
+                        "caps": str(entry.get("capabilities") or "—"),
+                        "all": all_row,
+                    }
+                )
+            rows.sort(key=lambda row: (-row["requests"], row["model"]))
+            self._send_html(
+                handler,
+                200,
+                stats_page(rows, can_edit=is_admin, notice=notice),
+            )
             return
 
         if clean == "/users":

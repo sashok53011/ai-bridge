@@ -290,10 +290,12 @@ def _serve(
     from service.webui import WebUi
     from storage.sessions import SessionStore
     from storage.usertokens import UserTokens
+    from storage.usage import UsageStore
     from storage.users import UserStore
 
     root = default_dir()
     event_log = EventLog(root)
+    usage_store = UsageStore(root)
     admin_id = server.user_id
     spaces = Spaces(root, admin_id=admin_id)
     sessions = SessionStore(root)
@@ -358,6 +360,7 @@ def _serve(
         device_token=token,
         bound_host=host,
         event_log=event_log,
+        usage_store=usage_store,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
@@ -383,6 +386,7 @@ def _serve(
         api_gate=users.api_enabled,
         access_checker=access_checker,
         event_log=event_log,
+        usage_store=usage_store,
     )
 
 
