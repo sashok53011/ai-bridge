@@ -185,8 +185,9 @@ class TestChatEndpoint:
         # Оба провайдера получили запрос: сначала отказавший, потом успех.
         assert [request.url.host for request in h.seen] == ["ollama.test", "b.test"]
 
-    def test_a_named_model_never_leaves_to_a_stranger(self, harness) -> None:
-        """Провайдер с другой моделью чужой запрос не подхватывает."""
+    def test_a_failed_model_falls_back_to_the_next_provider(self, harness) -> None:
+        """Модель отказалась у своего провайдера — приставка продолжает
+        следующей включённой: пустой ответ хуже чужого."""
         def broken(request: httpx.Request) -> httpx.Response:
             return httpx.Response(503, content=b'{"error": "busy"}')
 
@@ -201,10 +202,53 @@ class TestChatEndpoint:
         with httpx.Client(base_url=h.base) as client:
             response = client.post("/v1/chat/completions", content=payload)
 
-        # Названную модель обслуживает только ollama — молчаливого подмена
-        # была бы изменой просьбы клиента.
-        assert response.status_code == 502
-        assert [request.url.host for request in h.seen] == ["ollama.test"]
+        assert response.status_code == 200
+        # Оба провайдера получили запрос: отказавший, потом подхвативший.
+        assert [request.url.host for request in h.seen] == ["ollama.test", "b.test"]
+        # Кто в итоге ответил — видно в заголовках, подмена не тайна.
+        assert response.headers["x-ai-bridge-provider"] == "B"
+        assert response.headers["x-ai-bridge-model"] == "m-b"
+
+    def test_a_402_balance_error_falls_back_like_any_outage(self, harness) -> None:
+        """Пустой баланс (402) у единственного владельца модели — не тупик:
+        следующий провайдер отвечает своей моделью."""
+        def broke(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                402, content='{"error": {"message": "купите кредиты"}}'.encode("utf-8")
+            )
+
+        h = harness(
+            [
+                _entry(fallbackPriority=1),
+                _entry(id="local", name="Local", url="http://local.test/v1", model="qwen3", fallbackPriority=9),
+            ],
+            {"http://ollama.test": broke, "http://local.test": self._ok()},
+        )
+        payload = json.dumps({"model": "llama3.2"})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=payload)
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-model"] == "qwen3"
+
+    def test_a_404_model_error_switches_too(self, harness) -> None:
+        """Провайдер не знает модель (404) — смена безвредна."""
+        def unknown(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, content=b'{"error": {"message": "model not found"}}')
+
+        h = harness(
+            [
+                _entry(fallbackPriority=1),
+                _entry(id="b", name="B", url="https://b.test/v1", model="llama3.2", fallbackPriority=2),
+            ],
+            {"http://ollama.test": unknown, "https://b.test": self._ok()},
+        )
+        payload = json.dumps({"model": "llama3.2"})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=payload)
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-provider"] == "B"
 
     def test_a_bad_request_is_not_retried(self, harness) -> None:
         def rejected(request: httpx.Request) -> httpx.Response:
@@ -222,8 +266,21 @@ class TestChatEndpoint:
         assert response.status_code == 422
         assert [request.url.host for request in h.seen] == ["ollama.test"]
 
-    def test_an_unavailable_model_names_what_is_available(self, harness) -> None:
-        h = harness([_entry()], {})
+    def test_an_unknown_model_falls_back_instead_of_refusing(self, harness) -> None:
+        """Неизвестная модель — не отказ, а последний шанс: приставка
+        пробует включённые по приоритету."""
+        h = harness([_entry()], {"http://ollama.test": self._ok()})
+        payload = json.dumps({"model": "gpt-9-turbo"})
+        with httpx.Client(base_url=h.base) as client:
+            response = client.post("/v1/chat/completions", content=payload)
+
+        assert response.status_code == 200
+        assert response.headers["x-ai-bridge-model"] == "llama3.2"
+
+    def test_nothing_configured_names_what_is_available(self, harness) -> None:
+        """Провайдер включён, но модели не настроены — честный отказ
+        со списком доступного."""
+        h = harness([_entry(model="")], {})
         payload = json.dumps({"model": "gpt-9-turbo"})
         with httpx.Client(base_url=h.base) as client:
             response = client.post("/v1/chat/completions", content=payload)
@@ -231,7 +288,6 @@ class TestChatEndpoint:
         assert response.status_code == 502
         error = response.json()["error"]
         assert error["code"] == "model_not_available"
-        assert "llama3.2" in error["message"]
 
     def test_an_empty_body_is_a_client_error(self, harness) -> None:
         h = harness([_entry()], {})
@@ -997,7 +1053,7 @@ class TestUsageParsing:
         from service.gateway import _usage_from
 
         assert _usage_from(b'{"choices": []}') == {}
-        assert _usage_from(b"\u043d\u0435 json") == {}
+        assert _usage_from("не json".encode("utf-8")) == {}
 
     def test_sse_lines_fill_the_state_until_done(self) -> None:
         from service.gateway import _absorb_usage

@@ -62,8 +62,10 @@ class TestRoute:
             _entry(),
             _entry(id="openai", name="OpenAI", model="gpt-4o-mini", fallbackPriority=1),
         ]
+        # Свой провайдер первым; его отказ — последний шанс дальше.
         assert route(entries, "gpt-4o-mini") == [
             {"providerId": "openai", "model": "gpt-4o-mini"},
+            {"providerId": "ollama", "model": "llama3.2"},
         ]
 
     def test_an_unnamed_model_goes_to_the_best_provider(self) -> None:
@@ -91,12 +93,20 @@ class TestRoute:
         ]
 
     def test_a_prefix_can_pin_a_provider_for_any_model(self) -> None:
-        """«ollama/qwen3» — к ollama с моделью qwen3, хоть она и не в каталоге."""
+        """«ollama/qwen3» — к ollama с моделью qwen3, хоть она и не в каталоге.
+        Префикс решает порядок; его отказ — последний шанс дальше."""
         entries = [_entry(), _entry(id="openai", name="OpenAI", model="gpt-4o-mini", fallbackPriority=1)]
-        assert route(entries, "ollama/qwen3") == [{"providerId": "ollama", "model": "qwen3"}]
+        assert route(entries, "ollama/qwen3") == [
+            {"providerId": "ollama", "model": "qwen3"},
+            {"providerId": "openai", "model": "gpt-4o-mini"},
+        ]
 
-    def test_an_unknown_model_has_no_route(self) -> None:
-        assert route([_entry()], "gpt-9-turbo") == []
+    def test_an_unknown_model_falls_back_to_enabled_models(self) -> None:
+        """Модели нет ни у кого — пустой ответ хуже чужого: пробуем
+        включённые по приоритету."""
+        assert route([_entry()], "gpt-9-turbo") == [
+            {"providerId": "ollama", "model": "llama3.2"},
+        ]
 
     def test_a_disabled_provider_gets_nothing(self) -> None:
         assert route([_entry(enabled=False)], "llama3.2") == []
@@ -105,12 +115,13 @@ class TestRoute:
 class TestFallback:
     def test_overload_auth_faults_quota_and_server_errors_switch_the_provider(self) -> None:
         # 429 — лимит или исчерпанная квота (OpenAI так отвечает за оба),
-        # 402 — пустой баланс у провайдеров вроде OpenRouter.
-        for status in (401, 402, 403, 429, 500, 502, 503, 504):
+        # 402 — пустой баланс у провайдеров вроде OpenRouter,
+        # 404 — модель неизвестна этому провайдеру, смена безвредна.
+        for status in (401, 402, 403, 404, 429, 500, 502, 503, 504):
             assert should_fallback(status) is True
 
     def test_a_bad_request_stays_where_it_is(self) -> None:
-        for status in (400, 404, 413, 422):
+        for status in (400, 413, 422):
             assert should_fallback(status) is False
 
 
@@ -200,13 +211,22 @@ class TestRouteKeepsRequirements:
         assert [item["providerId"] for item in attempts] == ["both"]
 
     def test_without_requirements_behaviour_is_unchanged(self) -> None:
-        # Названная модель — только точные совпадения, как и раньше.
-        assert [i["providerId"] for i in route(self._mixed(), "m-vis")] == ["vis"]
+        # Названная модель — точные совпадения первыми, дальше последний
+        # шанс (в порядке приоритета).
+        assert [i["providerId"] for i in route(self._mixed(), "m-vis")] == ["vis", "plain", "both"]
         # Неназванная — все с настроенными моделями.
         assert [i["providerId"] for i in route(self._mixed(), "")] == ["plain", "vis", "both"]
 
     def test_an_explicit_provider_prefix_is_respected(self) -> None:
-        # Явный выбор провайдера («провайдер/своя-модель») — одиночная попытка,
-        # даже если запрос с картинками: человек знает, что делает.
+        # Явный выбор провайдера («провайдер/своя-модель») — идёт первым,
+        # но его отказ продолжает цепочкой; запрос с картинками получает
+        # только модели со способностями.
         attempts = route(self._mixed(), "plain/super-new", needs=("vision",))
-        assert attempts == [{"providerId": "plain", "model": "super-new"}]
+        assert [i["providerId"] for i in attempts] == ["plain", "vis", "both"]
+        assert attempts[0] == {"providerId": "plain", "model": "super-new"}
+
+    def test_a_last_resort_never_feeds_pictures_to_plain_models(self) -> None:
+        """Последний шанс с картинками минует модели без vision —
+        даже если это единственные оставшиеся."""
+        attempts = route(self._mixed(), "m-plain", needs=("vision",))
+        assert [i["providerId"] for i in attempts] == ["plain", "vis", "both"]
