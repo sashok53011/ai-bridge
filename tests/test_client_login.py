@@ -183,6 +183,78 @@ class TestLoginCollections:
             server.login("a@example.com", "secret")
 
 
+class TestTokenExpiry:
+    """Токен PocketBase живёт не вечно — приставка входит заново сама.
+
+    Регрессия: служба работала неделями, токен протухал, и журнал
+    заполнялся «HTTP 401: Missing or invalid authentication», реестр
+    доступа вставал на паузу — все токены получали 403 до рестарта.
+    """
+
+    @staticmethod
+    def _expiring(*, relgin_fails: bool = False):
+        """Сервер: первый вход выдаёт токен «old», он протухает, повторный — «new»."""
+        state = {"tokens": 0, "logins": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/auth-with-password"):
+                state["logins"] += 1
+                if relgin_fails and state["logins"] > 1:
+                    return httpx.Response(400, json={"message": "Failed to authenticate."})
+                token = "old" if state["logins"] == 1 else "new"
+                return httpx.Response(
+                    200,
+                    json={"token": token, "record": {"id": "u1", "email": "a@b.c"}},
+                )
+            if request.headers.get("Authorization") != "new":
+                return httpx.Response(401, json={"message": "Missing or invalid authentication."})
+            state["tokens"] += 1
+            return httpx.Response(200, json={"id": "u1", "email": "a@b.c", "blocked": False})
+
+        return _server(handler), state
+
+    def test_an_expired_token_triggers_relogin_and_a_retry(self) -> None:
+        client, state = self._expiring()
+        client.login("a@b.c", "secret")
+        state["logins"] = 1
+
+        assert client.access_state("u1") == "ok"
+
+        # Запрос прошёл: старый токен отвергли, вход повторили, повтор удался.
+        assert state["logins"] == 2
+        assert state["tokens"] == 1
+        assert client._token == "new"
+
+    def test_only_one_relogin_for_many_threads(self) -> None:
+        """Потоки, долбившие реестр одновременно, входят один раз."""
+        client, state = self._expiring()
+        client.login("a@b.c", "secret")
+        state["logins"] = 1
+
+        assert client.access_state("u1") == "ok"
+        assert client.access_state("u1") == "ok"  # второй — уже по свежему токену
+
+        assert state["logins"] == 2
+
+    def test_a_failed_relogin_is_an_honest_error(self) -> None:
+        """Пароль сменили — честный ServerError, а не тихая пустота."""
+        client, _ = self._expiring(relgin_fails=True)
+        client.login("a@b.c", "secret")
+
+        with pytest.raises(ServerError, match="Failed to authenticate"):
+            client.access_state("u1")
+
+    def test_no_saved_credentials_means_a_clear_error(self) -> None:
+        """Токен есть, а учётных данных для повторного входа нет."""
+        client, state = self._expiring()
+        client.login("a@b.c", "secret")
+        client._email = client._password = ""  # токен протух, а перелогиниться нечем
+
+        with pytest.raises(ServerError, match="перезапустите приставку"):
+            client.access_state("u1")
+        assert state["logins"] == 1  # новых попыток входа не было
+
+
 class TestFailureText:
     def test_the_server_message_goes_into_the_error(self) -> None:
         assert (

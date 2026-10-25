@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import httpx
 
 from core.catalogue import normalize
+from providers import copilot
 
 
 class ServerError(RuntimeError):
@@ -46,6 +48,13 @@ class PocketBase:
         self.user_name = ""
         # Запоминается с каталога: суперпользо­вателю флаги не отправляем.
         self._can_edit = False
+        # Токен PocketBase живёт не вечно: со временем сервер отвечает
+        # HTTP 401 «Missing or invalid authentication». Логин и пароль
+        # остаются в памяти процесса (сюда они и пришли из окружения) —
+        # чтобы перевести сеанс, не нужен рестарт службы.
+        self._email = ""
+        self._password = ""
+        self._login_lock = threading.Lock()
 
     # ------------------------------------------------------------- сеанс
 
@@ -56,7 +65,13 @@ class PocketBase:
         суперпользо­ватель PocketBase (>= 0.23) — в ``_superusers``,
         и попытка входа админа через ``users`` даёт HTTP 400. Если не
         вышло ни там, ни там — в ошибке остаются обе причины.
+
+        Учётные данные запоминаются для самовосстановления: токен
+        PocketBase протухает (сервер отвечает 401), и тогда запрос
+        сам входит заново — без этого приставка умирает до рестарта.
         """
+        self._email = email
+        self._password = password
         failures = []
         for collection in ("users", "_superusers"):
             try:
@@ -271,6 +286,23 @@ class PocketBase:
 
     # ------------------------------------------------------------ внутренности
 
+    def _relogin(self, *, stale: str) -> None:
+        """Войти заново после протухшего токена.
+
+        Под замком: потоки, долбившие реестр одновременно, не ломятся
+        с паролем все разом — входит первый, остальные видят свежий
+        токен и просто продолжают. Если перелогин невозможен (нет
+        сохранённых учётных данных) — честный ServerError.
+        """
+        with self._login_lock:
+            if self._token and self._token != stale:
+                return  # сосед уже перевёл сеанс
+            if not self._email or not self._password:
+                raise ServerError(
+                    "токен каталога истёк, а логин не запомнен — перезапустите приставку"
+                )
+            self.login(self._email, self._password)
+
     def _request(
         self,
         method: str,
@@ -290,6 +322,18 @@ class PocketBase:
             response = self._http.request(method, path, json=json, headers=headers)
         except httpx.HTTPError as exc:
             raise ServerError(f"сервер недоступен: {exc}") from exc
+
+        if response.status_code == 401 and auth:
+            # Токен PocketBase протух — без перевода сеанса приставка
+            # умирала бы до рестарта (в журнале сплошняком «HTTP 401:
+            # Missing or invalid authentication»). Вход заново и один
+            # повтор; токен устаревший — уже не пригодится.
+            self._relogin(stale=headers["Authorization"])
+            headers["Authorization"] = self._token
+            try:
+                response = self._http.request(method, path, json=json, headers=headers)
+            except httpx.HTTPError as exc:
+                raise ServerError(f"сервер недоступен: {exc}") from exc
 
         if response.status_code >= 400:
             raise ServerError(_failure(method, path, response.status_code, _json_or_none(response)))
@@ -330,6 +374,20 @@ class Provider:
         self.root = _root_url(url)
         self._http = httpx.Client(timeout=timeout, transport=transport)
 
+    def _headers_for(self, api_key: str) -> dict[str, str]:
+        """Заголовки авторизации: у Copilot токен обменивается на токен API.
+
+        Copilot принимает не сырой GitHub-токен, а короткоживущий токен
+        обмена (иначе 401); обмен кэшируется в providers/copilot. Остальным
+        провайдерам — обычный Bearer, как и раньше.
+        """
+        if api_key and copilot.is_copilot_url(self.openai_base):
+            try:
+                return copilot.auth_headers(api_key, client=self._http)
+            except copilot.CopilotError as exc:
+                raise ServerError(str(exc)) from exc
+        return _auth_headers(api_key)
+
     def fetch_models(self, api_key: str = "") -> list[dict[str, Any]]:
         """Список моделей; для локальных серверов ключ не нужен.
 
@@ -341,7 +399,7 @@ class Provider:
         try:
             response = self._http.get(
                 f"{self.openai_base}/models",
-                headers=_auth_headers(api_key),
+                headers=self._headers_for(api_key),
             )
         except httpx.HTTPError as exc:
             raise ServerError(f"провайдер недоступен: {exc}") from exc
@@ -359,7 +417,37 @@ class Provider:
         except ValueError as exc:
             raise ServerError("провайдер ответил не-JSON на список моделей") from exc
 
+        # У Copilot каталог /models шире тарифа: фильтр по utility-семействам
+        # (sku уже известен — _headers_for выше обменял токен).
+        if copilot.is_copilot_url(self.openai_base):
+            return [{"name": name} for name in copilot.usable_models(payload)]
         return [{"name": name} for name in extract_models(payload)]
+
+    def local_status(self) -> str:
+        """Что происходит сейчас в локальном сервере — строка для каталога.
+
+        Ollama: ``GET /api/ps`` — модели в памяти и доля VRAM (это
+        мгновенный запрос по оперативке, ничего не грузится). LM Studio
+        и прочие: пробуем ``/api/v0/loaded`` и ``/api/v0/health`` с
+        полем loaded_model. Таймаут короткий: мёртвый или висящий
+        сервер не должен держать страницу. Ничего непонятного — пустая
+        строка: лучше промолчать, чем соврать.
+        """
+        for path in ("/api/ps", "/api/v0/loaded", "/api/v0/health"):
+            try:
+                response = self._http.get(f"{self.root}{path}")
+            except httpx.HTTPError:
+                return ""  # сервер не отвечает — дальше незачем
+            if response.status_code != 200:
+                continue
+            try:
+                payload: Any = response.json()
+            except ValueError:
+                continue
+            line = _format_local_status(payload, ollama=(path == "/api/ps"))
+            if line:
+                return line
+        return ""
 
     def pull_model(self, model: str, *, api_key: str = "", timeout: float = 180.0):
         """Генератор событий прогресса: POST /api/pull (Ollama).
@@ -407,7 +495,7 @@ class Provider:
             "POST",
             f"{self.openai_base}/chat/completions",
             content=body,
-            headers={"Content-Type": "application/json", **_auth_headers(api_key)},
+            headers={"Content-Type": "application/json", **self._headers_for(api_key)},
         )
         try:
             return self._http.send(request, stream=stream)
@@ -471,6 +559,41 @@ def _sync_shape(entry: dict) -> dict:
 def _auth_headers(api_key: str) -> dict[str, str]:
     # Без ключа заголовок не шлём вовсе: пустой Bearer путает провайдеров.
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def _format_local_status(payload: object, *, ollama: bool) -> str:
+    """Строка состояния локального сервера из его JSON; непонятное — "".
+
+    Ollama (``/api/ps``): ``{"models": [{"name", "size", "size_vram"}]}``
+    — имена в памяти и доля VRAM (GPU%). Пустой список — «в памяти
+    пусто». LM Studio и прочие: ищем имя загруженной модели в полях
+    loaded_model/model (в корне и в data). Ни того ни другого — молчим:
+    лучше пустая строка, чем выдумка.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    if ollama and isinstance(payload.get("models"), list):
+        models = [item for item in payload["models"] if isinstance(item, dict)]
+        if not models:
+            return "в памяти пусто"
+        parts = []
+        for item in models:
+            name = str(item.get("name") or item.get("model") or "?")
+            size = int(item.get("size") or 0)
+            vram = int(item.get("size_vram") or 0)
+            gpu = f" · GPU {round(vram * 100 / size)}%" if size and vram else ""
+            parts.append(f"{name}{gpu}")
+        return "загружено: " + ", ".join(parts)
+    for key in ("loaded_model", "model"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return f"загружено: {value}"
+        data = payload.get("data")
+        if isinstance(data, dict):
+            value = data.get(key)
+            if isinstance(value, str) and value:
+                return f"загружено: {value}"
+    return ""
 
 
 def _root_url(url: str) -> str:
