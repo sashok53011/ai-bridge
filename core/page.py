@@ -11,27 +11,116 @@
 
 from __future__ import annotations
 
+import json
 from html import escape
 
 from core.catalogue import can_remove
-from core.stats import format_stats, for_line
+from core.markdown import render as render_markdown
 
 
 def _style() -> str:
-    """Общий вид страниц: одна тёмная/светлая тема на всех формах."""
-    return """  :root { color-scheme: light dark; }
-  body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 70rem; padding: 0 1rem; }
-  h1 { font-size: 1.4rem; }
-  input { padding: .35rem; }
-  button { padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; background: transparent; cursor: pointer; }
-  button.ghost { opacity: .8; }
-  button.danger { color: #c0392b; }
+    """Общий вид страниц: светлая изумрудная тема, тёмная — по системной.
+
+    Всё на CSS-переменных: одна правка красит все страницы. Кнопки —
+    пилюли, карточки — с лёгкой тенью; навигация одна на все страницы,
+    «выйти» приглушён и подальше от рабочих ссылок.
+    """
+    return """  :root { color-scheme: light dark;
+    --bg: #f4f8f6; --card: #ffffff; --text: #1b2a24; --muted: #5c6b64;
+    --line: #e2e9e5; --accent: #0e9f6e; --accent-deep: #0a7d56;
+    --accent-soft: rgba(14, 159, 110, .10);
+    --bad: #c0392b; --bad-soft: rgba(192, 57, 43, .10);
+    --warn-soft: rgba(176, 140, 20, .14); --blue-soft: rgba(42, 90, 128, .12); }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg: #0e1512; --card: #17201b; --text: #e6efe9; --muted: #96a49d;
+    --line: #29332d; --accent: #34d399; --accent-deep: #0e9f6e;
+    --accent-soft: rgba(52, 211, 153, .12);
+    --bad: #e5736a; --bad-soft: rgba(229, 115, 106, .14);
+    --warn-soft: rgba(202, 168, 60, .16); --blue-soft: rgba(96, 152, 196, .16); } }
+  /* Цветовые темы: класс на <html> переопределяет акцент. «Системная» —
+     акцент по умолчанию (зелёный) и тёмная/светлая по системе. */
+  .theme-blue { --accent: #2563eb; --accent-deep: #1d4ed8; --accent-soft: rgba(37, 99, 235, .12); }
+  .theme-yellow { --accent: #d97706; --accent-deep: #b45309; --accent-soft: rgba(217, 119, 6, .12); }
+  .theme-purple { --accent: #7c3aed; --accent-deep: #6d28d9; --accent-soft: rgba(124, 58, 237, .12); }
+  @media (prefers-color-scheme: dark) {
+    .theme-blue { --accent: #60a5fa; --accent-deep: #2563eb; --accent-soft: rgba(96, 165, 250, .14); }
+    .theme-yellow { --accent: #fbbf24; --accent-deep: #d97706; --accent-soft: rgba(251, 191, 36, .14); }
+    .theme-purple { --accent: #a78bfa; --accent-deep: #7c3aed; --accent-soft: rgba(167, 139, 250, .14); }
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--bg); }
+  body { font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text);
+    margin: 0 auto; max-width: 100%; padding: 1rem 1.2rem 3rem; min-height: 100vh; }
+  h1 { font-size: 1.35rem; margin: .8rem 0 .6rem; }
+  h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  a { color: var(--accent); }
+  input, select, textarea { padding: .4rem .55rem; border: 1px solid var(--line);
+    border-radius: .5rem; background: var(--card); color: var(--text); font: inherit; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  button, .btn-ghost { display: inline-block; padding: .32rem .9rem; border: 1px solid var(--line);
+    border-radius: 999px; background: var(--card); color: var(--text); cursor: pointer;
+    font: inherit; font-size: .88rem; text-decoration: none; }
+  button:hover, .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  /* Основное действие — заливная изумрудная кнопка. */
+  button.primary, form.primary button[type=submit] { background: var(--accent);
+    border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover, form.primary button[type=submit]:hover { background: var(--accent-deep);
+    border-color: var(--accent-deep); color: #fff; }
+  button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  button.ghost:hover { color: var(--accent); }
+  button.danger { color: var(--bad); }
   form { display: inline; }
-  .role { opacity: .6; font-size: .85rem; }
-  .notice { background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }
-  .notice.bad { background: rgba(160, 48, 48, .15); }
-  .nav { font-size: .9rem; }
-  .nav button.link { border: none; padding: 0; font-size: .9rem; text-decoration: underline; color: inherit; }
+  .role { color: var(--muted); font-size: .85rem; }
+  .notice { background: var(--accent-soft); color: var(--text); padding: .5rem .8rem;
+    border-radius: .6rem; }
+  .notice.bad { background: var(--bad-soft); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 1rem;
+    padding: .8rem 1rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }
+  /* Таблица шире карточки — прокручивается внутри неё, а не лезет наружу. */
+  .card { overflow-x: auto; }
+  /* Шапка — изумрудная плашка: логотип-ссылка слева, разделы справа. */
+  .topnav { display: flex; justify-content: space-between; align-items: center;
+    gap: 1rem; flex-wrap: wrap; padding: .55rem .9rem; border-radius: .9rem;
+    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+    box-shadow: 0 2px 6px rgba(14, 159, 110, .25); }
+  .topnav .brand { font-weight: 700; font-size: 1.1rem; color: #fff; text-decoration: none; }
+  .topnav .brand:hover { text-decoration: underline; }
+  .topnav nav { display: flex; gap: .9rem; align-items: center; font-size: .9rem; flex-wrap: wrap; }
+  .topnav nav a { color: rgba(255, 255, 255, .85); text-decoration: none; font-weight: 500; }
+  .topnav nav a:hover { color: #fff; text-decoration: underline; }
+  .topnav button.out { background: none; border: none; color: rgba(255, 255, 255, .65);
+    padding: 0; font-size: .9rem; }
+  .topnav button.out:hover { color: #fff; }
+  /* Переключатель цветовой темы в шапке. */
+  .theme-switch { display: inline-flex; align-items: center; }
+  #theme-sel { padding: .2rem .5rem; font-size: .85rem; border: 1px solid rgba(255, 255, 255, .35);
+    background: rgba(255, 255, 255, .15); color: #fff; border-radius: .5rem;
+    cursor: pointer; font: inherit; }
+  #theme-sel:hover { border-color: rgba(255, 255, 255, .6); }
+  #theme-sel option { color: var(--text); background: var(--card); }
+  .topnav.plain #theme-sel { border-color: var(--line); background: var(--card);
+    color: var(--text); }
+  /* Вход/регистрация — шапка без плашки, они ещё не в системе. */
+  .topnav.plain { background: none; box-shadow: none; padding: .2rem 0;
+    border-bottom: 1px solid var(--line); border-radius: 0; }
+  .topnav.plain .brand { color: var(--text); }
+  .badge { font-size: .72rem; padding: .12rem .55rem; border-radius: 999px; font-weight: 600; }
+  .badge-on { background: var(--accent); color: #fff; }
+  .badge-dead { background: var(--bad); color: #fff; }
+  .badge-off { background: var(--warn-soft); }
+  .badge-mine { background: var(--blue-soft); }
+  /* Тумблер вкл/выкл: зелёный с кнопкой справа — включён, красный слева —
+     выключен. Чистый CSS, клик — обычный POST. */
+  .toggle-form { display: inline; }
+  button.switch { width: 2.6rem; height: 1.45rem; padding: 0; border: none;
+    border-radius: 999px; background: var(--bad); position: relative;
+    vertical-align: middle; transition: background .2s; }
+  button.switch:hover { border: none; color: inherit; filter: brightness(1.08); }
+  button.switch .knob { position: absolute; top: .18rem; left: .2rem;
+    width: 1.09rem; height: 1.09rem; border-radius: 50%; background: #fff;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: left .2s; }
+  button.switch.on { background: var(--accent); }
+  button.switch.on .knob { left: 1.31rem; }
   label { display: block; margin: .5rem 0; }"""
 
 
@@ -48,6 +137,24 @@ function cp(el, id) {
 }
 </script>"""
 
+#: Метки времени: сервер хранит UTC, страница показывает время зрителя.
+#: Функция переписывает все [data-ts] в локальное время браузера.
+LOCAL_TIME_SCRIPT = """<script>
+window.localTimes = function(){
+  function pad(n){ return (n<10?"0":"")+n; }
+  function fmt(d){
+    return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())+" "+
+           pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());
+  }
+  var nodes = document.querySelectorAll("[data-ts]");
+  for (var i=0;i<nodes.length;i++){
+    var d = new Date(nodes[i].getAttribute("data-ts"));
+    if (!isNaN(d)) nodes[i].textContent = fmt(d);
+  }
+};
+window.localTimes();
+</script>"""
+
 
 def _copy_line(value: str, node_id: str) -> str:
     """Адрес + кнопка «копировать»: текст не редактируется, кнопка — в буфер."""
@@ -59,19 +166,74 @@ def _copy_line(value: str, node_id: str) -> str:
 
 
 def _nav(*, can_edit: bool) -> str:
-    """Верхняя строка: личные разделы и выход."""
+    """Шапка страницы: логотип-ссылка слева, разделы справа, «выйти» far right.
+
+    Логотип всегда ведёт в каталог — добраться домой можно с любой
+    страницы; пункт «каталог» дублирует его в разделах, чтобы путь
+    назад читался явно. «Выйти» визуально приглушено и стоит последним,
+    подальше от рабочих ссылок: случайный клик не выкинет из приставки.
+    """
     links = [
+        '<a href="/">каталог</a>',
         '<a href="/stats">статистика</a>',
         '<a href="/tokens">приложения и токены</a>',
+        '<a href="/messages">сообщения</a>',
+        '<a href="/bugs">нашёл bug</a>',
     ]
     if can_edit:
         links.append('<a href="/logs">журнал</a>')
+        links.append('<a href="/rules">правила</a>')
+        links.append('<a href="/autotest">автотесты</a>')
         links.append('<a href="/users">пользователи</a>')
-    links.append(
-        '<form method="post" action="/logout" style="display:inline">'
-        '<button class="link" type="submit">выйти</button></form>'
+    # Переключатель цветовой темы: сохраняется в браузере (localStorage)
+    # и применяется сразу, без перезагрузки страницы.
+    theme_switch = (
+        '<label class="theme-switch" title="цветовая тема">'
+        '<select id="theme-sel" aria-label="цветовая тема">'
+        '<option value="system">системная</option>'
+        '<option value="emerald">зелёная</option>'
+        '<option value="blue">синяя</option>'
+        '<option value="yellow">жёлтая</option>'
+        '<option value="purple">фиолетовая</option>'
+        '</select></label>'
+        '<script>'
+        '(function(){'
+        'var key="ai-bridge-theme";'
+        'var sel=document.getElementById("theme-sel");'
+        'if(!sel) return;'
+        'var saved=localStorage.getItem(key)||"system";'
+        'sel.value=saved;'
+        'sel.addEventListener("change",function(){'
+        '  localStorage.setItem(key,sel.value);'
+        '  var root=document.documentElement;'
+        '  root.classList.remove("theme-blue","theme-yellow","theme-purple");'
+        '  if(sel.value==="blue") root.classList.add("theme-blue");'
+        '  else if(sel.value==="yellow") root.classList.add("theme-yellow");'
+        '  else if(sel.value==="purple") root.classList.add("theme-purple");'
+        '});'
+        '})();'
+        '</script>'
     )
-    return f'<p class="nav">{" · ".join(links)}</p>'
+    theme_script = """<script>
+(function(){
+  var key="ai-bridge-theme";
+  var root=document.documentElement;
+  var saved=localStorage.getItem(key)||"system";
+  root.classList.remove("theme-blue","theme-yellow","theme-purple");
+  if(saved==="blue") root.classList.add("theme-blue");
+  else if(saved==="yellow") root.classList.add("theme-yellow");
+  else if(saved==="purple") root.classList.add("theme-purple");
+})();
+</script>"""
+    links.append(theme_switch)
+    links.append(
+        '<form method="post" action="/logout">'
+        '<button class="out" type="submit">выйти</button></form>'
+    )
+    return (
+        f'{theme_script}<header class="topnav"><a class="brand" href="/">AI-приставка</a>'
+        f'<nav>{" ".join(links)}</nav></header>'
+    )
 
 
 def _badge(text: str, kind: str = "") -> str:
@@ -90,11 +252,15 @@ def _safe_url(value: object) -> str:
 def _provider_row(
     entry: dict,
     *,
-    stats: object,
     can_edit: bool,
     key_hint: str,
+    status: str = "",
 ) -> str:
-    """Одна строка каталога: имя, адрес, модель, статистика и действие."""
+    """Одна строка каталога: имя провайдера, ключ, действие.
+
+    ``status`` — живая строка состояния локального сервера (Ollama/LM
+    Studio: что в памяти прямо сейчас); пусто — не рисуем.
+    """
     name = escape(entry["name"])
     badges = []
     if entry.get("enabled"):
@@ -105,9 +271,6 @@ def _provider_row(
         badges.append(_badge("выкл. админом", "off"))
     if entry.get("mine"):
         badges.append(_badge("ваш", "mine"))
-
-    counter = for_line(stats or {}, entry["id"], entry.get("model", ""))
-    stats_text = format_stats(counter) or "—"
 
     # Логотип: первая валидная ссылка из списка, если админ заполнил.
     logo_html = ""
@@ -135,30 +298,35 @@ def _provider_row(
             f'target="_blank" rel="noopener">описание и цены</a></span>'
         )
 
+    # Живое состояние локального сервера — что в памяти прямо сейчас.
+    status_html = (
+        f'<span class="localstatus">⚡ {escape(status)}</span>' if status else ""
+    )
+
     # Действие над строкой. Админ правит определение (править/убрать),
-    # человек ведёт своё пространство: ключ, тест, своя модель. Вход к
-    # провайдеру и получение ключа — кнопками: это витрина провайдера.
-    toggle_label = "выключить" if entry.get("enabled") else "включить"
+    # человек ведёт своё пространство: ключ, тест, своя модель. Проверка —
+    # кнопкой «тест»: настоящий ответ модели надёжнее списка моделей и он
+    # же засчитывается в статистику сообщества.
     entry_id = escape(entry["id"], quote=True)
+    state = "on" if entry.get("enabled") else "off"
     actions = [
-        f'<form method="post" action="/toggle/{entry_id}">'
-        f'<button type="submit">{toggle_label}</button></form>',
-        f'<form method="post" action="/check/{entry_id}">'
-        f'<button type="submit" class="ghost">проверить</button></form>',
-        f'<a class="btn-ghost" href="/key/{entry_id}">ключ</a>',
-        f'<a class="btn-ghost" href="/pick/{entry_id}">модель</a>',
+        f'<form method="post" action="/toggle/{entry_id}" class="toggle-form">'
+        f'<button type="submit" class="switch {state}" role="switch" '
+        f'aria-checked="{"true" if entry.get("enabled") else "false"}" '
+        f'title="{"выключен — нажмите, чтобы включить" if not entry.get("enabled") else "включён — нажмите, чтобы выключить"}">'
+        f'<span class="knob"></span></button></form>',
         f'<form method="post" action="/test/{entry_id}">'
         f'<button type="submit" class="ghost">тест</button></form>',
+        f'<a class="btn-ghost" href="/key/{entry_id}">ключ</a>',
+        f'<a class="btn-ghost" href="/pick/{entry_id}">модель</a>',
     ]
-    if _safe_url(entry.get("loginUrl")):
+    # Ссылка на получение ключа у провайдера — если админ её указал.
+    # Открывается в новой вкладке, чтобы не терять страницу каталога.
+    get_key_url = _safe_url(entry.get("getApiKeyUrl"))
+    if get_key_url:
         actions.append(
-            f'<a class="btn-ghost" href="{escape(_safe_url(entry["loginUrl"]), quote=True)}" '
-            f'target="_blank" rel="noopener">вход у провайдера</a>'
-        )
-    if _safe_url(entry.get("getApiKeyUrl")):
-        actions.append(
-            f'<a class="btn-ghost" href="{escape(_safe_url(entry["getApiKeyUrl"]), quote=True)}" '
-            f'target="_blank" rel="noopener">где взять ключ</a>'
+            f'<a class="btn-ghost" href="{escape(get_key_url, quote=True)}" '
+            f'target="_blank" rel="noopener">get key</a>'
         )
     if can_edit:
         actions.append(f'<a class="btn-ghost" href="/edit/{entry_id}">править</a>')
@@ -171,11 +339,12 @@ def _provider_row(
     # Адрес провайдера на страницах не показывается никому — ни человеку,
     # ни админу: витрина делится названием, адрес живёт только в формах
     # админа (добавить/править), иначе управлять каталогом нечем.
+    # Модель и проверки убраны: каталог — про провайдеров, а не про
+    # цифры (они на статистике). Справка и живой статус — под именем.
+    extra = facts_html + status_html
     return (
         f'<tr class="{"on" if entry.get("enabled") else ""}">'
-        f'<td class="name">{logo_html}{name} {" ".join(badges)}</td>'
-        f'<td class="model">{escape(entry.get("model") or "—")}{facts_html}</td>'
-        f'<td class="stats">{escape(stats_text)}</td>'
+        f'<td class="name">{logo_html}{name} {" ".join(badges)}{extra}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
         f'<td class="actions">{" ".join(actions)}</td>'
         f"</tr>"
@@ -185,26 +354,30 @@ def _provider_row(
 def catalogue_page(
     providers: list[dict],
     *,
-    stats: object = None,
     can_edit: bool = False,
     keyed_ids: frozenset[str] = frozenset(),
     notice: str = "",
     notice_bad: bool = False,
     role: str = "",
     app_address: str = "",
+    statuses: dict | None = None,
 ) -> str:
-    """Весь каталог одной страницей: тумблеры, проверка, ключи, добавление."""
+    """Весь каталог одной страницей: тумблеры, тест, ключи, добавление.
+
+    ``statuses`` — {id провайдера: живая строка состояния локального}.
+    """
+    statuses = statuses or {}
     rows = "\n".join(
         _provider_row(
             entry,
-            stats=stats,
             can_edit=can_edit,
             key_hint="задан" if entry["id"] in keyed_ids else "",
+            status=statuses.get(entry["id"], ""),
         )
         for entry in providers
     )
     if not rows:
-        rows = '<tr><td colspan="5" class="empty">каталог пуст</td></tr>'
+        rows = '<tr><td colspan="3" class="empty">каталог пуст</td></tr>'
 
     notice_html = (
         f'<p class="notice{" bad" if notice_bad else ""}">{escape(notice)}</p>'
@@ -231,49 +404,48 @@ def catalogue_page(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AI-приставка</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 70rem; padding: 0 1rem; }}
-  h1 {{ font-size: 1.4rem; }}
-  table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
-  th {{ font-size: .85rem; text-transform: lowercase; opacity: .7; }}
-  tr.on td {{ background: rgba(42, 128, 60, .10); }}
-  .badge {{ font-size: .75rem; padding: .1rem .4rem; border-radius: .3rem; margin-left: .3rem; }}
-  .badge-on {{ background: #2a803c33; }}
-  .badge-dead {{ background: #a0303033; }}
-  .badge-off {{ background: #806a2a33; }}
-  .badge-mine {{ background: #2a5a8033; }}
-  form {{ display: inline; }}
-  button {{ padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; background: transparent; cursor: pointer; }}
-  button.ghost {{ opacity: .8; }}
-  button.danger {{ color: #c0392b; }}
-  button.link {{ border: none; padding: 0; font-size: .9rem; text-decoration: underline; color: inherit; }}
+{_style()}
+  table {{ border-collapse: separate; border-spacing: 0; width: 100%; }}
+  th, td {{ text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line);
+    overflow-wrap: anywhere; }}
+  th {{ font-size: .8rem; text-transform: lowercase; letter-spacing: .03em; color: var(--muted); }}
+  tbody tr:last-child td {{ border-bottom: none; }}
+  tr.on td {{ background: var(--accent-soft); }}
   .actions {{ white-space: nowrap; }}
-  .facts {{ display: block; font-size: .8em; opacity: .7; }}
-  img.logo {{ height: 1.2em; vertical-align: middle; }}
-  a.btn-ghost {{ display: inline-block; padding: .25rem .7rem; border: 1px solid #8886; border-radius: .4rem; text-decoration: none; color: inherit; }}
-  .empty {{ opacity: .6; }}
-  .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
-  .notice.bad {{ background: rgba(160, 48, 48, .15); }}
-  .role {{ opacity: .6; font-size: .85rem; }}
-  .nav {{ font-size: .9rem; }}
-  .addr code {{ font-family: monospace; user-select: all; }}
-  .add {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #8884; }}
-  .add input {{ margin: .2rem; padding: .3rem; }}
-  details {{ margin-top: 1rem; }}
+  .actions form {{ margin-right: .3rem; }}
+  .facts {{ display: block; font-size: .8em; color: var(--muted); }}
+  /* Живое состояние локального сервера — что в памяти прямо сейчас. */
+  .localstatus {{ display: inline-block; margin-top: .15rem; font-size: .78rem;
+    color: var(--accent); background: var(--accent-soft);
+    padding: .1rem .5rem; border-radius: 999px; }}
+  img.logo {{ height: 1.3em; vertical-align: middle; margin-right: .3rem; }}
+  .empty {{ opacity: .6; text-align: center; padding: 2rem; }}
+  .addr code {{ font-family: monospace; user-select: all; background: var(--accent-soft);
+    padding: .15rem .4rem; border-radius: .35rem; }}
+  .add {{ margin-top: 1.5rem; }}
   input[type=password] {{ font-family: monospace; }}
+  @media (max-width: 52rem) {{
+    /* На телефоне строка каталога складывается в карточку. */
+    table.catalogue thead {{ display: none; }}
+    table.catalogue tr {{ display: block; border: 1px solid var(--line);
+      border-radius: .8rem; margin: .6rem 0; padding: .3rem .5rem; background: var(--card); }}
+    table.catalogue tr.on {{ background: var(--accent-soft); }}
+    table.catalogue td {{ display: block; border: none; padding: .2rem .2rem; }}
+    .actions {{ white-space: normal; }}
+  }}
 </style>
 </head>
 <body>
-<h1>AI-приставка</h1>
 {_nav(can_edit=can_edit)}
 {role_html}
 {notice_html}
 {address_html}
-<table>
-<tr><th>провайдер</th><th>модель</th><th>проверки</th><th>ключ</th><th></th></tr>
+<div class="card">
+<table class="catalogue">
+<tr><th>провайдер</th><th>ключ</th><th></th></tr>
 {rows}
 </table>
+</div>
 
 {add_html}
 
@@ -284,13 +456,30 @@ def catalogue_page(
 </html>"""
 
 
-def edit_page(entry: dict, *, notice: str = "") -> str:
-    """Форма правки одного провайдера: определение плюс справка о модели.
+def edit_page(
+    entry: dict,
+    *,
+    notice: str = "",
+    values: dict | None = None,
+    models: list[str] | None = None,
+    models_error: str = "",
+    has_key: bool = False,
+    oauth: bool = False,
+) -> str:
+    """Форма правки одного провайдера: определение, ключ и список моделей.
 
-    Пустое поле ничего не стирает — сервер отбрасывает пустые значения
-    до правки, так что можно менять одну строку, не трогая остальные.
+    Справка о модели (контекст, цена, способности), логотипы и страницы
+    провайдера отсюда убраны: они заполняются при добавлении и в каталоге
+    остаются как есть — править их здесь незачем. Пустое поле ничего не
+    стирает (можно менять одну строку, не трогая остальные) — **кроме
+    модели**: очищенное поле модели её убирает, иначе смена/удаление
+    модели не состоялась бы никогда.
+
+    ``values`` — уже введённое (после «показать модели» ничего не теряется);
+    ``models`` — список с сервера (тогда модель выбирается из списка);
+    ``oauth`` — провайдер принимает вход через GitHub (кнопка ниже).
     """
-    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    v = values or {}
 
     def field(label: str, name: str, value: str, *, placeholder: str = "") -> str:
         return (
@@ -299,56 +488,169 @@ def edit_page(entry: dict, *, notice: str = "") -> str:
             f'placeholder="{escape(placeholder, quote=True)}"></label>'
         )
 
+    def filled(name: str, fallback: str = "") -> str:
+        return str(v.get(name) if name in v else fallback)
+
+    if models is not None:
+        options = list(models)
+        current = filled("model", str(entry.get("model") or ""))
+        if current and current not in options:
+            options.insert(0, current)
+        opts = "\n    ".join(
+            f'<option value="{escape(option, quote=True)}"'
+            f'{" selected" if option == current else ""}>{escape(option)}</option>'
+            for option in options
+        )
+        model_control = f'<label>Модель<select name="model">\n    {opts}\n  </select></label>'
+    else:
+        model_control = field(
+            "Модель", "model", filled("model", str(entry.get("model") or "")),
+            placeholder="qwen3:0.6b",
+        )
+
+    # Ключ возвращается в ту же форму после «показать модели»: иначе он
+    # терялся между запросом списка и сохранением. Пустое поле ключа
+    # ничего не стирает — ключ меняется только явным вводом.
+    key_hint = "сейчас задан — введите новый, чтобы заменить" if has_key else ""
+    key_field = (
+        "<label>API-ключ (останется на устройстве)"
+        f'<input type="password" name="api_key" autocomplete="off" '
+        f'value="{escape(filled("api_key"), quote=True)}" '
+        'placeholder="sk-…"></label>'
+    )
+    if key_hint:
+        key_field += f'<p class="role">{escape(key_hint)}</p>'
+
+    fetch_note = (
+        escape(models_error)
+        if models_error
+        else "Кнопка «показать модели» запросит список у провайдера — "
+             "если ключ задан, вводить его заново не нужно."
+    )
+
     fields = "\n  ".join(
         [
-            field("Название", "name", entry.get("name", "")),
-            field("Адрес", "url", entry.get("url", "")),
-            field("Модель", "model", entry.get("model", ""), placeholder="qwen3:0.6b"),
-            field("Приоритет", "fallbackPriority", str(entry.get("fallbackPriority", 0))),
-            field("Страница логина", "loginUrl", entry.get("loginUrl", "")),
-            field("Где взять ключ", "getApiKeyUrl", entry.get("getApiKeyUrl", "")),
-            field("Страница с описанием и ценами", "infoUrl", entry.get("infoUrl", "")),
-            field("Контекст", "context", entry.get("context", ""), placeholder="128K"),
-            field("Цена", "pricing", entry.get("pricing", ""), placeholder="$0.1/1M вход, $0.4/1M выход"),
+            field("Название", "name", filled("name", str(entry.get("name") or ""))),
             field(
-                "Способности", "capabilities", entry.get("capabilities", ""),
-                placeholder="vision, thinking, tools",
+                "Адрес endpoint (базовый, без /chat/completions)",
+                "url", filled("url", str(entry.get("url") or "")),
             ),
-            (
-                '<label>Логотипы (URL провайдера по строке)'
-                f'<textarea name="logoUrl" rows="3">{escape(entry.get("logoUrl", ""))}</textarea></label>'
+            key_field,
+            model_control,
+            field(
+                "Приоритет", "fallbackPriority",
+                filled("fallbackPriority", str(entry.get("fallbackPriority", 0))),
+            ),
+            field(
+                "Где взять ключ", "getApiKeyUrl",
+                filled("getApiKeyUrl", str(entry.get("getApiKeyUrl") or "")),
             ),
         ]
     )
+
+    oauth_html = ""
+    if oauth:
+        provider_id = escape(str(entry.get("id") or ""), quote=True)
+        oauth_html = f"""
+<form method="post" action="/oauth/{provider_id}">
+  <button type="submit" name="action" value="start">Войти через GitHub</button>
+  <span class="role">вместо вставки ключа: GitHub выдаст код, вы введёте его на github.com/login/device</span>
+</form>"""
+
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
 
     return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
+<title>Правка — {escape(str(entry.get("name") or ""))}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Правка — {escape(entry.get("name", ""))}</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 34rem; padding: 0 1rem; }}
-  label {{ display: block; margin: .5rem 0; }}
-  input, textarea {{ width: 100%; padding: .35rem; }}
-  button {{ margin-top: .8rem; padding: .3rem .9rem; }}
-  .role {{ opacity: .6; font-size: .85rem; }}
-  .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
+{_style()}
+  body {{ max-width: 100%; }}
+  input, textarea, select {{ width: 100%; }}
+  textarea {{ font-family: monospace; }}
+  button {{ margin-top: .8rem; padding: .35rem 1.1rem; }}
 </style>
 </head>
 <body>
-<h1>Правка: {escape(entry.get("name", ""))}</h1>
 {_nav(can_edit=True)}
+<h1>Правка: {escape(str(entry.get("name") or ""))}</h1>
 {notice_html}
-<form method="post" action="/edit/{escape(entry.get("id", ""), quote=True)}">
+<div class="card">
+<form method="post" action="/edit/{escape(str(entry.get("id") or ""), quote=True)}">
   {fields}
-  <button type="submit">сохранить</button>
+  <button type="submit" name="action" value="fetch">показать модели</button>
+  <button type="submit" class="primary">сохранить</button>
   <a href="/">назад</a>
 </form>
-<p class="role">Цена и контекст — справка для выбора модели, её видят все.
-Способности — через запятую: vision, thinking, tools. Пустое поле не стирает
-значение.</p>
+{oauth_html}
+</div>
+<p class="role">{fetch_note}</p>
+<p class="role">Цена, контекст, способности и логотипы остаются как есть —
+они заполняются при добавлении. Пустое поле не стирает значение — кроме
+поля «Модель»: очистите его, чтобы убрать модель.</p>
+</body>
+</html>"""
+
+
+def oauth_page(
+    provider_name: str,
+    *,
+    provider_id: str,
+    user_code: str,
+    verify_url: str,
+    interval: int = 5,
+    notice: str = "",
+    can_edit: bool = False,
+) -> str:
+    """Ожидание device-flow GitHub: код, ссылка и кнопка «проверить».
+
+    Форма шлёт POST на ``/oauth/<id>`` (action=check) — сервер один раз
+    спросит GitHub, готов ли токен. Скрипт подставляет кнопку сам, пока
+    страница открыта; без JS работает ручная проверка. ``interval`` —
+    как часто GitHub просит опрашивать (подставляется в скрипт).
+    ``verify_url`` — только http/https (адрес приходит от GitHub, но
+    доверяем ему не больше, чем любому другому слову на странице).
+    """
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    link = _safe_url(verify_url) or "https://github.com/login/device"
+    poll_ms = max(int(interval), 1) * 1000
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Вход через GitHub — {escape(provider_name)}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+{_style()}
+  .code {{ font-size: 2rem; letter-spacing: .3rem; font-family: monospace;
+    text-align: center; padding: 1rem; }}
+  button {{ margin-top: .8rem; padding: .35rem 1.1rem; }}
+</style>
+</head>
+<body>
+{_nav(can_edit=can_edit)}
+<h1>Вход через GitHub</h1>
+{notice_html}
+<div class="card">
+<p>Откройте <a href="{escape(link, quote=True)}" target="_blank" rel="noopener">{escape(link)}</a>
+и введите этот код:</p>
+<p class="code">{escape(user_code)}</p>
+<form id="oauth-check" method="post" action="/oauth/{escape(provider_id, quote=True)}">
+  <input type="hidden" name="action" value="check">
+  <button type="submit" class="primary">Проверить</button>
+  <a href="/key/{escape(provider_id, quote=True)}">отмена</a>
+</form>
+<p class="role">Пока страница открыта, приставка спрашивает GitHub сама —
+можно просто дождаться.</p>
+<script>
+setTimeout(function () {{
+  var form = document.getElementById("oauth-check");
+  if (form) form.submit();
+}}, {poll_ms});
+</script>
+</div>
 </body>
 </html>"""
 
@@ -397,6 +699,16 @@ def add_page(
         if models_error
         else "Кнопка «показать модели» запросит список у провайдера — она ниже, под полем модели."
     )
+    # Ключ возвращается в ту же форму после «показать модели»: иначе он
+    # терялся между запросом списка и сохранением — провайдер добавлялся
+    # без ключа, а повторный запрос списка жаловался «без ключа». В поле
+    # type=password — на экране точки, в форме — ровно то, что ввёл человек.
+    key_field = (
+        "<label>API-ключ (останется на устройстве)"
+        f'<input type="password" name="api_key" autocomplete="off" '
+        f'value="{escape(str(v.get("api_key") or ""), quote=True)}" '
+        'placeholder="sk-…"></label>'
+    )
     destination = (
         "попадёт в каталог — видят все"
         if is_admin
@@ -412,18 +724,20 @@ def add_page(
 <title>Новый провайдер — AI-приставка</title>
 <style>
 {_style()}
-  body {{ max-width: 34rem; }}
-  input, select, textarea {{ width: 100%; padding: .35rem; font-family: monospace; }}
+  body {{ max-width: 100%; }}
+  input, select, textarea {{ width: 100%; font-family: monospace; }}
+  textarea {{ font-family: monospace; }}
   button {{ margin: .3rem .3rem 0 0; }}
 </style>
 </head>
-<h1>Новый провайдер</h1>
 {_nav(can_edit=is_admin)}
+<h1>Новый провайдер</h1>
 {notice_html}
+<div class="card">
 <form method="post" action="/add">
   {field("Название", "name", value=str(v.get("name") or ""), placeholder="Мой LMS")}
   {field("Адрес (базовый, без /chat/completions)", "url", value=str(v.get("url") or ""), placeholder="https://…/v1")}
-  {field("API-ключ (останется на устройстве)", "api_key", value="", placeholder="sk-…")}
+  {key_field}
   {model_control}
   <button type="submit" name="action" value="fetch">показать модели</button>
   {field("Страница логина провайдера", "loginUrl", value=str(v.get("loginUrl") or ""))}
@@ -434,9 +748,10 @@ def add_page(
   {field("Контекст", "context", value=str(v.get("context") or ""), placeholder="128K")}
   {field("Цена", "pricing", value=str(v.get("pricing") or ""), placeholder="$0.1/1M вход, $0.4/1M выход")}
   {field("Способности", "capabilities", value=str(v.get("capabilities") or ""), placeholder="vision, thinking, tools")}
-  <button type="submit" name="action" value="save">сохранить</button>
+  <button type="submit" name="action" value="save" class="primary">сохранить</button>
   <a href="/">назад</a>
 </form>
+</div>
 <p class="role">{destination}. Ключ уходит только к провайдеру, на сервер каталога не попадает никогда.</p>
 <p class="role">{fetch_note}</p>
 <p class="role">Цена, контекст и способности — справка для выбора модели: заполните
@@ -469,17 +784,20 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
 <title>Вход — AI-приставка</title>
 <style>
 {_style()}
-  body {{ max-width: 30rem; }}
-  input {{ width: 100%; margin: .2rem 0; font-family: monospace; }}
+  input {{ width: 100%; margin: .3rem 0; font-family: monospace; }}
+  button {{ margin-top: .5rem; padding: .4rem 1.2rem; }}
+  details {{ margin-top: 1.2rem; }}
 </style>
 </head>
 <body>
-<h1>AI-приставка</h1>
+<header class="topnav plain"><span class="brand">AI-приставка</span></header>
+<h1>Вход</h1>
 {notice_html}
+<div class="card">
 <form method="post" action="/login">
   <input name="email" type="email" placeholder="почта" autocomplete="username" autofocus>
   <input name="password" type="password" placeholder="пароль" autocomplete="current-password">
-  <button type="submit">войти</button>
+  <button type="submit" class="primary">войти</button>
 </form>
 {signup_html}
 <details>
@@ -490,6 +808,7 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
 </form>
 <p class="role">Токен: <code>uv run python app.py --token</code>.</p>
 </details>
+</div>
 </body>
 </html>"""
 
@@ -507,22 +826,486 @@ def signup_page(notice: str = "") -> str:
 <title>Регистрация — AI-приставка</title>
 <style>
 {_style()}
-  body {{ max-width: 30rem; }}
-  input {{ width: 100%; margin: .2rem 0; font-family: monospace; }}
+  input {{ width: 100%; margin: .3rem 0; font-family: monospace; }}
+  button {{ margin-top: .5rem; padding: .4rem 1.2rem; }}
 </style>
 </head>
 <body>
+<header class="topnav plain"><a class="brand" href="/login">AI-приставка</a></header>
 <h1>Регистрация</h1>
 {notice_html}
+<div class="card">
 <form method="post" action="/signup">
   <input name="email" type="email" placeholder="почта" autocomplete="username" autofocus required>
   <input name="password" type="password" placeholder="пароль" autocomplete="new-password" required>
   <input name="password2" type="password" placeholder="ещё раз пароль" autocomplete="new-password" required>
-  <button type="submit">создать аккаунт</button>
+  <button type="submit" class="primary">создать аккаунт</button>
   <a href="/login">назад ко входу</a>
 </form>
+</div>
 <p class="role">Аккаунт открывает ваше пространство приставки: свои ключи,
 свои переключатели, свои токены для приложений.</p>
+</body>
+</html>"""
+
+
+def bugs_page(
+    posts: list[dict],
+    *,
+    can_edit: bool = False,
+    notice: str = "",
+    notice_bad: bool = False,
+) -> str:
+    """Нашёл bug: общая доска сообщений — отдельный раздел для всех вошедших.
+
+    Стоит отдельно от страницы токенов намеренно: та показывает
+    конфиденциальные хвосты токенов, а баг-доска — разговор, который
+    должен быть виден каждому участнику. Сообщения, комментарии и
+    статусы хранятся на сервере (``storage/board.py``); статус ставится
+    только с пояснением «почему». Время лежит в UTC, страница через
+    ``data-ts`` показывает время зрителя.
+    """
+    from storage.board import STATUSES, current_status
+
+    notice_html = (
+        f'<p class="notice{" bad" if notice_bad else ""}">{escape(notice)}</p>'
+        if notice
+        else ""
+    )
+    badges = {
+        "wait": "badge-off",
+        "work": "badge-mine",
+        "done": "badge-on",
+        "wontfix": "badge-dead",
+    }
+
+    def stamp(value: object) -> str:
+        """Момент времени: локальное время зрителя поверх UTC-значения."""
+        text = str(value or "")
+        if not text:
+            return ""
+        short = escape(text.replace("T", " ").replace("Z", ""))
+        return f'<span class="role" data-ts="{escape(text, quote=True)}">{short}</span>'
+
+    def status_options(current: str = "") -> str:
+        rows = ['<option value="">— выбрать статус —</option>']
+        for key, label in STATUSES.items():
+            mark = " selected" if key == current else ""
+            rows.append(f'<option value="{escape(key, quote=True)}"{mark}>{escape(label)}</option>')
+        return "".join(rows)
+
+    def post_html(post: dict) -> str:
+        pid = escape(str(post.get("id") or ""), quote=True)
+        cur = current_status(post)
+        badge = ""
+        why_html = ""
+        if cur and str(cur.get("key") or "") in STATUSES:
+            key = str(cur["key"])
+            badge = f'<span class="badge {badges[key]}">{escape(STATUSES[key])}</span>'
+            why_html = (
+                f'<div class="bug-why">почему: {escape(str(cur.get("why") or ""))} '
+                f'<span class="role">— {escape(str(cur.get("by") or "—"))}, '
+                f'{stamp(cur.get("ts"))}</span></div>'
+            )
+
+        history = [h for h in (post.get("history") or []) if isinstance(h, dict)]
+        history_html = ""
+        if len(history) > 1:
+            rows = []
+            for item in history[:-1]:
+                key = str(item.get("key") or "")
+                label = STATUSES.get(key, key)
+                rows.append(
+                    f'<li><span class="badge {badges.get(key, "badge-off")}">{escape(label)}</span> '
+                    f'{escape(str(item.get("why") or ""))} '
+                    f'<span class="role">— {escape(str(item.get("by") or "—"))}, '
+                    f'{stamp(item.get("ts"))}</span></li>'
+                )
+            history_html = (
+                f'<details class="bug-details"><summary>история статусов ({len(history) - 1})</summary>'
+                f'<ul class="bug-comments">{"".join(rows)}</ul></details>'
+            )
+
+        comments = [c for c in (post.get("comments") or []) if isinstance(c, dict)]
+        comments_html = ""
+        if comments:
+            rows = [
+                f'<li><b>{escape(str(c.get("by") or "—"))}</b> {stamp(c.get("ts"))}'
+                f'<div class="c-text">{escape(str(c.get("text") or ""))}</div></li>'
+                for c in comments
+            ]
+            comments_html = f'<ul class="bug-comments">{"".join(rows)}</ul>'
+
+        drop_html = ""
+        if can_edit:
+            drop_html = (
+                f'<form method="post" action="/bugs/drop"'
+                f' onsubmit="return confirm(\'Удалить сообщение вместе с обсуждением?\')">'
+                f'<input type="hidden" name="id" value="{pid}">'
+                f'<button type="submit" class="ghost danger">удалить</button></form>'
+            )
+
+        return f"""<article class="bug">
+<div class="bug-head"><b>{escape(str(post.get("author") or "—"))}</b>{stamp(post.get("ts"))}{badge}</div>
+<div class="bug-text">{escape(str(post.get("text") or ""))}</div>
+{why_html}{comments_html}{history_html}
+<div class="bug-actions">
+<details class="bug-details"><summary>комментировать</summary>
+<form method="post" action="/bugs/comment">
+<input type="hidden" name="id" value="{pid}">
+<textarea name="text" rows="2" required placeholder="ваш комментарий…"></textarea>
+<div class="bug-row"><button type="submit" class="primary">добавить</button></div>
+</form></details>
+<details class="bug-details"><summary>поставить статус</summary>
+<form method="post" action="/bugs/status">
+<input type="hidden" name="id" value="{pid}">
+<select name="key" required aria-label="статус">{status_options(str((cur or {}).get("key") or ""))}</select>
+<textarea name="why" rows="2" required placeholder="почему именно так: кто ставит — тот и объясняет"></textarea>
+<div class="bug-row"><button type="submit" class="primary">поставить статус</button></div>
+</form></details>
+{drop_html}
+</div>
+</article>"""
+
+    if posts:
+        board_html = "\n".join(post_html(p) for p in posts)
+    else:
+        board_html = '<p class="role">пока ни одного сообщения — напишите, если что-то сломалось</p>'
+
+    legend = "".join(
+        f'<li><span class="badge {badges[key]}">{escape(label)}</span> {escape(_LEGEND[key])}</li>'
+        for key, label in STATUSES.items()
+    )
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Нашёл bug — AI-приставка</title>
+<style>
+{_style()}
+  h2 {{ font-size: 1.05rem; margin-top: 1.6rem; }}
+  .bug-new textarea {{ width: 100%; min-height: 4.5rem; font-family: inherit; }}
+  .bug-row {{ display: flex; gap: .6rem; align-items: center; margin-top: .5rem;
+    flex-wrap: wrap; }}
+  #bug-chat {{ display: flex; flex-direction: column; gap: .7rem; margin-top: .7rem; }}
+  .bug {{ background: var(--card); border: 1px solid var(--line); border-radius: .8rem;
+    padding: .7rem .9rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }}
+  .bug-head {{ display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+    font-size: .9rem; }}
+  .bug-text {{ white-space: pre-wrap; overflow-wrap: anywhere; margin: .45rem 0 .2rem; }}
+  .bug-why {{ background: var(--accent-soft); border-radius: .5rem; padding: .35rem .6rem;
+    font-size: .88rem; margin-top: .4rem; overflow-wrap: anywhere; }}
+  .bug-comments {{ list-style: none; margin: .5rem 0 0; padding: 0;
+    border-top: 1px dashed var(--line); }}
+  .bug-comments li {{ padding: .4rem 0 .1rem .7rem; border-left: 2px solid var(--accent);
+    margin-top: .4rem; font-size: .92rem; overflow-wrap: anywhere; }}
+  .bug-comments li b {{ font-weight: 600; }}
+  .c-text {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
+  .bug-actions {{ display: flex; gap: .5rem; margin-top: .55rem; flex-wrap: wrap;
+    align-items: flex-start; }}
+  /* <details> вместо скрипта: раскрывается нативно, форма видна всем. */
+  .bug-details summary {{ display: inline-block; padding: .32rem .9rem;
+    border: 1px solid var(--line); border-radius: 999px; cursor: pointer;
+    font-size: .88rem; color: var(--muted); user-select: none; }}
+  .bug-details summary:hover {{ border-color: var(--accent); color: var(--accent); }}
+  .bug-details[open] summary {{ border-color: var(--accent); color: var(--accent); }}
+  .bug-details form {{ display: flex; flex-direction: column; gap: .5rem;
+    margin-top: .55rem; max-width: 34rem; }}
+  .bug-details textarea {{ width: 100%; font-family: inherit; }}
+  .bug-details select {{ width: 100%; }}
+  .stat-expl li {{ margin: .2rem 0; }}
+</style>
+</head>
+<body>
+{_nav(can_edit=can_edit)}
+<h1>Нашёл bug</h1>
+{notice_html}
+<p class="role">Нашли ошибку, зависание или странное поведение — напишите здесь.
+Каждый участник видит доску и может добавить комментарий и поставить статус;
+статус ставится только с пояснением «почему» — иначе приставка его не примет.</p>
+<div class="bug-new">
+<form method="post" action="/bugs/post">
+<label class="role" for="bug-input">что случилось: где, что нажали, что ожидали увидеть</label>
+<textarea id="bug-input" name="text" rows="4" required placeholder="например: нажал «остановить тест» — прогресс остался висеть на 0%"></textarea>
+<div class="bug-row"><button type="submit" class="primary">Нашёл bug</button></div>
+</form>
+</div>
+<h2>Обсуждение</h2>
+<div id="bug-chat">{board_html}</div>
+<h2>Статусы и их смысл</h2>
+<ul class="role stat-expl">{legend}</ul>
+{LOCAL_TIME_SCRIPT}
+</body>
+</html>"""
+
+
+#: Пояснения к статусам — одной строкой на каждый, как они значатся на странице.
+_LEGEND = {
+    "wait": "баг принят, но его ещё не чинят.",
+    "work": "уже правится; в пояснении — что именно делается.",
+    "done": "исправлено; в пояснении — что сделано.",
+    "wontfix": "так задумано или невозможно; в пояснении — причина.",
+}
+
+
+def messages_page(
+    messages: list[dict],
+    *,
+    people: list[dict],
+    viewer_id: str = "",
+    can_edit: bool = False,
+    mail_on: bool = True,
+    box_owner: dict | None = None,
+    notify_token: str = "",
+    tg_chat: str = "",
+    notice: str = "",
+    notice_bad: bool = False,
+) -> str:
+    """Личная почта участников: ящик, написать любому, рассылка админа.
+
+    Проще некуда: один ящик на человека, письмо — кому угодно, админу —
+    рассылка всем разом. Человек может отказаться от получения (``mail_on``
+    в профиле) — тогда его письма получает администратор (``orig_to``),
+    ящик при этом не закрывается: полная власть остаётся у админа.
+    ``box_owner`` — админ смотрит чужой ящик; показан заголовок и ссылка
+    назад. ``notify_token``/``tg_chat`` — секция Telegram-уведомлений:
+    токен задаёт только админ (на странице не показывается), chat_id —
+    каждый сам. Время — UTC в ``data-ts``, страница покажет время зрителя.
+    """
+    notice_html = (
+        f'<p class="notice{" bad" if notice_bad else ""}">{escape(notice)}</p>'
+        if notice
+        else ""
+    )
+    viewing_other = bool(box_owner and str(box_owner.get("id") or "") != str(viewer_id))
+
+    # Адресаты: все, кроме меня. Админу — ещё и «все» (рассылка).
+    options = []
+    if can_edit:
+        options.append('<option value="*">все участники (рассылка)</option>')
+    options.append('<option value="">— выбрать адресата —</option>')
+    for person in people:
+        pid = str(person.get("id") or "")
+        if pid == str(viewer_id):
+            continue
+        email = str(person.get("email") or pid)
+        mark = " selected" if box_owner and pid == str(box_owner.get("id") or "") else ""
+        options.append(f'<option value="{escape(pid, quote=True)}"{mark}>{escape(email)}</option>')
+
+    # Уведомления в Telegram: токен бота (админ, не показываем) и свой chat_id.
+    # Человек пишет боту сообщение и жмёт «узнать» — приставка читает
+    # getUpdates: ни вебхука, ни стека на сервере не нужно.
+    if viewing_other:
+        notify_html = ""
+    else:
+        parts = []
+        if can_edit:
+            token_hint = (
+                "текущий токен сохранён — вставьте новый, чтобы заменить"
+                if notify_token
+                else "токен от @BotFather, например 123456:ABC-DEF…"
+            )
+            parts.append(
+                '<form method="post" action="/notify/token" class="tg-row">'
+                '<input type="password" name="token" autocomplete="off" '
+                f'placeholder="{token_hint}">'
+                '<button type="submit" class="ghost">сохранить токен</button>'
+                '<button type="submit" formaction="/notify/hello" class="ghost">'
+                "проверить бота</button>"
+                "</form>"
+            )
+            if notify_token:
+                parts.append(
+                    '<p class="role">Токен сохранён и нигде не показывается. '
+                    "Отключить уведомления — "
+                    '<button type="submit" form="tg-off" class="ghost danger">стереть токен</button>'
+                    '<form id="tg-off" method="post" action="/notify/token">'
+                    '<input type="hidden" name="token" value=""></form></p>'
+                )
+        else:
+            parts.append(
+                '<p class="role">Уведомления в Telegram: '
+                + ("токен бота задан — осталось указать свой chat_id."
+                   if notify_token
+                   else "настроит администратор (токен бота).")
+                + "</p>"
+            )
+        # Свой chat_id — каждый задаёт сам, даже если токена ещё нет.
+        if tg_chat:
+            status = (
+                f'<p class="role">Ваш chat_id: <code>{escape(tg_chat)}</code> — '
+                "уведомления приходят."
+                + (" Можно проверить кнопкой ниже." if notify_token else "")
+                + "</p>"
+            )
+        else:
+            status = (
+                '<p class="role">Chat_id не задан: напишите боту любое сообщение '
+                'и нажмите «узнать chat_id» — или впишите вручную.</p>'
+            )
+        parts.append(status)
+        if notify_token or can_edit:
+            buttons = [
+                '<button type="submit" formaction="/notify/detect" class="ghost">'
+                "узнать chat_id</button>",
+                '<button type="submit" class="primary">сохранить chat_id</button>',
+            ]
+            if tg_chat:
+                buttons.append(
+                    '<button type="submit" formaction="/notify/test" class="ghost">'
+                    "отправить тест</button>"
+                )
+            parts.append(
+                '<form method="post" action="/notify/chat" class="tg-row">'
+                f'<input name="chat" value="{escape(tg_chat, quote=True)}" '
+                'placeholder="chat_id, например 123456789">'
+                + "".join(buttons)
+                + "</form>"
+            )
+        notify_html = "".join(parts)
+
+    # Своя почта: тумблер приёма. Чужой ящик админа переключать нечего.
+    if viewing_other:
+        switch_html = (
+            '<p class="role">Чужой ящик: только чтение и удаление — '
+            'полная власть администратора.</p>'
+        )
+    elif mail_on:
+        switch_html = (
+            '<form method="post" action="/messages/mail">'
+            '<p class="role">Вы принимаете сообщения. Не хотите, чтобы вам писали — '
+            'личные письма за вас будет получать администратор, '
+            'рассылки придут как обычно.</p>'
+            '<button type="submit" class="ghost">не получать сообщения</button>'
+            "</form>"
+        )
+    else:
+        switch_html = (
+            '<form method="post" action="/messages/mail">'
+            '<p class="role">Вы не принимаете личные сообщения — их получает '
+            'администратор. Ящик открыт и никуда не делся.</p>'
+            '<button type="submit" class="primary">снова получать сообщения</button>'
+            "</form>"
+        )
+
+    def message_html(item: dict) -> str:
+        sender = str(item.get("from_email") or "—")
+        ts = str(item.get("ts") or "")
+        short = escape(ts.replace("T", " ").replace("Z", ""))
+        marker = ""
+        if item.get("orig_to"):
+            marker = (
+                f'<span class="badge badge-mine">за адресата: '
+                f'{escape(str(item["orig_to"]))}</span>'
+            )
+        drop = ""
+        if can_edit:
+            drop = (
+                f'<form method="post" action="/messages/drop">'
+                f'<input type="hidden" name="id" value="{escape(str(item.get("id") or ""), quote=True)}">'
+                f'<button type="submit" class="ghost danger">удалить</button></form>'
+            )
+        return (
+            f'<article class="mail">'
+            f'<div class="mail-head"><b>{escape(sender)}</b> '
+            f'<span class="role" data-ts="{escape(ts, quote=True)}">{short}</span>'
+            f"{marker}{drop}</div>"
+            f'<div class="mail-text">{escape(str(item.get("text") or ""))}</div>'
+            f"</article>"
+        )
+
+    if messages:
+        inbox_html = "\n".join(message_html(m) for m in messages)
+    else:
+        inbox_html = '<p class="role">ящик пуст — напишите кому-нибудь первым</p>'
+
+    notify_section = (
+        f"<h2>Уведомления в Telegram</h2>{notify_html}" if notify_html else ""
+    )
+
+    heading = "Сообщения"
+    if viewing_other:
+        heading += f": {escape(str(box_owner.get('email') or 'чужой ящик'))}"
+    back = ""
+    if viewing_other:
+        back = '<p><a href="/messages">← мой ящик</a></p>'
+
+    box_switch = ""
+    if can_edit and people:
+        others = [
+            f'<option value="{escape(str(p.get("id") or ""), quote=True)}"'
+            f'>{escape(str(p.get("email") or ""))}</option>'
+            for p in people
+            if str(p.get("id") or "") != str(viewer_id)
+        ]
+        if others:
+            box_switch = (
+                '<form method="get" action="/messages" class="box-switch">'
+                '<span class="role">открыть ящик:</span> '
+                f'<select name="box">{"".join(others)}</select>'
+                '<button type="submit" class="ghost">открыть</button>'
+                "</form>"
+            )
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сообщения — AI-приставка</title>
+<style>
+{_style()}
+  h2 {{ font-size: 1.05rem; margin-top: 1.6rem; }}
+  .compose textarea {{ width: 100%; min-height: 5rem; font-family: inherit; }}
+  .compose select {{ width: 100%; margin-top: .4rem; }}
+  .mail-row {{ display: flex; gap: .6rem; align-items: center; margin-top: .5rem;
+    flex-wrap: wrap; }}
+  .box-switch {{ display: flex; gap: .5rem; align-items: center; margin-top: .6rem;
+    flex-wrap: wrap; }}
+  .box-switch select {{ max-width: 20rem; }}
+  .tg-row {{ display: flex; gap: .5rem; align-items: center; margin-top: .5rem;
+    flex-wrap: wrap; }}
+  .tg-row input {{ flex: 1 1 16rem; min-width: 12rem; }}
+  #inbox {{ display: flex; flex-direction: column; gap: .7rem; margin-top: .7rem; }}
+  .mail {{ background: var(--card); border: 1px solid var(--line); border-radius: .8rem;
+    padding: .7rem .9rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }}
+  .mail-head {{ display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+    font-size: .9rem; }}
+  .mail-head form {{ margin-left: auto; }}
+  .mail-text {{ white-space: pre-wrap; overflow-wrap: anywhere; margin-top: .4rem; }}
+  .rules li {{ margin: .15rem 0; }}
+</style>
+</head>
+<body>
+{_nav(can_edit=can_edit)}
+<h1>{heading}</h1>
+{notice_html}
+{back}
+<h2>Написать</h2>
+<form method="post" action="/messages/send" class="compose">
+<select name="to" required>{"".join(options)}</select>
+<textarea name="text" rows="4" required placeholder="текст сообщения…"></textarea>
+<div class="mail-row">
+<button type="submit" class="primary">отправить</button>
+<span class="role">адресат получит письмо в свой ящик</span>
+</div>
+</form>
+<h2>Приём сообщений</h2>
+{switch_html}
+{notify_section}
+{box_switch}
+<h2>Ящик</h2>
+<div id="inbox">{inbox_html}</div>
+<h2>Как это устроено</h2>
+<ul class="role rules">
+<li>У каждого свой ящик: вам могут написать все, и вы можете написать любому.</li>
+<li>Администратор отправляет рассылку всем разом.</li>
+<li>Отказ от приёма перенаправляет личные письма администратору — ящик
+не закрывается, администратор читает и удаляет всё.</li>
+</ul>
+{LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
 
@@ -573,25 +1356,29 @@ def tokens_page(
 <title>Приложения и токены — AI-приставка</title>
 <style>
 {_style()}
-  table {{ border-collapse: collapse; width: 100%; max-width: 40rem; }}
-  th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
-  input {{ margin: .2rem; }}
-  input.copy {{ width: 100%; max-width: 40rem; font-family: monospace; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }}
+  th {{ font-size: .8rem; color: var(--muted); }}
   h2 {{ font-size: 1.1rem; margin-top: 1.6rem; }}
-  .api {{ background: rgba(42, 128, 60, .10); padding: .6rem .8rem; border-radius: .4rem; }}
-  .api.off {{ background: rgba(160, 48, 48, .15); }}
-  .addr code {{ font-family: monospace; user-select: all; }}
+  .api {{ background: var(--accent-soft); padding: .6rem .8rem; border-radius: .6rem;
+    display: flex; justify-content: space-between; align-items: center; gap: 1rem;
+    flex-wrap: wrap; }}
+  .api.off {{ background: var(--bad-soft); }}
+  .addr code {{ font-family: monospace; user-select: all; background: var(--accent-soft);
+    padding: .15rem .4rem; border-radius: .35rem; }}
 </style>
 </head>
 <body>
-<h1>Приложения и токены</h1>
 {_nav(can_edit=can_edit)}
+<h1>Приложения и токены</h1>
 {notice_html}
 {address_html}
-<p class="api{" off" if not api_on else ""}">{escape(api_status)}
-<form method="post" action="/tokens/api" style="float:right">
-  <button type="submit" class="ghost">{api_button}</button>
-</form></p>
+<div class="api{" off" if not api_on else ""}">
+  <span>{escape(api_status)}</span>
+  <form method="post" action="/tokens/api">
+    <button type="submit" class="ghost">{api_button}</button>
+  </form>
+</div>
 <h2>Мои токены</h2>
 <table>
 <tr><th>название</th><th>хвост</th><th>создан</th><th></th></tr>
@@ -603,7 +1390,6 @@ def tokens_page(
 </form>
 <p class="role">Токен показывается один раз при создании — скопируйте.
 Отозванный токен перестаёт работать мгновенно.</p>
-<p><a href="/">← назад в каталог</a></p>
 {copy_script}
 </body>
 </html>"""
@@ -612,15 +1398,53 @@ def tokens_page(
 def stats_page(
     rows: list[dict], *, can_edit: bool = False, notice: str = "",
     penalized: list[dict] | None = None,
+    whitelist: dict | None = None, greylist: str = "", blacklist: str = "",
+    grey_rows: list[dict] | None = None,
+    novision: str = "", notools: str = "", paid: str = "",
 ) -> str:
-    """Статистика по моделям: мои расходы, проверки сообщества, способности.
+    """Статистика по моделям: что есть у модели и как она служит.
 
-    Каждому видны его собственные расходы; админу сверху — суммы «все
-    люди» и секция «на паузе» с кнопкой прощения (репутация моделей).
-    Строки приходят собранными (webui), здесь только разметка.
+    Колонки ровно те, что нужны для выбора: модель (с провайдером,
+    контекстом и способностями под ней), сколько запросов, когда
+    последний и какой процент удачных. Строки приходят собранными
+    (webui), здесь только разметка.
+
+    Админу внизу — списки приставки: белый **разложен по группам**
+    способностей (text / vision / tools / vision-tools), серый
+    (персональный) с **таймером пробуждения** и чёрный.
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
-    people_column = "<th>все люди</th>" if can_edit else ""
+    whitelist = whitelist or {}
+
+    def grey_timer_html() -> str:
+        """Таблица серого списка: провайдер спит, видно сколько осталось.
+
+        Провайдер отстранён целиком (со всеми моделями); остаток
+        пересчитывается на каждый рендер, страница обновляется сама.
+        """
+        if not grey_rows:
+            return ""
+        lines = [
+            '<h3 class="listgroup">Серый список — таймер пробуждения</h3>',
+            "<table class=\"greytimer\">",
+            "<tr><th>провайдер</th><th>проснётся через</th>"
+            "<th>причина</th><th>цикл</th></tr>",
+        ]
+        for row in grey_rows:
+            minutes = int(row.get("minutes", 0))
+            if minutes > 0:
+                hours, mins = divmod(minutes, 60)
+                left = f"{hours} ч {mins} мин" if hours else f"{mins} мин"
+            else:
+                left = "уже проснулся"
+            lines.append(
+                f'<tr><td class="model">{escape(str(row.get("id") or "—"))}</td>'
+                f"<td>{left}</td>"
+                f'<td class="role">{escape(str(row.get("reason") or ""))}</td>'
+                f"<td>{int(row.get('cycle', 1))}</td></tr>"
+            )
+        lines.append("</table>")
+        return "\n".join(lines)
 
     def paused_html() -> str:
         """Секция «на паузе» — только админу, кнопка «вернуть» рядом."""
@@ -649,30 +1473,139 @@ def stats_page(
         lines.append("</table>")
         return "\n".join(lines)
 
-    def cell(row: dict) -> str:
-        tokens = row.get("tokens") or (0, 0)
-        tokens_text = f"{tokens[0]} / {tokens[1]}" if (tokens[0] or tokens[1]) else "—"
-        all_text = ""
-        if can_edit:
-            all_row = row.get("all") or {}
-            all_text = (
-                f"<td>{int(all_row.get('requests', 0))} · "
-                f"{int(all_row.get('prompt', 0))}/{int(all_row.get('completion', 0))}</td>"
+    def lists_html() -> str:
+        """Списки приставки: белый — четыре секции по группам, серый и чёрный.
+
+        Каждый список — форма с textarea: правка руками, сохранение —
+        POST, файл перечитывается мгновенно.
+        """
+        if not can_edit:
+            return ""
+
+        def one(filename: str, title: str, hint: str, text: str) -> str:
+            return (
+                f'<div class="listcard"><h3>{escape(title)}</h3>'
+                f'<p class="role">{escape(hint)}</p>'
+                f'<form method="post" action="/stats/save/{escape(filename, quote=True)}">'
+                f'<textarea name="text" rows="6" spellcheck="false" '
+                f'placeholder="имя на строке, # — комментарий">{escape(text)}</textarea>'
+                f'<button type="submit" class="primary">сохранить</button>'
+                f"</form></div>"
             )
-        caps = escape(str(row.get("caps") or "—"))
+
+        group_titles = {
+            "text": "Только текст",
+            "vision": "Vision (с картинками)",
+            "tools": "Tools (с инструментами)",
+            "vision-tools": "Vision + Tools",
+        }
+        group_hints = {
+            "text": "для role-based задач и дешёвого текста",
+            "vision": "отвечают на картинки",
+            "tools": "вызывают инструменты, coding",
+            "vision-tools": "и картинки, и инструменты",
+        }
+        white_cards = "".join(
+            one(
+                f"whitelist-{group}.txt",
+                group_titles[group],
+                group_hints[group],
+                whitelist.get(group, ""),
+            )
+            for group in ("text", "vision", "tools", "vision-tools")
+            if group in whitelist
+        )
+        if not white_cards:
+            white_cards = one("whitelist-text.txt", "Белый список", "подтверждённые успехом", "")
+
         return (
-            f'<tr><td class="model">{escape(str(row.get("model") or "—"))}</td>'
-            f'<td>{escape(str(row.get("provider") or ""))}</td>'
-            f'<td>{int(row.get("requests", 0))}{" (" + str(row.get("fails", 0)) + " ✗)" if row.get("fails") else ""}</td>'
-            f'<td class="num">{tokens_text}</td>'
-            f'<td>{int(row.get("switches", 0))}</td>'
-            f'<td class="num">{escape(str(row.get("community") or "—"))}</td>'
-            f'<td class="caps">{caps}</td>'
-            f"{all_text}</tr>"
+            '<h2>Списки приставки</h2>'
+            '<p class="role">Имя на строке, <code>#</code> — комментарий; правка '
+            'файла действует сразу, без перезапуска. Заполняются автоматикой, '
+            'руки нужны не всегда. Цепочка: белый (своей группы первым) → '
+            'неизвестный → проснувшийся серый → чёрный.</p>'
+            '<h3 class="listgroup">Белый список — по группам</h3>'
+            '<div class="lists">'
+            + white_cards
+            + "</div>"
+            + grey_timer_html()
+            + '<div class="lists">'
+            + one(
+                "greylist.txt",
+                "Серый список (ваш)",
+                "спит сутки после мягкого отказа (лимит/кредиты) — провайдер "
+                "целиком, со всеми моделями; просыпается попробовать себя; "
+                "3 цикла подряд — в чёрный",
+                greylist,
+            )
+            + one(
+                "blacklist.txt",
+                "Чёрный список",
+                "после жёсткого отказа; только последний шанс, когда больше некому",
+                blacklist,
+            )
+            + one(
+                "novision.txt",
+                "Доказано без vision",
+                "модели, доказавшие, что не умеют картинки — при запросе "
+                "с картинкой приставка их пропускает",
+                novision,
+            )
+            + one(
+                "notools.txt",
+                "Доказано без tools",
+                "модели, доказавшие, что не умеют инструменты — при запросе "
+                "с tools приставка их пропускает",
+                notools,
+            )
+            + one(
+                "paid.txt",
+                "Доказано платные",
+                "модели, вернувшие 402 при тесте — при маршрутизации идут "
+                "последними (бесплатные предпочтительнее), но не исключаются",
+                paid,
+            )
+            + "</div>"
+        )
+
+    def cell(row: dict) -> str:
+        requests = int(row.get("requests", 0))
+        fails = int(row.get("fails", 0))
+        # Процент удачных: зелёный, если всё хорошо; красный — заметно хуже.
+        if requests:
+            ok_pct = round((requests - fails) * 100 / requests)
+            cls = "ok-good" if ok_pct >= 90 else ("ok-bad" if ok_pct < 70 else "ok-warn")
+            pct = f'<span class="{cls}">{ok_pct}%</span>'
+            if fails:
+                pct += f' <span class="role">({fails} ✗)</span>'
+        else:
+            pct = '<span class="role">—</span>'
+        facts = " · ".join(
+            escape(str(row[field]))
+            for field in ("ctx", "caps")
+            if row.get(field)
+        )
+        facts_html = f'<div class="facts">{facts}</div>' if facts else ""
+        raw_last = str(row.get("last") or "")
+        if raw_last:
+            short = escape(raw_last.replace("T", " ").replace("Z", "")[:16])
+            last = (
+                f'<span data-ts="{escape(raw_last, quote=True)}">{short}</span>'
+            )
+        else:
+            last = "—"
+        model = str(row.get("model") or "—")
+        return (
+            f'<tr><td class="model">'
+            f'<span class="mname" title="{escape(model, quote=True)}">{escape(model)}</span>'
+            f'<div class="role">{escape(str(row.get("provider") or ""))}</div>{facts_html}</td>'
+            f'<td class="num">{requests}</td>'
+            f'<td class="num">{last}</td>'
+            f"<td>{pct}</td></tr>"
         )
 
     body = "\n".join(cell(row) for row in rows) or (
-        f'<tr><td colspan="{8 if can_edit else 7}" class="empty">пока нет ни моделей, ни запросов</td></tr>'
+        '<tr><td colspan="4" class="empty">пока нет ни моделей, ни запросов</td></tr>'
     )
     return f"""<!doctype html>
 <html lang="ru">
@@ -683,31 +1616,58 @@ def stats_page(
 <title>Статистика — AI-приставка</title>
 <style>
 {_style()}
-  body {{ max-width: 64rem; }}
   table {{ border-collapse: collapse; width: 100%; }}
-  th, td {{ text-align: left; padding: .35rem .5rem; border-bottom: 1px solid #8884; }}
-  th {{ font-size: .85rem; opacity: .7; }}
+  th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }}
+  th {{ font-size: .8rem; color: var(--muted); }}
   td.num {{ font-family: monospace; white-space: nowrap; }}
-  td.model {{ white-space: nowrap; }}
-  td.caps {{ opacity: .7; }}
+  /* Длинное имя модели — в одну строку с многоточием; полное видно
+     по наведению (title). Иначе on-phone строка растёт в высоту. */
+  td.model {{ max-width: 18rem; }}
+  td.model .mname {{ display: block; max-width: 100%; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }}
+  td.model .facts {{ white-space: normal; }}
+  .ok-good {{ color: var(--accent); font-weight: 600; }}
+  .ok-warn {{ color: #b08c14; font-weight: 600; }}
+  .ok-bad {{ color: var(--bad); font-weight: 600; }}
+  h2 {{ margin-bottom: .2rem; }}
+  .listgroup {{ margin: 1.2rem 0 .4rem; font-size: .95rem; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; }}
+  .lists {{ display: flex; gap: 1rem; flex-wrap: wrap; }}
+  .listcard {{ flex: 1 1 18rem; background: var(--card); border: 1px solid var(--line);
+    border-radius: 1rem; padding: .7rem .9rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }}
+  .listcard h3 {{ margin: 0 0 .1rem; font-size: .95rem; }}
+  .listcard textarea {{ width: 100%; font-family: ui-monospace, monospace;
+    font-size: .82rem; border: 1px solid var(--line); border-radius: .5rem;
+    background: var(--bg); color: var(--text); padding: .5rem; resize: vertical; }}
+  .listcard button {{ margin-top: .5rem; }}
+  .listcard pre.listfile {{ background: var(--bg); border: 1px solid var(--line);
+    border-radius: .6rem; padding: .5rem .7rem; font-size: .85rem;
+    white-space: pre-wrap; word-break: break-word; margin: .4rem 0 0; }}
+  /* Таблица таймера серого списка: кто спит и сколько осталось. */
+  table.greytimer {{ margin: .6rem 0 1rem; border-collapse: collapse; width: 100%; }}
+  table.greytimer th, table.greytimer td {{ text-align: left; padding: .35rem .55rem;
+    border-bottom: 1px solid var(--line); font-size: .88rem; }}
+  table.greytimer th {{ font-size: .78rem; color: var(--muted); }}
 </style>
 </head>
-<h1>Статистика</h1>
+<body>
 {_nav(can_edit=can_edit)}
+<h1>Статистика</h1>
 {notice_html}
-<p class="role">Твои расходы по моделей; «сообщество» — сколько людей смогли
-пользоваться моделью. Обновляется само раз в 30 секунд.</p>
+<div class="card">
 <table>
-<tr><th>модель</th><th>провайдер</th><th>мои запросы</th><th>токены в / вы</th><th>переключений</th><th>сообщество</th><th>способности</th>{people_column}</tr>
+<tr><th>модель</th><th>запросов</th><th>последний</th><th>удачных</th></tr>
 {body}
 </table>
+</div>
+{lists_html()}
 {paused_html()}
-<p><a href="/">← назад в каталог</a></p>
+{LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
 
 
-def token_created_page(token: str, name: str) -> str:
+def token_created_page(token: str, name: str, *, can_edit: bool = False) -> str:
     """Один раз показать новый токен: скопируй и уходи."""
     return f"""<!doctype html>
 <html lang="ru">
@@ -717,100 +1677,230 @@ def token_created_page(token: str, name: str) -> str:
 <title>Новый токен — AI-приставка</title>
 <style>
 {_style()}
-  body {{ max-width: 40rem; }}
   input {{ width: 100%; font-family: monospace; }}
 </style>
 </head>
+{_nav(can_edit=can_edit)}
 <h1>Новый токен: {escape(name)}</h1>
+<div class="card">
 <input readonly value="{escape(token, quote=True)}" onclick="this.select()">
 <p class="role">Скопируйте сейчас: показывается один раз. В приложении укажите
 адрес приставки <code>/v1</code> и этот токен в Authorization.</p>
+</div>
 <p><a href="/tokens">← к токенам</a></p>
 </body>
 </html>"""
 
 
 def _log_row(item: dict) -> str:
-    """Строка журнала: событие плюс тела запроса/ответа, если записаны."""
-    extra = ""
-    for key, label in (("req", "запрос"), ("resp", "ответ")):
+    """Строка журнала: тип, статус, событие плюс сворачиваемые тела.
+
+    Тела показываются целиком (без обрезки) в тёмной моноширинной
+    карточке, но **свёрнуты по умолчанию** — журнал читается как
+    журнал, а не как стена ответов; раскрываются по клику. `<details>` —
+    чистый HTML, работает без JavaScript. Base64-вставки вырезаются
+    ещё при записи события (service/eventlog.py).
+    Статус (HTTP 200/402/500) — цветной бейдж рядом с типом, чтобы
+    у решения было видно основание.
+    """
+    kind = str(item.get("kind") or "")
+    kind_classes = {
+        "чат": "badge-on", "тест": "badge-on", "модель": "badge-mine",
+        "ключ": "badge-mine", "токен": "badge-mine", "пауза": "badge-dead",
+        "способности": "badge-mine", "списки": "badge-off",
+        "решение": "badge-mine",
+    }
+    kind_html = (
+        f'<span class="badge {kind_classes.get(kind, "badge-off")}">{escape(kind)}</span>'
+    )
+    status = item.get("status")
+    status_html = ""
+    if isinstance(status, int) and status:
+        status_cls = "badge-on" if status < 400 else "badge-dead"
+        status_html = f' <span class="badge {status_cls}">{status}</span>'
+    bodies = ""
+    for key, label in (("req", "Тело запроса"), ("resp", "Тело ответа")):
         value = str(item.get(key) or "")
         if value:
-            extra += (
-                f'<div class="body" title="{escape(value, quote=True)}">'
-                f"{escape(label)}: {escape(value[:300])}</div>"
+            bodies += (
+                f'<div class="payload-label">→ {escape(label)}:</div>'
+                f'<pre class="payload-body">{escape(value)}</pre>'
             )
+    if bodies:
+        # По умолчанию свёрнуто: тело есть, но журнал не раздувает вид.
+        bodies = (
+            '<details class="payload"><summary>показать тело</summary>'
+            f'<div class="payload-card">{bodies}</div></details>'
+        )
+    provider = str(item.get("provider") or "")
+    provider_html = (
+        f'<span class="role"> · {escape(provider)}</span>' if provider else ""
+    )
+    # Доп. поля события (путь страницы, адрес провайдера, модель…) —
+    # мелкими подписями под текстом: из строки должно быть понятно всё.
+    known = {"ts", "kind", "user", "text", "req", "resp", "status", "provider"}
+    extras = [
+        f'<span class="meta">{escape(str(key))}: {escape(_short(value))}</span>'
+        for key, value in item.items()
+        if key not in known and value not in (None, "")
+    ]
+    extras_html = f'<div class="meta-line">{" ".join(extras)}</div>' if extras else ""
     return (
-        f'<tr><td class="ts">{escape(str(item.get("ts") or "")[11:19])}</td>'
-        f'<td class="kind">{escape(str(item.get("kind") or ""))}</td>'
-        f'<td>{escape(str(item.get("user") or ""))}</td>'
-        f'<td class="text">{escape(str(item.get("text") or ""))}{extra}</td></tr>'
+        f'<tr><td class="ts" data-ts="{escape(str(item.get("ts") or ""), quote=True)}">'
+        f'{escape(str(item.get("ts") or "").replace("T", " ").replace("Z", ""))}</td>'
+        f'<td class="kind">{kind_html}{status_html}</td>'
+        f'<td class="user" title="{escape(str(item.get("user") or ""), quote=True)}">'
+        f'{escape(str(item.get("user") or ""))}</td>'
+        f'<td class="text">{escape(str(item.get("text") or ""))}{provider_html}'
+        f'{extras_html}{bodies}</td></tr>'
+    )
+
+
+def _short(value: object, limit: int = 120) -> str:
+    """Значение доп. поля — компактно, длинное с многоточием."""
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _log_summary(events: list[dict]) -> str:
+    """Сводка сверху журнала: что за события лежат и с кем.
+
+    Считается по тому, что показано (последние события журнала) —
+    честнее выдумывать период. Пустой журнал — пустая строка.
+    """
+    if not events:
+        return ""
+    kinds: dict[str, int] = {}
+    people: dict[str, int] = {}
+    for item in events:
+        kind = str(item.get("kind") or "?")
+        kinds[kind] = kinds.get(kind, 0) + 1
+        user = str(item.get("user") or "—").strip() or "—"
+        people[user] = people.get(user, 0) + 1
+    kind_chips = " ".join(
+        f'<span class="badge badge-off">{escape(name)} {count}</span>'
+        for name, count in sorted(kinds.items(), key=lambda kv: -kv[1])
+    )
+    top_people = sorted(people.items(), key=lambda kv: -kv[1])[:8]
+    people_chips = " ".join(
+        f'<span class="badge badge-mine">{escape(name)} {count}</span>'
+        for name, count in top_people
+    )
+    span = (
+        f'{escape(str(events[-1].get("ts") or "").replace("T", " ").replace("Z", ""))}'
+        f' — {escape(str(events[0].get("ts") or "").replace("T", " ").replace("Z", ""))}'
+    )
+    return (
+        f'<div class="summary">'
+        f'<p class="role">Показано событий: <b>{len(events)}</b> · период (UTC): {span}</p>'
+        f'<p>{kind_chips}</p>'
+        f'<p class="role">С кем:</p><p>{people_chips}</p>'
+        f"</div>"
     )
 
 
 def logs_page(
     events: list[dict],
     *,
-    autoscroll: bool = False,
-    bodies: bool = False,
     notice: str = "",
 ) -> str:
-    """Журнал событий: таблица, новые сверху, обновление раз в 5 секунд.
+    """Журнал событий: таблица, новые сверху, тела — сворачиванные.
 
-    Без JavaScript страница работает: обновление — meta-refresh; кнопка
-    autoscroll кладёт флаг в cookie, а сам скролл к свежим (наверх) делает
-    крошечный скрипт — без него остаётся обычное поведение браузера.
-    ``bodies`` — пишутся ли тела запросов (кнопка переключает до рестарта).
+    Тела запросов/ответов лежат в тёмной карточке **свёрнутыми по
+    умолчанию** (`<details>`, работает и без JavaScript) — читать
+    журнал не мешают, открываются по клику. Тела пишутся **всегда**
+    (переключателя нет, журнал видит только администратор), но
+    base64-вставки вырезаются при записи. Автообновление раз в
+    10 секунд пропускает моменты, когда открыто тело или человек
+    занят страницей — иначе чтение рвёт прыжком.
     """
     rows = "\n".join(_log_row(item) for item in events) or (
         '<tr><td colspan="4" class="empty">событий пока нет</td></tr>'
     )
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
-    bodies_note = (
-        '<p class="notice">тела запросов и ответов пишутся на диск — '
-        'не оставляйте включённым постоянно: это чужая переписка</p>'
-        if bodies
-        else ""
-    )
+    summary_html = _log_summary(events)
     return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="5">
 <title>Журнал — AI-приставка</title>
 <style>
 {_style()}
-  body {{ max-width: 62rem; }}
   table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
-  th, td {{ text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #8884; }}
+  th, td {{ text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); }}
+  th {{ font-size: .8rem; color: var(--muted); }}
   td.ts {{ white-space: nowrap; font-family: monospace; }}
   td.kind {{ white-space: nowrap; }}
-  td.text {{ word-break: break-word; }}
-  td.body {{ font-family: monospace; font-size: .8em; opacity: .7; word-break: break-all; white-space: pre-wrap; }}
+  /* Email — в одну строку с многоточием, полное значение по наведению:
+     иначе адрес рвётся посреди слова и строка вырастает в три ряда. */
+  td.user {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 13rem; }}
+  td.text {{ overflow-wrap: break-word; }}
+  /* Сводка сверху: период, виды событий, участники. */
+  .summary {{ background: var(--accent-soft); border-radius: .7rem;
+    padding: .55rem .8rem; margin-bottom: .8rem; }}
+  .summary p {{ margin: .25rem 0; }}
+  .summary .badge {{ margin-right: .3rem; }}
+  /* Доп. поля события — мелкими подписями под текстом. */
+  .meta-line {{ margin-top: .2rem; }}
+  .meta {{ display: inline-block; font-size: .76rem; color: var(--muted);
+    background: var(--card); border: 1px solid var(--line); border-radius: .4rem;
+    padding: .05rem .4rem; margin: .1rem .25rem .1rem 0; }}
+  /* На телефоне строка журнала складывается в карточку — не лезет за
+     экран и не требует горизонтального скролла. */
+  @media (max-width: 52rem) {{
+    table thead {{ display: none; }}
+    table tr {{ display: block; border: 1px solid var(--line);
+      border-radius: .7rem; margin: .5rem 0; padding: .3rem .6rem;
+      background: var(--card); }}
+    table td {{ display: block; border: none; padding: .15rem 0; }}
+    td.user {{ max-width: none; }}
+    td.ts, td.kind {{ display: inline-block; margin-right: .6rem; }}
+  }}
+  /* Сворачиваемое тело: тёмная карточка с моноширинным текстом. */
+  details.payload {{ margin-top: .4rem; }}
+  details.payload summary {{ cursor: pointer; color: var(--muted); font-size: .8rem;
+    user-select: none; list-style: none; text-align: right; }}
+  details.payload summary::before {{ content: "⌄ "; }}
+  details.payload[open] summary::before {{ content: "⌃ "; }}
+  details.payload summary:hover {{ color: var(--accent); }}
+  .payload-card {{ background: #101a24; border-radius: .7rem; padding: .7rem .9rem;
+    margin-top: .35rem; }}
+  .payload-label {{ color: #34d399; font: 600 .78rem/1.6 ui-monospace, monospace; }}
+  .payload-body {{ color: #d7e3ee; font: .78rem/1.55 ui-monospace, monospace;
+    white-space: pre-wrap; word-break: break-word; margin: 0 0 .6rem; }}
 </style>
 </head>
-<h1>Журнал</h1>
+<body>
 {_nav(can_edit=True)}
+<h1>Журнал</h1>
 {notice_html}
-<p><form method="post" action="/logs/autoscroll" style="display:inline">
-  <button type="submit" class="ghost">автоскролл: {"вкл" if autoscroll else "выкл"}</button>
-</form>
-<form method="post" action="/logs/bodies" style="display:inline">
-  <button type="submit" class="ghost">тела запросов: {"вкл" if bodies else "выкл"}</button>
-</form>
-<form method="post" action="/logs/clear" style="display:inline">
+{summary_html}
+<p><form method="post" action="/logs/clear" style="display:inline">
   <button type="submit" class="ghost danger">очистить</button>
 </form>
-<span class="role">обновляется само раз в 5 секунд</span></p>
-{bodies_note}
+<span class="role">обновляется само раз в 10 секунд (пока ты не читаешь и не прокручиваешь),
+тела запросов и ответов свёрнуты — раскрываются по клику</span></p>
+<div class="card">
 <table>
 <tr><th>время</th><th>тип</th><th>кто</th><th>событие</th></tr>
 {rows}
 </table>
+</div>
 <script>
-if (document.cookie.indexOf("ai_bridge_autoscroll=on") >= 0) window.scrollTo(0, 0);
+// Автообновление: раз в 10 секунд, но не пока открыто тело или человек
+// занят страницей (клик, прокрутка, мышь) — иначе чтение рвёт прыжком.
+var busy = false;
+["click", "scroll", "keydown", "mousemove"].forEach(function (ev) {{
+  window.addEventListener(ev, function () {{ busy = true; }}, {{ passive: true }});
+}});
+setTimeout(function tick() {{
+  if (!busy && !document.querySelector("details.payload[open]")) location.reload();
+  else {{ busy = false; setTimeout(tick, 5000); }}
+}}, 10000);
 </script>
+{LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
 
@@ -850,21 +1940,616 @@ def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> 
 <title>Пользователи — AI-приставка</title>
 <style>
 {_style()}
-  table {{ border-collapse: collapse; width: 100%; max-width: 44rem; }}
-  th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }}
+  th {{ font-size: .8rem; color: var(--muted); }}
 </style>
 </head>
-<h1>Пользователи</h1>
+<body>
 {_nav(can_edit=True)}
+<h1>Пользователи</h1>
 {notice_html}
 <p class="role">Регистрация открыта; защита — модерация: заблокированный
 не пускается ни одной приставкой (проверка перед каждым запросом),
 удалённый теряет аккаунт и своё пространство на этом устройстве.</p>
+<div class="card">
 <table>
 <tr><th>почта</th><th>роль</th><th>последний вход</th><th></th></tr>
 {rows_html}
 </table>
-<p><a href="/">← назад в каталог</a></p>
+</div>
+</body>
+</html>"""
+
+
+def rules_page(
+    rules: dict,
+    providers: list[dict],
+    *,
+    notice: str = "",
+) -> str:
+    """Страница «Правила» (только админ): условие → действие.
+
+    Два блока: условия в **ответах** провайдеров (у каждого провайдера
+    свои, условие составное: строка в запросе + строка в ответе + статус)
+    и строки в **запросах** клиентов (глобальные — по ним роутер
+    выбирает модель с нужной способностью). Каждое правило можно
+    посмотреть, изменить прямо в строке и убрать.
+
+    ``rules`` — {"response": [...], "request": [...]}.
+    """
+    from storage.rules import REQUEST_ACTIONS, RESPONSE_ACTIONS
+
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+
+    def options(actions: dict, selected: str = "") -> str:
+        return "".join(
+            f'<option value="{code}"{" selected" if code == selected else ""}>'
+            f"{escape(label)}</option>"
+            for code, label in actions.items()
+        )
+
+    def provider_options(selected: str) -> str:
+        return "".join(
+            f'<option value="{escape(str(entry["id"]), quote=True)}"'
+            f'{" selected" if str(entry["id"]).lower() == selected.lower() else ""}>'
+            f'{escape(str(entry.get("name") or entry["id"]))}</option>'
+            for entry in providers
+        )
+
+    # --- блок «условия в ответе»: правило — строка таблицы с полями.
+    # Форма лежит в первой ячейке, поля привязываются атрибутом form=
+    # (HTML5) — так форма может охватывать всю строку без вложенности.
+    response_rows = []
+    for index, rule in enumerate(rules.get("response") or []):
+        provider = str(rule.get("provider") or "")
+        action = str(rule.get("action") or "")
+        status = rule.get("status")
+        fid = f"resp{index}"
+        response_rows.append(
+            f"<tr>"
+            f'<td><form id="{fid}" method="post" action="/rules/edit"></form>'
+            f'<input type="hidden" name="where" form="{fid}" value="response">'
+            f'<input type="hidden" name="index" form="{fid}" value="{index}">'
+            f'<select name="provider" form="{fid}">{provider_options(provider)}</select></td>'
+            f'<td><input name="req" form="{fid}" '
+            f'value="{escape(str(rule.get("req") or ""), quote=True)}" '
+            f'placeholder="в запросе (можно пусто)"></td>'
+            f'<td><input name="text" form="{fid}" '
+            f'value="{escape(str(rule.get("text") or ""), quote=True)}" '
+            f'placeholder="в ответе"{" required" if not status else ""}></td>'
+            f'<td class="rstatus"><input name="status" form="{fid}" '
+            f'inputmode="numeric" '
+            f'value="{escape(str(status if status is not None else ""))}" '
+            f'placeholder="статус" title="код ответа, например 200"></td>'
+            f'<td><select name="action" form="{fid}">'
+            f"{options(RESPONSE_ACTIONS, action)}</select></td>"
+            f'<td class="rbtns">'
+            f'<button type="submit" form="{fid}">сохранить</button> '
+            f'<button type="submit" form="{fid}" formaction="/rules/drop" '
+            f'class="ghost danger">убрать</button></td>'
+            f"</tr>"
+        )
+    response_html = "\n".join(response_rows) or (
+        '<tr><td colspan="6" class="empty">правил пока нет — работает '
+        "встроенное распознавание по кодам ошибок</td></tr>"
+    )
+
+    # --- блок «строки в запросе»: строка + действие (глобально)
+    request_rows = []
+    for index, rule in enumerate(rules.get("request") or []):
+        action = str(rule.get("action") or "")
+        fid = f"req{index}"
+        request_rows.append(
+            f"<tr>"
+            f'<td><form id="{fid}" method="post" action="/rules/edit"></form>'
+            f'<input type="hidden" name="where" form="{fid}" value="request">'
+            f'<input type="hidden" name="index" form="{fid}" value="{index}">'
+            f'<input name="text" form="{fid}" '
+            f'value="{escape(str(rule.get("text") or ""), quote=True)}" '
+            f'placeholder="строка в запросе" required></td>'
+            f'<td><select name="action" form="{fid}">'
+            f"{options(REQUEST_ACTIONS, action)}</select></td>"
+            f'<td class="rbtns">'
+            f'<button type="submit" form="{fid}">сохранить</button> '
+            f'<button type="submit" form="{fid}" formaction="/rules/drop" '
+            f'class="ghost danger">убрать</button></td>'
+            f"</tr>"
+        )
+    request_html = "\n".join(request_rows) or (
+        '<tr><td colspan="3" class="empty">правил пока нет — запросы '
+        "распознаются встроенными строками</td></tr>"
+    )
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Правила — AI-приставка</title>
+<style>
+{_style()}
+  table {{ border-collapse: collapse; width: 100%; margin: .5rem 0 1.2rem; }}
+  th, td {{ text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--line); }}
+  th {{ font-size: .8rem; color: var(--muted); }}
+  table input, table select {{ padding: .3rem .45rem; border: 1px solid var(--line);
+    border-radius: .45rem; background: var(--bg); color: var(--text);
+    font-size: .85rem; max-width: 100%; }}
+  table input[name="text"], table input[name="req"] {{ min-width: 11rem;
+    font-family: ui-monospace, monospace; }}
+  td.rstatus {{ width: 5.5rem; }}
+  td.rstatus input {{ width: 4.5rem; font-family: ui-monospace, monospace; }}
+  td.rbtns {{ white-space: nowrap; }}
+  td.rbtns button {{ font-size: .82rem; padding: .3rem .55rem; }}
+  h2 {{ margin: 1.3rem 0 .3rem; font-size: 1.05rem; }}
+  .addform {{ display: flex; gap: .5rem; flex-wrap: wrap; align-items: end;
+    background: var(--card); border: 1px solid var(--line); border-radius: .8rem;
+    padding: .6rem .8rem; }}
+  .addform label {{ display: flex; flex-direction: column; gap: .2rem;
+    font-size: .78rem; color: var(--muted); }}
+  .addform input, .addform select {{ padding: .35rem .5rem;
+    border: 1px solid var(--line); border-radius: .5rem; background: var(--bg);
+    color: var(--text); }}
+  .addform input {{ min-width: 10rem; }}
+  .legend {{ background: var(--card); border: 1px solid var(--line);
+    border-radius: .8rem; padding: .6rem .9rem; margin: .6rem 0; }}
+  .legend ul {{ margin: .3rem 0 0; padding-left: 1.2rem; }}
+  .legend li {{ margin: .15rem 0; font-size: .88rem; }}
+</style>
+</head>
+<body>
+{_nav(can_edit=True)}
+<h1>Правила</h1>
+{notice_html}
+<p class="role">Правило срабатывает, когда <b>все указанные части условия
+совпали разом</b>. Правило админа сильнее встроенного решения: например,
+сервер вернул 429 (встроенное — «серый»), а ваше правило говорит «чёрный»
+→ чёрный. Срабатывают <b>все</b> подошедшие правила по порядку — одной
+строкой можно и выучить способность, и в белый список положить.
+Каждое срабатывание видно в журнале.</p>
+
+<div class="legend">
+<b>Что делают действия:</b>
+<ul>
+<li><b>в серый список (24 ч)</b> — провайдер спит сутки со всеми моделями,
+потом пробует себя; три цикла подряд — уходит в чёрный.</li>
+<li><b>в чёрный список</b> — эта модель (провайдер/модель) становится
+последним шансом, когда больше некому.</li>
+<li><b>в белый список</b> — подтвердить, что модель рабочая: она будет
+служить первой.</li>
+<li><b>переключить сейчас</b> — ответ не отдавать, взять другого провайдера.</li>
+<li><b>списки не трогать (только журнал)</b> — заметить строку и ничего
+не менять: понаблюдайте, сколько раз она попадается, потом назначьте
+настоящее действие.</li>
+<li><b>выучить: умеет / не умеет (картинки, инструменты)</b> — записать
+способность модели: «умеет» — приставка начнёт давать ей картинки
+(инструменты), «не умеет» — больше не будет давать.</li>
+</ul>
+</div>
+
+<h2>Условия в ответах провайдеров</h2>
+<p class="role">Строка в запросе — необязательное условие (например
+<code>image_url</code>): правило сработает, только если запрос её содержит.
+Строка в ответе и статус — хотя бы одно из двух обязательно.
+Пустое поле — условие не проверяется. Правка прямо в строке:
+изменил — «сохранить»; «убрать» — удалить.</p>
+<div class="card">
+<table>
+<tr><th>провайдер</th><th>строка в запросе</th><th>строка в ответе</th>
+<th>статус</th><th>действие</th><th></th></tr>
+{response_html}
+</table>
+<form method="post" action="/rules/add" class="addform">
+  <input type="hidden" name="where" value="response">
+  <label>провайдер
+    <select name="provider" required>{provider_options("")}</select>
+  </label>
+  <label>строка в запросе (необязательно)
+    <input name="req" placeholder="image_url">
+  </label>
+  <label>строка в ответе (или статус)
+    <input name="text" placeholder="insufficient credits">
+  </label>
+  <label>статус (или строка)
+    <input name="status" inputmode="numeric" placeholder="200">
+  </label>
+  <label>действие
+    <select name="action">{options(RESPONSE_ACTIONS)}</select>
+  </label>
+  <button type="submit" class="primary">добавить</button>
+</form>
+</div>
+
+<h2>Строки в запросах клиентов</h2>
+<p class="role">Глобальные: по строке в запросе приставка понимает, что
+запросу нужна модель с способностью, и выбирает её (белый список →
+неизвестные → проснувшийся серый → чёрный последним шансом).
+Строки <code>image_url</code>, <code>input_image</code>, <code>tools</code>
+и <code>tool_choice</code> распознаются <b>автоматически</b> — это правила
+добавлять не нужно. Здесь добавляйте <b>дополнительные</b> маркеры, если
+ваш клиент или провайдер присылает их в другом виде
+(например <code>base64-image</code> или <code>нарисуй</code>).</p>
+<div class="card">
+<table>
+<tr><th>строка</th><th>действие</th><th></th></tr>
+{request_html}
+</table>
+<form method="post" action="/rules/add" class="addform">
+  <input type="hidden" name="where" value="request">
+  <label>строка (регистр не важен)
+    <input name="text" placeholder="image_url" required>
+  </label>
+  <label>действие
+    <select name="action">{options(REQUEST_ACTIONS)}</select>
+  </label>
+  <button type="submit" class="primary">добавить</button>
+</form>
+</div>
+</body>
+</html>"""
+
+
+def _answer_formatted(row: dict) -> str:
+    """Всё тело ответа, отформатированное: JSON с отступами,
+    а если тело не JSON — как markdown (теги отрендерены безопасно)."""
+    body = str(row.get("resp") or "")
+    try:
+        inner = f'<pre class="answer-json">{escape(json.dumps(json.loads(body), ensure_ascii=False, indent=2))}</pre>'
+    except (ValueError, TypeError):
+        inner = f'<div class="answer-md">{render_markdown(body)}</div>'
+    return (
+        '<div class="answer">'
+        '<button type="button" class="copy-all">копировать</button>'
+        f"{inner}</div>"
+    )
+
+
+def _answer_raw(row: dict) -> str:
+    """Точное тело ответа, как пришло."""
+    return (
+        '<div class="answer">'
+        '<button type="button" class="copy-all">копировать</button>'
+        f'<pre class="answer-raw">{escape(str(row.get("resp") or ""))}</pre>'
+        "</div>"
+    )
+
+
+def autotest_results_html(
+    results: list,
+    *,
+    provider: str = "",
+    timestamp: str = "",
+    prompt: str = "",
+    running: bool = False,
+) -> str:
+    """Секция результатов автотеста: заголовок и таблица.
+
+    ``running=True`` — показывает частичные результаты текущего прогона.
+    Время в ячейках несёт ``data-ts`` (UTC) — скрипт страницы
+    переписывает его в локальное время зрителя.
+    """
+    if not results:
+        if running:
+            return '<p class="role">Результаты появятся здесь по ходу прогона…</p>'
+        return ""
+    ok = sum(1 for r in results if r.get("status") == "ok")
+    total = len(results)
+    heading = "Результаты прогона (идёт…)" if running else "Результаты последнего прогона"
+    ts_html = (
+        f'<span data-ts="{escape(timestamp, quote=True)}">'
+        f'{escape(str(timestamp).replace("T", " ").replace("Z", ""))}</span>'
+        if timestamp
+        else "—"
+    )
+    rows = []
+    for r in results:
+        status = r.get("status", "?")
+        badge = "✅" if status == "ok" else "❌"
+        model = escape(str(r.get("model") or "—"))
+        test = escape(str(r.get("test") or "—"))
+        http = r.get("http_status", 0)
+        dur = r.get("duration", 0)
+        ts = str(r.get("ts") or "").replace("T", " ").replace("Z", "")
+        reaction = escape(str(r.get("reaction") or "—"))
+        used_tool = r.get("used_tool")
+        tool_hint = ""
+        if used_tool is True:
+            tool_hint = ' <span class="badge badge-on">вызвала tool</span>'
+        elif used_tool is False:
+            tool_hint = ' <span class="role">(tool не вызван)</span>'
+        rows.append(
+            f'<tr><td class="ts" data-ts="{escape(str(r.get("ts") or ""), quote=True)}">{escape(ts)}</td>'
+            f'<td class="model">{model}</td><td>{test}</td>'
+            f'<td class="status">{badge} HTTP {http} · {dur}s{tool_hint}</td>'
+            f'<td class="cell">{_answer_formatted(r)}</td>'
+            f'<td class="cell">{_answer_raw(r)}</td>'
+            f'<td class="reaction">{reaction}</td></tr>'
+        )
+    return (
+        f'<h2>{heading}</h2>'
+        f'<p class="role">Провайдер: {escape(provider or "—")} · '
+        f'запуск: {ts_html} · '
+        f'прошли: {ok}/{total} · время местное</p>'
+        f'<p class="role">prompt: <code>{escape(prompt or "—")}</code></p>'
+        f'<div class="card"><table class="results">'
+        f'<tr><th>время</th><th>модель</th><th>тест</th><th>статус</th>'
+        f'<th>форматированный</th><th>raw</th><th>реакция роутера</th></tr>'
+        + "\n".join(rows) +
+        f"</table></div>"
+    )
+
+
+def autotest_page(
+    providers: list[dict],
+    *,
+    last_run: dict | None = None,
+    progress: dict | None = None,
+    notice: str = "",
+    can_edit: bool = False,
+) -> str:
+    """Автотесты моделей провайдера (только админ).
+
+    Форма: выбор провайдера, картинка (файл или URL), prompt, чекбоксы
+    тестов, галочка «записать результаты». Результаты последнего прогона
+    показываются таблицей ниже, с телами запроса/ответа по клику.
+    """
+    notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
+    progress = progress or {}
+    running = bool(progress.get("running"))
+    last_run = last_run or {"provider": "", "timestamp": "", "results": []}
+    results = last_run.get("results") or []
+    provider_id = str(last_run.get("provider") or "")
+
+    def results_html() -> str:
+        """Секция результатов в обёртке, которую можно заменить живьём."""
+        return (
+            '<div id="results-wrap">' + autotest_results_html(
+                results,
+                provider=provider_id,
+                timestamp=str(last_run.get("timestamp") or ""),
+                prompt=str(last_run.get("prompt") or ""),
+                running=running,
+            ) + "</div>"
+        )
+
+    def _provider_option(entry: dict) -> str:
+        mark = "" if entry.get("enabled") else " · выключен"
+        return (
+            f'<option value="{escape(str(entry["id"]), quote=True)}">'
+            f'{escape(str(entry.get("name") or entry["id"]))}{mark}</option>'
+        )
+
+    provider_options = "".join(
+        _provider_option(entry)
+        for entry in sorted(
+            providers,
+            key=lambda e: (not e.get("enabled"), str(e.get("name") or e.get("id"))),
+        )
+    )
+
+    def progress_html() -> str:
+        """Блок хода теста: что идёт сейчас, сколько сделано из всего."""
+        if not running:
+            return ""
+        return (
+            '<div class="progress-block" id="progress">'
+            '<h2>Ход теста</h2>'
+            '<p id="prog-text">Идёт: '
+            + escape(str(progress.get("provider") or ""))
+            + ' · <span id="prog-current">—</span></p>'
+            '<progress id="prog-bar" max="100" value="0"></progress>'
+            '<p class="role" id="prog-count">0 из 0 (0%)</p>'
+            '<form method="post" action="/autotest/stop" style="margin-top:.3rem">'
+            '<button type="submit" class="ghost danger" id="stop-btn">остановить тест</button>'
+            '</form>'
+            '</div>'
+        )
+
+    def progress_script() -> str:
+        """Опрос статуса раз в секунду: фаза, проценты, живые результаты."""
+        if not running:
+            return ""
+        return """<script>
+(function(){
+  var current=document.getElementById("prog-current");
+  var bar=document.getElementById("prog-bar");
+  var count=document.getElementById("prog-count");
+  var text=document.getElementById("prog-text");
+  var settled=false;
+  var prevDone=-1;
+  function fetchResults(){
+    var wrap=document.getElementById("results-wrap");
+    if(!wrap) return;
+    fetch("/autotest/results",{cache:"no-store"})
+      .then(function(r){return r.text();})
+      .then(function(html){
+        wrap.innerHTML=html;
+        if(window.localTimes) window.localTimes();
+        bindCopies(wrap);
+      });
+  }
+  function bindCopies(scope){
+    scope.querySelectorAll(".copy-all").forEach(function(copy){
+      var box=copy.closest(".answer");
+      var pre=box&&box.querySelector("pre, .answer-md");
+      if(!pre||!navigator.clipboard) return;
+      copy.addEventListener("click", function(){
+        navigator.clipboard.writeText(pre.textContent).then(function(){
+          copy.textContent="скопировано";
+          setTimeout(function(){copy.textContent="копировать";},1200);
+        });
+      });
+    });
+  }
+  function poll(){
+    fetch("/autotest/status",{cache:"no-store"}).then(function(r){return r.json();})
+      .then(function(s){
+        if(s.running){
+          if(!s.total){
+            if(text) text.textContent="Получаю список моделей провайдера…";
+            if(current) current.textContent="—";
+            if(count) count.textContent="список ещё не получен";
+          } else {
+            if(current) current.textContent=(s.model||"—")+" / "+(s.test||"—");
+            if(text) text.textContent="Идёт: "+s.provider;
+            var pct=Math.round(s.done*100/s.total);
+            if(bar) bar.value=pct;
+            if(count) count.textContent=s.done+" из "+s.total+" ("+pct+"%)";
+          }
+          if(s.stop){
+            if(text) text.textContent="Останавливается после текущего теста…";
+            var btn=document.getElementById("stop-btn");
+            if(btn) btn.disabled=true;
+          }
+          if(s.done!==prevDone && s.done>0){
+            fetchResults();
+            prevDone=s.done;
+          }
+          setTimeout(poll,1000);
+        } else if(!settled){
+          settled=true;
+          if(s.done!==prevDone && s.done>0){ fetchResults(); prevDone=s.done; }
+          setTimeout(function(){ location.reload(); }, 500);
+        }
+      }).catch(function(){ setTimeout(poll,2000); });
+  }
+  poll();
+})();
+</script>"""
+    def answer_script() -> str:
+        """Кнопки копирования: всё тело ответа и блоки кода."""
+        return """<script>
+(function(){
+  document.querySelectorAll(".answer").forEach(function(box){
+    var copy = box.querySelector(".copy-all");
+    var pre = box.querySelector("pre, .answer-md");
+    if (copy && pre && navigator.clipboard) {
+      copy.addEventListener("click", function(){
+        navigator.clipboard.writeText(pre.textContent).then(function(){
+          copy.textContent = "скопировано";
+          setTimeout(function(){ copy.textContent = "копировать"; }, 1200);
+        });
+      });
+    }
+    box.querySelectorAll(".copy-code").forEach(function(btn){
+      btn.addEventListener("click", function(){
+        var code = btn.parentElement.querySelector("code");
+        if (!code || !navigator.clipboard) return;
+        navigator.clipboard.writeText(code.textContent).then(function(){
+          btn.textContent = "скопировано";
+          setTimeout(function(){ btn.textContent = "копировать"; }, 1200);
+        });
+      });
+    });
+  });
+})();
+</script>"""
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Автотесты — AI-приставка</title>
+<style>
+{_style()}
+  body {{ max-width: 100%; }}
+  table {{ border-collapse: collapse; width: 100%; }}
+  th, td {{ text-align: left; padding: .4rem .55rem; border-bottom: 1px solid var(--line); }}
+  th {{ font-size: .8rem; color: var(--muted); }}
+  td.model {{ white-space: nowrap; font-family: monospace; font-size: .85rem; }}
+  .addform {{ display: flex; gap: .5rem; flex-wrap: wrap; align-items: end;
+    background: var(--card); border: 1px solid var(--line); border-radius: .8rem;
+    padding: .6rem .8rem; }}
+  .addform label {{ display: flex; flex-direction: column; gap: .2rem;
+    font-size: .78rem; color: var(--muted); }}
+  .addform input, .addform textarea, .addform select {{ padding: .35rem .5rem;
+    border: 1px solid var(--line); border-radius: .5rem; background: var(--bg);
+    color: var(--text); }}
+  .addform textarea {{ min-width: 20rem; min-height: 3rem; font-family: monospace; }}
+  .addform input[type=file] {{ min-width: 16rem; }}
+  table.results td.cell, table.results td.reaction {{ vertical-align: top;
+    max-width: 30rem; }}
+  table.results td.reaction {{ min-width: 12rem; font-size: .85rem; }}
+  table.results td.status {{ white-space: nowrap; }}
+  .answer {{ position: relative; margin: 0; }}
+  .answer .copy-all {{ position: absolute; top: .3rem; right: .3rem; z-index: 1;
+    font-size: .72rem; padding: .15rem .5rem; border-radius: .5rem; }}
+  .answer-json, .answer-raw {{ white-space: pre-wrap; overflow-wrap: anywhere;
+    background: var(--bg); border: 1px solid var(--line); border-radius: .6rem;
+    padding: .5rem .7rem; margin: 0; font: .78rem/1.5 ui-monospace, monospace;
+    max-height: 24rem; overflow: auto; }}
+  .answer-md {{ background: var(--bg); border: 1px solid var(--line);
+    border-radius: .6rem; padding: .5rem .7rem; overflow-wrap: anywhere; }}
+  .answer-md p, .answer-md ul, .answer-md ol {{ margin: .3rem 0; }}
+  .answer-md h1, .answer-md h2, .answer-md h3 {{ margin: .4rem 0 .2rem;
+    font-size: 1rem; }}
+  .answer-md code {{ background: var(--accent-soft); padding: .05rem .3rem;
+    border-radius: .3rem; font-family: monospace; }}
+  .answer-text {{ margin-top: .5rem; overflow-wrap: anywhere; }}
+  .answer-text p, .answer-text ul, .answer-text ol {{ margin: .3rem 0; }}
+  .answer-text h1, .answer-text h2, .answer-text h3 {{ margin: .4rem 0 .2rem;
+    font-size: 1rem; }}
+  .answer-text code {{ background: var(--accent-soft); padding: .05rem .3rem;
+    border-radius: .3rem; font-family: monospace; }}
+  .codeblock {{ position: relative; margin: .35rem 0; }}
+  .codeblock pre {{ background: #101a24; color: #d7e3ee; padding: .8rem .7rem .6rem;
+    border-radius: .6rem; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }}
+  .codeblock pre code {{ background: none; color: inherit; padding: 0; }}
+  .copy-code {{ position: absolute; top: .35rem; right: .35rem; font-size: .72rem;
+    padding: .15rem .5rem; border-radius: .5rem; }}
+  .progress-block {{ background: var(--card); border: 1px solid var(--line);
+    border-radius: .8rem; padding: .7rem .9rem; margin: .8rem 0; }}
+  .progress-block h2 {{ margin: 0 0 .4rem; font-size: 1rem; }}
+  .progress-block progress {{ width: 100%; height: 1.1rem; }}
+  td.ts {{ white-space: nowrap; font-family: monospace; font-size: .78rem;
+    color: var(--muted); }}
+</style>
+</head>
+<body>
+{_nav(can_edit=True)}
+<h1>Автотесты моделей</h1>
+{notice_html}
+<p class="role">Прогоняет тесты по всем моделям выбранного провайдера
+последовательно. Тест не трогает списки и способности, пока не включена
+галочка «записать результаты». Прогон может занять несколько минут —
+не закрывайте страницу.</p>
+<div class="card">
+<form method="post" action="/autotest/run" enctype="multipart/form-data" class="addform">
+  <label>провайдер
+    <select name="provider" required>{provider_options}</select>
+  </label>
+  <label>картинка для vision-теста (файл)
+    <input name="image" type="file" accept="image/*">
+  </label>
+  <label>или URL / data: URL картинки
+    <textarea name="image_url" placeholder="https://… или data:image/png;base64,…"></textarea>
+  </label>
+  <label>или тестовая картинка 1×1 (PNG)
+    <input name="use_test_image" type="checkbox" value="1">
+  </label>
+  <label>тест
+    <select name="test">
+      <option value="text">text — текстовый запрос</option>
+      <option value="vision">vision — с картинкой</option>
+      <option value="tools">tools — с инструментом</option>
+      <option value="free">free — проверка бесплатности</option>
+    </select>
+  </label>
+  <label>prompt (обязательно — только ваш текст, подсказок нет)
+    <textarea name="prompt" required placeholder="например: Ответь одним словом — привет"></textarea>
+  </label>
+  <label>записать результаты в способности/списки
+    <input name="record" type="checkbox" value="1">
+  </label>
+  <button type="submit" class="primary">запустить тесты</button>
+</form>
+</div>
+{progress_html()}
+{results_html()}
+{progress_script()}
+{answer_script()}
+{LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
 
@@ -894,7 +2579,7 @@ def pick_model_page(
         )
         body = f"""<form method="post" action="/pick/{escape(provider_id, quote=True)}">
   {rows}
-  <button type="submit">выбрать</button>
+  <button type="submit" class="primary">выбрать</button>
 </form>"""
     else:
         body = (
@@ -909,17 +2594,18 @@ def pick_model_page(
 <title>Модель — {escape(provider_name)}</title>
 <style>
 {_style()}
-  body {{ max-width: 34rem; }}
   label {{ display: block; margin: .2rem 0; }}
 </style>
 </head>
-<h1>Модель: {escape(provider_name)}</h1>
+<body>
 {_nav(can_edit=can_edit)}
+<h1>Модель: {escape(provider_name)}</h1>
 <p class="role">Какую модель обслуживать по умолчанию — выбор ваш, личный.</p>
 {facts_html}
 {notice_html}
+<div class="card">
 {body}
-<p><a href="/">← назад в каталог</a></p>
+</div>
 </body>
 </html>"""
 
@@ -946,18 +2632,17 @@ def test_page(
 <title>Тест — {escape(provider_name)}</title>
 <style>
 {_style()}
-  body {{ max-width: 34rem; }}
   .q {{ opacity: .6; }}
 </style>
 </head>
-<h1>Тест: {escape(provider_name)} · {escape(model or "—")}</h1>
+<body>
 {_nav(can_edit=can_edit)}
+<h1>Тест: {escape(provider_name)} · {escape(model or "—")}</h1>
 <p class="role">Тест — настоящий, но крошечный запрос: на платной модели он
 стоит доли цента.</p>
 <p class="q">«{escape(question)}»</p>
 {notice_html}
 {answer_html}
-<p><a href="/">← назад в каталог</a></p>
 </body>
 </html>"""
 
@@ -971,11 +2656,14 @@ def key_page(
     can_edit: bool = False,
     login_url: str = "",
     key_url: str = "",
+    oauth: bool = False,
 ) -> str:
     """Ввод ключа одного провайдера: форма плюс честное предупреждение.
 
     В скрытом поле — id провайдера (не имя: сервер ищет запись по id).
     Ссылки «где взять ключ» и «страница логина» — из полей каталога.
+    ``oauth`` — провайдер принимает вход через GitHub: кнопка «Войти»
+    ведёт на device-flow вместо вставки ключа.
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     value_hint = "сейчас задан — можно оставить пустым, чтобы удалить" if has_key else ""
@@ -991,6 +2679,14 @@ def key_page(
             f'target="_blank" rel="noopener">открыть</a>'
         )
     hints_html = f'<p class="role">{" · ".join(hints)}</p>' if hints else ""
+    oauth_html = ""
+    if oauth:
+        oauth_html = f"""
+<form method="post" action="/oauth/{escape(provider_id, quote=True)}">
+  <input type="hidden" name="action" value="start">
+  <button type="submit">Войти через GitHub</button>
+  <span class="role">вместо вставки ключа: GitHub выдаст код, вы введёте его на github.com/login/device</span>
+</form>"""
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -998,25 +2694,25 @@ def key_page(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ключ — {escape(provider_name)}</title>
 <style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 30rem; padding: 0 1rem; }}
-  input {{ width: 100%; padding: .4rem; font-family: monospace; }}
-  button {{ margin-top: .6rem; padding: .3rem .9rem; }}
-  .role {{ opacity: .6; font-size: .85rem; }}
-  .notice {{ background: rgba(42, 128, 60, .15); padding: .5rem .8rem; border-radius: .4rem; }}
+{_style()}
+  input {{ width: 100%; font-family: monospace; }}
+  button {{ margin-top: .6rem; padding: .35rem 1.1rem; }}
 </style>
 </head>
 <body>
-<h1>Ключ: {escape(provider_name)}</h1>
 {_nav(can_edit=can_edit)}
+<h1>Ключ: {escape(provider_name)}</h1>
 {notice_html}
+<div class="card">
 <form method="post" action="/key">
   <input type="hidden" name="id" value="{escape(provider_id, quote=True)}">
   <input name="api_key" type="password" placeholder="вставьте ключ" autocomplete="off" autofocus>
   <p class="role">{escape(value_hint)}</p>
-  <button type="submit">сохранить</button>
+  <button type="submit" class="primary">сохранить</button>
   <a href="/">назад</a>
 </form>
+{oauth_html}
+</div>
 {hints_html}
 <p class="role">Ключ остаётся на устройстве: он уходит только к провайдеру в его запросе.</p>
 </body>

@@ -2,9 +2,9 @@
 
 Пишем **метаданные**: маршруты, людей, модели, провайдеров, статусы,
 длительности и причины отказов — включая неудачные попытки и фолбэки.
-Тела запросов и ответов НЕ пишутся: чужая переписка не должна копиться
-на диске. Исключение — отладочная настройка AI_BRIDGE_LOG_BODIES=1
-(выключена по умолчанию); такие события помечаются полем `bodies`.
+Тела запросов и ответов пишутся **всегда** (решение хозяина: видеть
+всё); журналом владеет только администратор — страница закрыта
+посторонним, так что переписка не утекает.
 
 Файл events.jsonl дописывается и ротируется по размеру: когда переваливает
 предел, старое переименовывается в .old — рост ограничен.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,10 +27,24 @@ MAX_EVENTS = 1000
 #: Предел размера файла перед ротацией.
 MAX_FILE = 5 * 1024 * 1024
 
+#: Base64-вставки (картинки в телах запросов): их никто не читает,
+#: но журнал они раздувают в десятки килобайт на событие. Без пробелов
+#: и переносов — в base64 их не бывает, а валидный текст вокруг не пострадает.
+_B64 = re.compile(r"base64,[A-Za-z0-9+/=]{60,}")
 
-def bodies_enabled() -> bool:
-    """Писать ли тела запросов/ответов (отладка; в проде не включать)."""
-    return os.environ.get("AI_BRIDGE_LOG_BODIES", "").strip() == "1"
+
+def _slim(value: str) -> str:
+    """Вырезать base64-блок, оставляя заметку о размере.
+
+    В журнале остаётся осмысленное окружение («data:image/png;base64,…»),
+    а не мегабайты мусора. Касается только записываемых событий —
+    старые строки файла не переписываются.
+    """
+    def cut(match: re.Match) -> str:
+        dropped = len(match.group(0)) - 7  # минус "base64,"
+        return f"base64,…(вырезано {dropped} знаков)"
+
+    return _B64.sub(cut, value)
 
 
 class EventLog:
@@ -40,16 +55,7 @@ class EventLog:
         self.path = self.directory / "events.jsonl"
         self._lock = threading.Lock()
         self._recent: list[dict] = []
-        # Тела запросов/ответов: значение по умолчанию — из окружения;
-        # переключается кнопкой на странице журнала (до перезапуска).
-        self.bodies = bodies_enabled()
         self._load_recent()
-
-    def toggle_bodies(self) -> bool:
-        """Кнопка «тела запросов»: включает/выключает запись тел."""
-        with self._lock:
-            self.bodies = not self.bodies
-            return self.bodies
 
     def _load_recent(self) -> None:
         """Последние события из файла — журнал переживает перезапуск."""
@@ -66,18 +72,22 @@ class EventLog:
                 self._recent.append(event)
 
     def record(self, kind: str, user: str, text: str, **fields) -> dict:
-        """Одно событие: тип, кто, о чём; возвращает записанное."""
+        """Одно событие: тип, кто, о чём; возвращает записанное.
+
+        Base64-вставки вырезаются на входе — тела остаются читаемыми,
+        а не раздутыми.
+        """
         event: dict = {
             "ts": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
             "kind": kind,
             "user": user or "—",
-            "text": text,
+            "text": _slim(str(text)),
         }
         for key, value in fields.items():
             if value not in (None, ""):
-                event[key] = value
+                event[key] = _slim(str(value)) if isinstance(value, str) else value
         line = json.dumps(event, ensure_ascii=False)
         with self._lock:
             self._recent.append(event)

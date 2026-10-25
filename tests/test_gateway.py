@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from providers.client import Provider
-from service.gateway import Gateway, _Handler, _Server, _hidden_error
+from service.gateway import Gateway, _Handler, _Server, _hidden_error, _needs_of
 from service.gateway import test_chat as run_test_chat  # имя «test_*» путает pytest
 from storage.keys import KeyStore
 
@@ -386,15 +386,15 @@ class _FakeModel:
 
 
 class TestTestChat:
-    def test_the_answer_comes_from_the_message_with_a_sane_budget(self) -> None:
+    def test_the_answer_comes_from_the_message_without_a_token_limit(self) -> None:
         fake = _FakeModel({"choices": [{"message": {"content": "работает"}}]})
 
         result = run_test_chat(_entry(), "sk", make_provider=lambda url, **kw: fake)
 
         assert result["answer"] == "работает"
         assert result["error"] == ""
-        # Запас на «размышления» thinking-моделей: 16 токенов были мало.
-        assert fake.seen["max_tokens"] >= 100
+        # Лимита по токенам нет: ответ всегда полный.
+        assert "max_tokens" not in fake.seen
 
     def test_a_thinking_model_is_not_reported_as_empty(self) -> None:
         """qwen3 тратит лимит на рассуждение — покажем его, а не пустоту."""
@@ -421,6 +421,64 @@ class TestTestChat:
         result = run_test_chat(_entry(), "sk", make_provider=lambda url, **kw: fake)
 
         assert "quota" in result["error"]
+
+
+class _StatusModel:
+    """Провайдер, отвечающий произвольным статусом и телом (как Copilot)."""
+
+    def __init__(self, status: int, text: str, headers: dict | None = None):
+        self._status = status
+        self._text = text
+        self._headers = headers or {}
+
+    def forward_chat(self, body, *, api_key, timeout, stream):
+        return httpx.Response(self._status, text=self._text, headers=self._headers)
+
+
+class TestTestChatCopilotErrors:
+    """Отказ Copilot (400 model_not_supported / 429) — причиной, а не JSON."""
+
+    _ENTRY = {"url": "https://api.githubcopilot.com", "model": "claude-haiku-4.5"}
+    _MODEL_400 = ('{"error":{"message":"The requested model is not supported.",'
+                  '"code":"model_not_supported","param":"model",'
+                  '"type":"invalid_request_error"}}')
+
+    @pytest.fixture(autouse=True)
+    def _sku(self, monkeypatch):
+        from providers import copilot
+        monkeypatch.setattr(copilot, "_last_sku", "free_limited_copilot")
+
+    def test_model_not_supported_becomes_advice_not_raw_json(self) -> None:
+        fake = _StatusModel(400, self._MODEL_400)
+
+        result = run_test_chat(_entry(**self._ENTRY), "gho_x",
+                               make_provider=lambda url, **kw: fake)
+
+        assert "model_not_supported" not in result["error"]
+        assert "gpt-4o-mini" in result["error"]  # что делать вместо «вот JSON»
+
+    def test_rate_limit_says_how_long_to_wait(self) -> None:
+        fake = _StatusModel(
+            429,
+            "Sorry, you've exceeded your rate limit for utility models.",
+            {"retry-after": "1183"},
+        )
+
+        result = run_test_chat(_entry(**self._ENTRY), "gho_x",
+                               make_provider=lambda url, **kw: fake)
+
+        assert "лимит" in result["error"].lower()
+        assert "20 мин" in result["error"]
+
+    def test_a_foreign_provider_keeps_the_raw_body(self) -> None:
+        """Чужой провайдер — как раньше: сырая причина, без выдумок."""
+        fake = _StatusModel(400, '{"error":{"code":"other"}}')
+
+        result = run_test_chat(_entry(), "sk",
+                               make_provider=lambda url, **kw: fake)
+
+        assert "HTTP 400" in result["error"]
+        assert "other" in result["error"]
 
 
 class TestProxyTransparency:
@@ -546,7 +604,14 @@ class TestCapabilityFallback:
         assert response.status_code == 200
         assert response.headers["x-ai-bridge-provider"] == "Both"
 
-    def test_a_vision_request_never_lands_on_a_plain_model(self, harness) -> None:
+    def test_a_vision_request_lands_on_a_vision_model_first(self, harness) -> None:
+        """Способная идёт первой; немаркированная — только хвост цепочки.
+
+        Немаркированные не выбрасываются совсем (иначе замкнутая петля:
+        выучить vision можно лишь получив картинку, а фильтр давал бы её
+        только уже помеченным). Они идут последним шансом — чтобы отказ
+        выучился или успех открыл vision.
+        """
         def boom(req):
             raise httpx.ConnectError("оба мертвы")
 
@@ -557,14 +622,23 @@ class TestCapabilityFallback:
                     429, json={"error": {"message": "quota"}}
                 ),
                 "https://both.test": boom,
+                # Немаркированная отвечает — доказывает, что её пробуют
+                # последним шансом (иначе vision выучить невозможно).
+                "https://plain.test": lambda req: httpx.Response(
+                    200, json={"choices": [{"message": {"content": "вдруг умею"}}]}
+                ),
             },
         )
         with httpx.Client(base_url=h.base) as client:
             response = client.post("/v1/chat/completions", content=self.VISION_BODY)
 
-        # Plain-модель в цепочку vision-запроса не попала: видно по причинам.
-        assert response.status_code == 502
-        assert "Plain" not in response.text
+        # Способная (vis/both) отказалась, немаркированная plain подхватила
+        # последним шансом — запрос обслужен, а не 502.
+        assert response.status_code == 200
+        # Порядок: сначала способные, немаркированная — хвост цепочки.
+        urls = [req.url.host for req in h.seen]
+        assert urls.index("vis.test") < urls.index("plain.test")
+        assert urls.index("both.test") < urls.index("plain.test")
 
     def test_a_400_refusal_about_images_hands_over(self, harness) -> None:
         h = harness(
@@ -727,14 +801,13 @@ class TestHiddenErrorShapes:
 
 
 class TestBodiesInTheJournal:
-    """Кнопка «тела запросов»: тело пишется только когда включена."""
+    """Тела запросов пишутся всегда (переключателя нет)."""
 
-    def _chat_event(self, tmp_path, *, bodies: bool) -> dict:
+    def _chat_event(self, tmp_path) -> dict:
         from service.eventlog import EventLog
         from storage.usertokens import UserTokens
 
         log = EventLog(tmp_path)
-        log.bodies = bodies
         tokens = UserTokens(tmp_path)
         token = tokens.create("u1", "телефон")
         gateway = Gateway(
@@ -763,12 +836,8 @@ class TestBodiesInTheJournal:
             server.server_close()
         return next(event for event in log.recent() if event["kind"] == "чат")
 
-    def test_bodies_off_means_no_bodies(self, tmp_path) -> None:
-        event = self._chat_event(tmp_path, bodies=False)
-        assert "req" not in event
-
-    def test_bodies_on_records_a_fragment(self, tmp_path) -> None:
-        event = self._chat_event(tmp_path, bodies=True)
+    def test_a_chat_event_always_records_the_request_body(self, tmp_path) -> None:
+        event = self._chat_event(tmp_path)
         assert "привет" in event.get("req", "")
 
 
@@ -930,6 +999,60 @@ class TestAccessOverHttp:
 
         assert response.status_code == 403
         assert "заблокирован" in response.text
+
+    def test_a_refused_post_closes_the_connection(self, tmp_path) -> None:
+        """Отказ до чтения тела закрывает соединение.
+
+        Регрессия: 403 до чтения тела на keep-alive оставлял JSON в
+        сокете, следующий запрос читался из этого мусора — браузер
+        получал 501 «Unsupported method» с куском тела вместо имени
+        метода, и страница падала при каждом запросе.
+        """
+        import socket
+
+        from storage.usertokens import UserTokens
+
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        gateway = Gateway(
+            lambda: [_entry()],
+            KeyStore(tmp_path),
+            user_tokens=tokens,
+            access_checker=lambda uid: False,
+        )
+        server = _Server(("127.0.0.1", 0), _Handler)
+        server.gateway = gateway
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            body = json.dumps({"model": "m", "messages": []}).encode()
+            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            sock.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\n"
+                b"Host: x\r\n"
+                + f"Authorization: Bearer {token}\r\n".encode()
+                + b"Content-Type: application/json\r\n"
+                + f"Content-Length: {len(body)}\r\n\r\n".encode()
+                + body
+            )
+            # Читаем до конца соединения: сервер обязан его закрыть,
+            # иначе остаток тела поедет в следующий запрос.
+            sock.settimeout(5)
+            data = b""
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+            sock.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+        head = data.split(b"\r\n\r\n", 1)[0].decode("utf-8", "replace")
+        assert "403" in head.splitlines()[0]
+        assert "connection: close" in head.lower()
 
 
 class TestUsageRecording:
@@ -1240,3 +1363,1421 @@ class TestReputation:
 
         assert status == 502  # никто не ответил
         assert reputation.remaining("ollama/llama3.2") > 0
+
+
+class TestLearnedCapabilities:
+    """Способности учатся сами: успех доказывает «умеет», отказ — «не умеет»."""
+
+    @staticmethod
+    def _build(tmp_path, entries, handlers, event_log=None):
+        """Гейтвей с выученными способностями на тестовых данных."""
+        from providers.client import Provider
+        from storage.capabilities import CapabilityStore
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            inner = handlers[base]
+            return Provider(url, transport=httpx.MockTransport(inner), **kwargs)
+
+        capabilities = CapabilityStore(tmp_path)
+        gateway = Gateway(lambda: entries, KeyStore(tmp_path), provider_factory=factory,
+                          capabilities=capabilities, event_log=event_log)
+        return gateway, capabilities
+
+    @staticmethod
+    def _ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "жив"}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    @staticmethod
+    def _vision_body(model: str = "") -> bytes:
+        body: dict = {
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "что на картинке?"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                ],
+            }],
+        }
+        if model:
+            body["model"] = model
+        return json.dumps(body).encode("utf-8")
+
+    @staticmethod
+    def _tools_body(model: str = "") -> bytes:
+        body: dict = {
+            "messages": [{"role": "user", "content": "привет"}],
+            "tools": [{"type": "function", "function": {"name": "ping", "parameters": {}}}],
+        }
+        if model:
+            body["model"] = model
+        return json.dumps(body).encode("utf-8")
+
+    def test_a_successful_vision_request_teaches_vision(self, tmp_path) -> None:
+        # Провайдер без справки о способностях; человек назвал модель сам.
+        entries = [_entry()]
+        gateway, capabilities = self._build(tmp_path, entries, {"http://ollama.test": self._ok})
+
+        status, _, _, _, _ = gateway.chat(self._vision_body("llama3.2"), "llama3.2")
+
+        assert status == 200
+        assert capabilities.known("ollama/llama3.2") == {"vision": True}
+        # Безымянный запрос с картинкой теперь строит цепочку: раньше
+        # пустая справка отсекала модель и был 502 «не обслуживается».
+        status, _, _, provider, _ = gateway.chat(self._vision_body(), "")
+        assert status == 200
+        assert provider == "Ollama"
+
+    def test_a_refusal_teaches_not_tools_even_if_handwritten(self, tmp_path) -> None:
+        # Ручная справка врёт: «tools» записано, а провайдер отказывает.
+        entries = [_entry(capabilities="tools")]
+        refuser = httpx.Response(
+            400, json={"error": {"message": "This model does not support tools"}}
+        )
+        gateway, capabilities = self._build(
+            tmp_path, entries, {"http://ollama.test": lambda request: refuser}
+        )
+
+        status, _, _, _, _ = gateway.chat(self._tools_body("llama3.2"), "llama3.2")
+
+        assert status == 502  # единственная модель отказалась
+        # Кто последний, тот и прав: живой отказ стёр рукописное «tools».
+        assert capabilities.known("ollama/llama3.2") == {"tools": False}
+        taught = gateway._taught_entries(entries)
+        assert taught[0]["capabilities"] == ""
+        assert entries[0]["capabilities"] == "tools"  # оригинал не тронут
+
+    def test_a_learned_no_is_flipped_back_by_a_success(self, tmp_path) -> None:
+        entries = [_entry(capabilities="tools")]
+
+        gateway, capabilities = self._build(
+            tmp_path, entries, {"http://ollama.test": self._ok}
+        )
+        capabilities.learn("ollama/llama3.2", "tools", False)
+
+        status, _, _, _, _ = gateway.chat(self._tools_body("llama3.2"), "llama3.2")
+
+        assert status == 200
+        assert capabilities.known("ollama/llama3.2") == {"tools": True}
+
+    def test_a_websocket_refusal_teaches_nothing(self, tmp_path) -> None:
+        # «Только через WebSocket» — не про способности: не учим ни vision, ни tools.
+        entries = [_entry()]
+        refusal = httpx.Response(
+            400, json={"error": {"message": (
+                "model only supports real-time bidirectional streaming via WebSocket"
+            )}}
+        )
+        gateway, capabilities = self._build(
+            tmp_path, entries, {"http://ollama.test": lambda request: refusal}
+        )
+
+        gateway.chat(self._vision_body("llama3.2"), "llama3.2")
+
+        assert capabilities.known("ollama/llama3.2") == {}
+
+    def test_a_paraphrased_refusal_is_still_recognised(self, tmp_path) -> None:
+        """Отказ другой формулировкой — не «вина клиента», а отказ модели.
+
+        Cohere отвечает «image content is not supported» — ни одна точная
+        фраза не совпадает, но широкий путь (отрицание + способность из
+        запроса) должна распознать и выучить vision.
+        """
+        from storage.capabilities import CapabilityStore
+
+        entries = [_entry()]
+        refusal = httpx.Response(
+            400, json={"error": {"message": (
+                "invalid request: image content is not supported for this model"
+            )}}
+        )
+        gateway, capabilities = self._build(
+            tmp_path, entries, {"http://ollama.test": lambda request: refusal}
+        )
+
+        status, _, _, _, _ = gateway.chat(self._vision_body("llama3.2"), "llama3.2")
+
+        # Отказ распознан: выучено «не умеет vision», а не «вина клиента».
+        assert capabilities.known("ollama/llama3.2") == {"vision": False}
+        # И журнал говорит «отвергла», не «вина клиента».
+        journal = _Journal()
+        gateway2, _ = self._build(
+            tmp_path, entries, {"http://ollama.test": lambda request: refusal},
+            event_log=journal,
+        )
+        gateway2.chat(self._vision_body("llama3.2"), "llama3.2")
+        joined = " ".join(journal.texts("решение"))
+        assert "отвергла" in joined
+        assert "вина клиента" not in joined
+
+    def test_a_truly_bad_request_is_not_a_refusal(self, tmp_path) -> None:
+        """Настояще кривой запрос — не отказ модели, vision не учим."""
+        from storage.capabilities import CapabilityStore
+
+        entries = [_entry()]
+        bad = httpx.Response(
+            400, json={"error": {"message": "invalid temperature: must be between 0 and 2"}}
+        )
+        gateway, capabilities = self._build(
+            tmp_path, entries, {"http://ollama.test": lambda request: bad}
+        )
+
+        status, _, _, _, _ = gateway.chat(self._vision_body("llama3.2"), "llama3.2")
+
+        assert status == 400  # отдаём как есть
+        assert capabilities.known("ollama/llama3.2") == {}  # не учим
+
+
+class _Journal:
+    """Мини-журнал событий: собирает kind+text для проверки."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def record(self, kind: str, user: str, text: str, **fields) -> dict:
+        self.events.append((kind, text))
+        return {"kind": kind, "text": text}
+
+    def texts(self, kind: str) -> list[str]:
+        return [text for event_kind, text in self.events if event_kind == kind]
+
+
+class TestCapabilityJournal:
+    """Журнал подробно рассказывает, как модель училась — на каждом шаге."""
+
+    @staticmethod
+    def _refusal(message: str):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"message": message}})
+
+        return handler
+
+    def test_an_unknown_model_learns_vision_and_the_journal_says_so(self, tmp_path) -> None:
+        journal = _Journal()
+        learn = TestLearnedCapabilities
+        gateway, _ = learn._build(
+            tmp_path, [_entry()], {"http://ollama.test": learn._ok}, event_log=journal
+        )
+
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2")
+
+        lines = journal.texts("способности")
+        assert any("ollama/llama3.2" in line and "выучила vision" in line for line in lines)
+
+    def test_a_repeated_success_confirms_the_fact(self, tmp_path) -> None:
+        journal = _Journal()
+        learn = TestLearnedCapabilities
+        gateway, _ = learn._build(
+            tmp_path, [_entry()], {"http://ollama.test": learn._ok}, event_log=journal
+        )
+
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2")
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2")
+
+        lines = journal.texts("способности")
+        assert any("подтвердила vision" in line for line in lines)
+
+    def test_a_success_flips_an_old_refusal_and_the_journal_says_so(self, tmp_path) -> None:
+        journal = _Journal()
+        learn = TestLearnedCapabilities
+        gateway, capabilities = learn._build(
+            tmp_path, [_entry()], {"http://ollama.test": learn._ok}, event_log=journal
+        )
+        capabilities.learn("ollama/llama3.2", "vision", False)
+
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2")
+
+        lines = journal.texts("способности")
+        assert any("перевернула" in line and "vision" in line for line in lines)
+
+    def test_a_refusal_names_the_capability_and_the_reason(self, tmp_path) -> None:
+        journal = _Journal()
+        entries = [_entry(capabilities="tools")]
+        learn = TestLearnedCapabilities
+
+        gateway, _ = learn._build(
+            tmp_path, entries,
+            {"http://ollama.test": self._refusal("This model does not support tools")},
+            event_log=journal,
+        )
+        gateway.chat(learn._tools_body("llama3.2"), "llama3.2")
+
+        lines = journal.texts("способности")
+        assert any(
+            "не умеет tools" in line and "does not support tool" in line for line in lines
+        )
+
+    def test_a_websocket_refusal_is_logged_as_a_channel(self, tmp_path) -> None:
+        journal = _Journal()
+        learn = TestLearnedCapabilities
+
+        gateway, _ = learn._build(
+            tmp_path, [_entry()],
+            {"http://ollama.test": self._refusal(
+                "only supports real-time bidirectional streaming via WebSocket"
+            )},
+            event_log=journal,
+        )
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2")
+
+        lines = journal.texts("способности")
+        assert any("не про способности" in line for line in lines)
+
+
+class TestCapabilityDiagnostics:
+    """Пустой фолбэк объясняется: сколько моделей отсеяно и почему."""
+
+    def test_a_vision_request_reaches_an_unmarked_model(self, tmp_path) -> None:
+        # Ни у одной модели нет vision — но немаркированная всё равно
+        # пробуется последним шансом (иначе vision выучить невозможно).
+        learn = TestLearnedCapabilities
+        gateway, _ = learn._build(
+            tmp_path, [_entry()], {"http://ollama.test": learn._ok}
+        )
+
+        status, _, chunks, _, _ = gateway.chat(learn._vision_body(), "")
+
+        # Оливама ответила — запрос обслужен, а не 502 «нет маршрута».
+        assert status == 200
+
+    def test_a_failed_chain_still_reports_the_causes(self, tmp_path) -> None:
+        """Названная модель отказала, остальные — не по способностям."""
+        entries = [
+            _entry(),
+            _entry(id="b", name="B", url="https://b.test/v1", model="m-b",
+                   fallbackPriority=2),
+        ]
+        refusal = httpx.Response(
+            400, json={"error": {"message": "image_url is not supported"}}
+        )
+        learn = TestLearnedCapabilities
+
+        def dead(request):
+            raise httpx.ConnectError("мертв")
+
+        gateway, _ = learn._build(
+            tmp_path, entries,
+            {"http://ollama.test": lambda request: refusal,
+             "https://b.test": dead},
+        )
+
+        status, _, chunks, _, _ = gateway.chat(learn._vision_body("llama3.2"), "llama3.2")
+
+        assert status == 502
+        text = b"".join(chunks).decode("utf-8")
+        # Причины обоих отказов на месте.
+        assert "image_url is not supported" in text
+        assert "мертв" in text
+
+
+class TestModelListsFiltering:
+    """Четыре уровня: белый → неизвестный → серый (проснувшийся) → чёрный."""
+
+    @staticmethod
+    def _build(tmp_path, entries, handlers, event_log=None, user_dir_for=None):
+        """Гейтвей со списками на тестовых данных."""
+        from providers.client import Provider
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            inner = handlers[base]
+            return Provider(url, transport=httpx.MockTransport(inner), **kwargs)
+
+        gateway = Gateway(
+            lambda: entries, KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), event_log=event_log,
+            user_dir_for=user_dir_for,
+        )
+        return gateway
+
+    @staticmethod
+    def _ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "жив"}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    def test_a_whitelisted_model_goes_before_a_better_priority(self, tmp_path) -> None:
+        from storage.lists import WHITELIST_FILES
+
+        tmp_path.joinpath(WHITELIST_FILES["text"]).write_text(
+            "ollama/llama3.2\n", encoding="utf-8"
+        )
+        entries = [
+            _entry(fallbackPriority=1),
+            _entry(id="b", name="B", url="https://b.test/v1", model="m-b",
+                   fallbackPriority=2),
+        ]
+        gateway = self._build(
+            tmp_path, entries,
+            {"http://ollama.test": self._ok, "https://b.test": self._ok},
+            event_log=_Journal(),
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "")
+
+        assert status == 200
+        assert provider == "Ollama"  # подтверждённая идёт первой, хотя приоритет ниже
+
+    def test_a_blacklisted_model_is_the_last_resort(self, tmp_path) -> None:
+        from storage.lists import BLACKLIST
+
+        tmp_path.joinpath(BLACKLIST).write_text("ollama/llama3.2\n", encoding="utf-8")
+        entries = [
+            _entry(fallbackPriority=1),
+            _entry(id="b", name="B", url="https://b.test/v1", model="m-b",
+                   fallbackPriority=2),
+        ]
+        gateway = self._build(
+            tmp_path, entries,
+            {"http://ollama.test": self._ok, "https://b.test": self._ok},
+            event_log=_Journal(),
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "")
+
+        assert status == 200
+        assert provider == "B"  # сперва неизвестная B
+
+    def test_a_blacklisted_model_serves_when_nothing_else_left(self, tmp_path) -> None:
+        """«Пустой ответ хуже чужого»: чёрный берут, если больше некому."""
+        from storage.lists import BLACKLIST
+
+        tmp_path.joinpath(BLACKLIST).write_text("llama3.2\n", encoding="utf-8")
+        gateway = self._build(
+            tmp_path, [_entry()],
+            {"http://ollama.test": self._ok},
+            event_log=_Journal(),
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "")
+
+        assert status == 200
+        assert provider == "Ollama"
+
+    def test_a_nonempty_whitelist_does_not_starve_the_rest(self, tmp_path) -> None:
+        """Белый — первый уровень, а не фильтр: неизвестные доступны."""
+        from storage.lists import WHITELIST_FILES
+
+        tmp_path.joinpath(WHITELIST_FILES["text"]).write_text(
+            "b/m-b\n", encoding="utf-8"
+        )
+        entries = [
+            _entry(fallbackPriority=1),
+            _entry(id="b", name="B", url="https://b.test/v1", model="m-b",
+                   fallbackPriority=2),
+        ]
+        gateway = self._build(
+            tmp_path, entries,
+            {"http://ollama.test": self._ok, "https://b.test": self._ok},
+            event_log=_Journal(),
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "")
+
+        assert status == 200
+        assert provider == "B"  # подтверждённая идёт первой
+
+    def test_empty_lists_change_nothing(self, tmp_path) -> None:
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": self._ok}, event_log=_Journal()
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "")
+
+        assert status == 200
+        assert provider == "Ollama"
+
+    def test_a_sleeping_grey_model_is_skipped(self, tmp_path) -> None:
+        from storage.lists import GREYLIST
+        from datetime import datetime, timedelta, timezone
+
+        until = datetime.now(timezone.utc) + timedelta(hours=12)
+        iso = until.isoformat().replace("+00:00", "Z")
+        tmp_path.joinpath(GREYLIST).write_text(
+            f"ollama/llama3.2  # до {iso}: лимит · цикл 1\n", encoding="utf-8"
+        )
+        gateway = self._build(
+            tmp_path, [_entry()],
+            {"http://ollama.test": self._ok},
+            event_log=_Journal(),
+            user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, _, _, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 502  # спит — не обслужит
+
+    def test_an_awakened_grey_model_serves_after_unknown(self, tmp_path) -> None:
+        """Проснувшийся серый идёт после неизвестной, но до чёрного."""
+        from storage.lists import BLACKLIST, GREYLIST
+        from datetime import datetime, timedelta, timezone
+
+        until = datetime.now(timezone.utc) - timedelta(hours=1)
+        iso = until.isoformat().replace("+00:00", "Z")
+        tmp_path.joinpath(GREYLIST).write_text(
+            f"ollama/llama3.2  # до {iso}: лимит · цикл 1\n", encoding="utf-8"
+        )
+        tmp_path.joinpath(BLACKLIST).write_text("b/m-b\n", encoding="utf-8")
+        entries = [
+            _entry(fallbackPriority=1),
+            _entry(id="b", name="B", url="https://b.test/v1", model="m-b",
+                   fallbackPriority=2),
+        ]
+        gateway = self._build(
+            tmp_path, entries,
+            {"http://ollama.test": self._ok, "https://b.test": self._ok},
+            event_log=_Journal(),
+            user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 200
+        assert provider == "Ollama"  # проснувшийся серый обошёл чёрный B
+
+    def test_a_grey_list_is_per_user(self, tmp_path) -> None:
+        """Серый одного человека не мешает другому."""
+        from storage.lists import GREYLIST
+        from datetime import datetime, timedelta, timezone
+
+        user_dir = tmp_path / "users" / "u1"
+        user_dir.mkdir(parents=True)
+        until = datetime.now(timezone.utc) + timedelta(hours=12)
+        iso = until.isoformat().replace("+00:00", "Z")
+        user_dir.joinpath(GREYLIST).write_text(
+            f"ollama/llama3.2  # до {iso}: лимит · цикл 1\n", encoding="utf-8"
+        )
+        gateway = self._build(
+            tmp_path, [_entry()],
+            {"http://ollama.test": self._ok},
+            event_log=_Journal(),
+            user_dir_for=lambda uid: user_dir if uid == "u1" else None,
+        )
+
+        # u2 не имеет серого списка — модель для него доступна.
+        status, _, _, provider, _ = gateway.chat(b"", "u2")
+
+        assert status == 200
+        assert provider == "Ollama"
+
+    def test_a_blacklist_hit_is_not_silently_dropped(self, tmp_path) -> None:
+        """Чёрный остаётся в цепочке (последний шанс) — не выбрасывается."""
+        from storage.lists import BLACKLIST
+
+        tmp_path.joinpath(BLACKLIST).write_text("ollama/llama3.2\n", encoding="utf-8")
+        gateway = self._build(
+            tmp_path, [_entry()],
+            {"http://ollama.test": self._ok},
+            event_log=_Journal(),
+        )
+
+        tiered = gateway._apply_lists([_entry()], "u1")
+
+        assert tiered and tiered[0]["_tier"] == 4  # помечен уровнем, не удалён
+
+
+class TestModelDecisions:
+    """Решение после каждого запроса: белый / серый / чёрный / не тронуты."""
+
+    @staticmethod
+    def _build(tmp_path, entries, handlers, event_log=None, user_dir_for=None,
+               rules=None):
+        from providers.client import Provider
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            return Provider(url, transport=httpx.MockTransport(handlers[base]), **kwargs)
+
+        return Gateway(
+            lambda: entries, KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), event_log=event_log, user_dir_for=user_dir_for,
+            capabilities=CapabilityStore(tmp_path), rules=rules,
+        )
+
+    @staticmethod
+    def _ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "жив"}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    def test_a_success_writes_the_model_to_the_whitelist(self, tmp_path) -> None:
+        from storage.lists import ModelLists
+
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": self._ok},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        assert "ollama/llama3.2" in ModelLists(tmp_path).whitelist()
+        lines = journal.texts("решение")
+        assert any("подтвердила себя" in t and "HTTP 200" in t for t in lines)
+
+    def test_a_repeated_success_does_not_spam_the_journal(self, tmp_path) -> None:
+        """Уже подтверждённая модель молчит — журнал не захлебнётся."""
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": self._ok},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+        first = len(journal.texts("решение"))
+        gateway.chat(b"", "", "u1")
+        gateway.chat(b"", "", "u1")
+
+        assert len(journal.texts("решение")) == first  # новых решений нет
+
+    def test_a_402_goes_to_grey_for_a_day(self, tmp_path) -> None:
+        from storage.lists import GREYLIST, ModelLists
+
+        refusal = httpx.Response(
+            402, json={"error": {"message": "This request requires more credits"}}
+        )
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: refusal},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, _, _, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 502
+        grey = ModelLists(tmp_path).grey()
+        assert "ollama" in grey  # серый — провайдером, со всеми моделями
+        assert grey["ollama"]["cycle"] == 1
+        lines = journal.texts("решение")
+        assert any("серый список до" in t for t in lines)
+
+    def test_a_sleeping_provider_hides_all_its_models(self, tmp_path) -> None:
+        """Спит провайдер — не обслуживается ни одна его модель.
+
+        Регрессия перехода на серый «по провайдеру»: раньше спала одна
+        пара «провайдер/модель», теперь — провайдер целиком.
+        """
+        from storage.lists import GREYLIST, ModelLists
+
+        from datetime import datetime, timedelta, timezone
+
+        until = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+        tmp_path.joinpath(GREYLIST).write_text(
+            f"ollama  # до {until.replace('+00:00', 'Z')}: лимит · цикл 1\n",
+            encoding="utf-8",
+        )
+        # Провайдер отвечает — но к нему не должны обращаться.
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": self._ok},
+            event_log=_Journal(), user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, chunks, _, _ = gateway.chat(b"", "llama3.2", "u1")
+
+        body = b"".join(chunks).decode("utf-8", errors="replace")
+        assert status == 502  # модели спят — некому служить
+        assert "не обслуживается" in body
+        assert not ModelLists(tmp_path).whitelist()  # и успеха не было
+
+    def test_a_hidden_credit_warning_in_200_is_also_grey(self, tmp_path) -> None:
+        """200 со спрятанным «мало кредитов» — мягкий отказ, не чёрный."""
+        from storage.lists import GREYLIST, ModelLists
+
+        hidden = httpx.Response(
+            200, json={"error": {"message": "insufficient credits balance"}},
+            headers={"content-type": "application/json"},
+        )
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: hidden},
+            event_log=_Journal(), user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        assert "ollama" in ModelLists(tmp_path).grey()  # провайдер, не модель
+
+    def test_the_third_grey_cycle_is_black(self, tmp_path) -> None:
+        """Три цикла сна подряд — в чёрный список."""
+        from storage.lists import BLACKLIST, GREYLIST, ModelLists
+
+        until = "2020-01-01T00:00:00Z"
+        tmp_path.joinpath(GREYLIST).write_text(
+            f"ollama  # до {until}: лимит · цикл 2\n", encoding="utf-8"
+        )
+        refusal = httpx.Response(
+            402, json={"error": {"message": "rate limit exceeded, try later"}}
+        )
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: refusal},
+            event_log=_Journal(), user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        lists = ModelLists(tmp_path)
+        assert "ollama/llama3.2" in lists.blacklist()  # чёрный — по модели
+        assert "ollama" not in lists.grey()  # провайдер из серого вышел
+
+    def test_a_hard_failure_is_black_at_once(self, tmp_path) -> None:
+        from storage.lists import BLACKLIST, ModelLists
+
+        broken = httpx.Response(500, json={"error": {"message": "upstream died"}})
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: broken},
+            event_log=_Journal(), user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, _, _, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 502
+        assert "ollama/llama3.2" in ModelLists(tmp_path).blacklist()
+
+    def test_a_client_error_touches_no_lists(self, tmp_path) -> None:
+        from storage.lists import ModelLists
+
+        bad = httpx.Response(
+            400, json={"error": {"message": "context length exceeded"}}
+        )
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: bad},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, _, _, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 400  # неподдерживаемый запрос идёт как есть
+        lists = ModelLists(tmp_path)
+        assert not lists.whitelist() and not lists.blacklist() and not lists.grey()
+        assert any("запрос отклонён" in t for t in journal.texts("решение"))
+
+    def test_a_capability_refusal_touches_no_lists(self, tmp_path) -> None:
+        """«Не поддерживает картинки» — списки не трогаем, только учим."""
+        from storage.lists import ModelLists
+
+        refusal = httpx.Response(
+            400, json={"error": {"message": "image_url is not supported"}}
+        )
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: refusal},
+            event_log=_Journal(), user_dir_for=lambda uid: tmp_path,
+        )
+        body = json.dumps({
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+            ]}],
+        }).encode("utf-8")
+
+        gateway.chat(body, "", "u1")
+
+        lists = ModelLists(tmp_path)
+        assert not lists.whitelist() and not lists.blacklist() and not lists.grey()
+
+    def test_a_success_returns_a_grey_model_to_the_whitelist(self, tmp_path) -> None:
+        from storage.lists import GREYLIST, ModelLists
+
+        until = "2020-01-01T00:00:00Z"
+        tmp_path.joinpath(GREYLIST).write_text(
+            f"ollama/llama3.2  # до {until}: лимит · цикл 1\n", encoding="utf-8"
+        )
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": self._ok},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        lists = ModelLists(tmp_path)
+        assert "ollama/llama3.2" in lists.whitelist()  # белый — по модели
+        assert "ollama" not in lists.grey()  # провайдер проснулся
+        assert any("из серого" in t for t in journal.texts("решение"))
+
+    def test_a_vision_success_lands_in_the_vision_group(self, tmp_path) -> None:
+        """Картинка прошла — модель легла в vision-группу, не в text."""
+        from storage.lists import ModelLists, WHITELIST_FILES
+
+        learn = TestLearnedCapabilities
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], {"http://ollama.test": learn._ok},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2", "u1")
+
+        lists = ModelLists(tmp_path)
+        assert lists.whitelist_group("ollama/llama3.2") == "vision"
+        assert "ollama/llama3.2" not in lists.whitelist_groups()["text"]
+        # Событие несёт группу.
+        assert any("группа vision" in t for t in journal.texts("решение"))
+
+    def test_a_second_success_regroups_the_model(self, tmp_path) -> None:
+        """Была text, доказала vision — переложена, событие об этом есть."""
+        from storage.lists import ModelLists
+
+        lists0 = ModelLists(tmp_path)
+        lists0.whitelist_place("ollama/llama3.2", "text", "подтверждена успехом")
+        learn = TestLearnedCapabilities
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry(capabilities="")], {"http://ollama.test": learn._ok},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+        # Выученный vision уже есть (модель однажды видела картинку).
+        from storage.capabilities import CapabilityStore
+        CapabilityStore(tmp_path).learn("ollama/llama3.2", "vision", True)
+
+        gateway.chat(learn._vision_body("llama3.2"), "llama3.2", "u1")
+
+        assert ModelLists(tmp_path).whitelist_group("ollama/llama3.2") == "vision"
+        assert any("text → vision" in t for t in journal.texts("решение"))
+
+
+class TestRuleEngine:
+    """Правило админа сильнее встроенного решения по статусу.
+
+    Строка в ответе провайдера → выбранное действие (серый / чёрный /
+    белый / переключить / не трогать / выучить). Срабатывание видно в
+    журнале со строкой-основанием.
+    """
+
+    @staticmethod
+    def _build(tmp_path, entries, handlers, rules, event_log=None,
+               user_dir_for=None):
+        from providers.client import Provider
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            return Provider(url, transport=httpx.MockTransport(handlers[base]), **kwargs)
+
+        return Gateway(
+            lambda: entries, KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), event_log=event_log,
+            user_dir_for=user_dir_for, capabilities=CapabilityStore(tmp_path),
+            rules=rules,
+        )
+
+    @staticmethod
+    def _rules(tmp_path, response=None, request=None):
+        from storage.rules import RuleStore
+
+        store = RuleStore(tmp_path)
+        for rule in response or []:
+            store.add("response", text=rule.get("text", ""),
+                      action=rule["action"],
+                      provider=rule.get("provider", "ollama"),
+                      req=rule.get("req", ""),
+                      status=rule.get("status"))
+        for rule in request or []:
+            store.add("request", text=rule["text"], action=rule["action"])
+        return store
+
+    @staticmethod
+    def _reply(text: str, status: int = 200):
+        import httpx as _httpx
+
+        def handler(request):
+            return _httpx.Response(
+                status, json={"error": {"message": text}},
+                headers={"content-type": "application/json"},
+            )
+
+        return {"http://ollama.test": handler}
+
+    def test_a_rule_overrides_a_soft_status(self, tmp_path) -> None:
+        """429 (встроенное — серый) + правило «чёрный» → чёрный."""
+        from storage.lists import ModelLists
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "rate limited", "action": "black"},
+        ])
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], self._reply("rate limited, try later", 429),
+            rules, event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, _, _, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 502
+        lists = ModelLists(tmp_path)
+        assert "ollama/llama3.2" in lists.blacklist()  # правило сильнее
+        assert "ollama" not in lists.grey()  # встроенный серый не применился
+        assert any("правило" in t and "rate limited" in t
+                   for t in journal.texts("правило"))
+
+    def test_a_rule_can_send_a_provider_to_grey(self, tmp_path) -> None:
+        from storage.lists import ModelLists
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "закончились кредиты", "action": "grey"},
+        ])
+        gateway = self._build(
+            tmp_path, [_entry()], self._reply("закончились кредиты у аккаунта", 500),
+            rules, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        assert "ollama" in ModelLists(tmp_path).grey()  # 500 → серый по правилу
+
+    def test_a_rule_can_leave_the_lists_alone(self, tmp_path) -> None:
+        """Не трогать: 429 не кладёт ни в серый, ни в чёрный — только журнал."""
+        from storage.lists import ModelLists
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "maintenance window", "action": "untouched"},
+        ])
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry()], self._reply("maintenance window tonight", 429),
+            rules, event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        lists = ModelLists(tmp_path)
+        assert not lists.grey() and not lists.blacklist()
+        assert any("списки не тронуты" in t for t in journal.texts("правило"))
+
+    def test_a_rule_in_a_200_forces_a_switch(self, tmp_path) -> None:
+        """Строка в успешном ответе («maintenance») → уходим к следующему."""
+        entries = [
+            _entry(),
+            _entry(id="groq", name="Groq", url="http://groq.test/v1",
+                   model="llama-3", fallbackPriority=10),  # меньше = раньше
+        ]
+        rules = self._rules(tmp_path, response=[
+            {"text": "maintenance", "action": "switch", "provider": "ollama"},
+        ])
+        calls = []
+
+        def ollama(request):
+            calls.append("ollama")
+            import httpx as _httpx
+            return _httpx.Response(
+                200, json={"choices": [{"message": {"content": "maintenance soon"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        def groq(request):
+            calls.append("groq")
+            import httpx as _httpx
+            return _httpx.Response(
+                200, json={"choices": [{"message": {"content": "жив"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        gateway = self._build(
+            tmp_path, entries,
+            {"http://ollama.test": ollama, "http://groq.test": groq},
+            rules,
+        )
+
+        status, _, chunks, provider, model = gateway.chat(b"", "", "u1")
+
+        assert status == 200
+        assert provider == "Groq"  # ушли от maintenance к следующему
+        assert calls == ["ollama", "groq"]
+
+    def test_a_rule_matches_case_insensitively(self, tmp_path) -> None:
+        from storage.lists import ModelLists
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "QUOTA EXCEEDED", "action": "black"},
+        ])
+        gateway = self._build(
+            tmp_path, [_entry()], self._reply("quota exceeded for account", 403),
+            rules, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        assert "ollama/llama3.2" in ModelLists(tmp_path).blacklist()
+
+    def test_a_rule_for_another_provider_is_ignored(self, tmp_path) -> None:
+        """Правило живёт у своего провайдера: чужой не трогает."""
+        from storage.lists import ModelLists
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "rate limited", "action": "black", "provider": "groq"},
+        ])
+        gateway = self._build(
+            tmp_path, [_entry()], self._reply("rate limited", 429),
+            rules, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        lists = ModelLists(tmp_path)
+        assert "ollama/llama3.2" not in lists.blacklist()  # чужое правило молчит
+        assert "ollama" in lists.grey()  # встроенный 429 → серый
+
+    def test_no_rules_falls_back_to_the_builtin_decisions(self, tmp_path) -> None:
+        from storage.lists import ModelLists
+
+        gateway = self._build(
+            tmp_path, [_entry()], self._reply("rate limited", 429),
+            None, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        assert "ollama" in ModelLists(tmp_path).grey()  # встроенное 429 → серый
+
+    def test_all_matching_rules_fire_not_just_the_first(self, tmp_path) -> None:
+        """Одна строка в двух правилах — срабатывают оба.
+
+        Например: выучить «умеет картинки» и сразу в белый список.
+        """
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "картинка принята", "action": "can-vision"},
+            {"text": "картинка принята", "action": "white"},
+        ])
+        journal = _Journal()
+        gateway = self._build(
+            tmp_path, [_entry(capabilities="")],
+            self._reply("картинка принята и обработана", 200),
+            rules, event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+
+        gateway.chat(b"", "", "u1")
+
+        known = CapabilityStore(tmp_path).known("ollama/llama3.2")
+        assert known.get("vision") is True  # первое правило выучило
+        assert "ollama/llama3.2" in ModelLists(tmp_path).whitelist()  # второе — в белый
+        fired = journal.texts("правило")
+        assert any("умеет картинки" in t for t in fired)
+        assert any("в белый список" in t for t in fired)
+
+    def test_a_composite_condition_needs_the_request_string(self, tmp_path) -> None:
+        """Строка в запросе + статус: без строки запроса правило молчит."""
+        from storage.capabilities import CapabilityStore
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "ok", "action": "can-vision", "req": "image_url",
+             "status": 200, "provider": "ollama"},
+        ])
+        journal = _Journal()
+
+        # Запрос БЕЗ картинки — условие не совпало, ничего не выучено.
+        gateway = self._build(
+            tmp_path, [_entry(capabilities="")],
+            self._reply("ok, nothing special", 200),
+            rules, event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+        gateway.chat(b"", "", "u1")
+        assert CapabilityStore(tmp_path).known("ollama/llama3.2") == {}
+
+        # Запрос С картинкой — условие совпало, выучено «умеет».
+        rules2 = self._rules(tmp_path.__class__(tmp_path / "two"), response=[
+            {"text": "ok", "action": "can-vision", "req": "image_url",
+             "status": 200, "provider": "ollama"},
+        ])
+        gateway2 = self._build(
+            tmp_path / "two", [_entry(capabilities="")],
+            self._reply("ok, image accepted", 200),
+            rules2, user_dir_for=lambda uid: tmp_path / "two",
+        )
+        body = json.dumps({"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+        ]}]}).encode("utf-8")
+        gateway2.chat(body, "", "u1")
+        known = CapabilityStore(tmp_path / "two").known("ollama/llama3.2")
+        assert known.get("vision") is True
+
+    def test_learn_cant_sends_the_request_further(self, tmp_path) -> None:
+        """«Не умеет картинки» — уходим к следующему, ответ не отдаём."""
+        entries = [
+            _entry(),
+            _entry(id="groq", name="Groq", url="http://groq.test/v1",
+                   model="llama-3", fallbackPriority=10),
+        ]
+        rules = self._rules(tmp_path, response=[
+            {"text": "не вижу картинки", "action": "cant-vision"},
+        ])
+        calls = []
+
+        def ollama(request):
+            calls.append("ollama")
+            import httpx as _httpx
+            return _httpx.Response(
+                200, json={"choices": [{"message": {"content": "не вижу картинки, извини"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        def groq(request):
+            calls.append("groq")
+            import httpx as _httpx
+            return _httpx.Response(
+                200, json={"choices": [{"message": {"content": "вижу"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        gateway = self._build(
+            tmp_path, entries,
+            {"http://ollama.test": ollama, "http://groq.test": groq},
+            rules,
+        )
+
+        status, _, _, provider, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 200
+        assert provider == "Groq"  # «не умеет» → ушли дальше
+        assert calls == ["ollama", "groq"]
+
+    def test_learn_can_keeps_the_answer(self, tmp_path) -> None:
+        """«Умеет картинки» — выучили и отдаём ответ клиенту как есть."""
+        from storage.capabilities import CapabilityStore
+
+        rules = self._rules(tmp_path, response=[
+            {"text": "принято", "action": "can-vision"},
+        ])
+        gateway = self._build(
+            tmp_path, [_entry(capabilities="")],
+            self._reply("принято к сведению", 200),
+            rules, user_dir_for=lambda uid: tmp_path,
+        )
+
+        status, _, chunks, _, _ = gateway.chat(b"", "", "u1")
+
+        assert status == 200  # ответ не уходит дальше, а отдаётся
+        body = b"".join(chunks).decode("utf-8", errors="replace")
+        assert "принято" in body
+        known = CapabilityStore(tmp_path).known("ollama/llama3.2")
+        assert known.get("vision") is True
+
+
+class TestJournalBodiesAlways:
+    """Тела запроса и ответа пишутся в журнал всегда — при успехе и при ошибке."""
+
+    def test_an_error_records_the_request_body_in_the_decision(self, tmp_path) -> None:
+        from service.eventlog import EventLog
+        from storage.usertokens import UserTokens
+
+        tokens = UserTokens(tmp_path)
+        token = tokens.create("u1", "телефон")
+        journal = EventLog(tmp_path)
+        gateway = TestModelDecisions._build(
+            tmp_path, [_entry()], {"http://ollama.test": lambda r: httpx.Response(
+                402, json={"error": {"message": "rate limited"}},
+            )},
+            event_log=journal, user_dir_for=lambda uid: tmp_path,
+        )
+        status, _, _, _, _ = gateway.chat(
+            json.dumps({"messages": [{"role": "user", "content": "тестовый запрос"}]},
+                       ensure_ascii=False).encode("utf-8"),
+            "", "u1",
+        )
+        assert status == 502
+        decisions = [e for e in journal.recent() if e["kind"] == "решение"]
+        assert decisions, "решение не записано"
+        assert any("req" in e for e in decisions), "тело запроса не попало в решение"
+        assert any("тестовый запрос" in e.get("req", "") for e in decisions)
+
+
+class TestAutotestBodies:
+    """Автотесты: полные тела без обрезки и отметка времени у каждого теста."""
+
+    @staticmethod
+    def _build(tmp_path, handlers, autotest_store=None):
+        from providers.client import Provider
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            return Provider(url, transport=httpx.MockTransport(handlers[base]), **kwargs)
+
+        return Gateway(
+            lambda: [_entry()], KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), capabilities=CapabilityStore(tmp_path),
+            autotest_store=autotest_store,
+        )
+
+    def test_a_long_answer_is_kept_whole(self, tmp_path) -> None:
+        """Ответ длиннее 4000 знаков не обрезается (ни в теле, ни в тесте)."""
+        long_text = "д" * 9000
+
+        def handler(request):
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": long_text}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        # Подменяем fetch_models, чтобы не ходить в сеть.
+        from providers.client import Provider
+
+        original = Provider.fetch_models
+
+        def fake_models(self, key, timeout=None):
+            return [{"name": "m-1"}]
+
+        Provider.fetch_models = fake_models
+        try:
+            gateway = self._build(tmp_path, {"http://ollama.test": handler})
+            result = gateway.run_autotest("ollama", "", "привет", ["text"])
+        finally:
+            Provider.fetch_models = original
+
+        row = result["results"][0]
+        assert row["status"] == "ok"
+        assert len(row["resp"]) > 4000  # тело сохранено целиком
+        assert "ts" in row and row["ts"]  # время каждого теста
+
+    def test_no_token_limit_is_sent(self, tmp_path) -> None:
+        seen: dict = {}
+
+        def handler(request):
+            seen.update(json.loads(request.content))
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "ок"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        from providers.client import Provider
+
+        original = Provider.fetch_models
+
+        def fake_models(self, key, timeout=None):
+            return [{"name": "m-1"}]
+
+        Provider.fetch_models = fake_models
+        try:
+            gateway = self._build(tmp_path, {"http://ollama.test": handler})
+            gateway.run_autotest("ollama", "", "привет", ["text"])
+        finally:
+            Provider.fetch_models = original
+
+        assert "max_tokens" not in seen  # лимита по токенам нет
+
+    def test_an_empty_prompt_is_refused(self, tmp_path) -> None:
+        gateway = self._build(tmp_path, {"http://ollama.test": lambda r: httpx.Response(
+            200, json={"choices": [{"message": {"content": "ок"}}]},
+            headers={"content-type": "application/json"},
+        )})
+
+        result = gateway.run_autotest("ollama", "", "   ", ["text"])
+
+        assert "error" in result
+        assert result["results"] == []
+
+    def test_stop_breaks_the_run_after_the_current_test(self, tmp_path) -> None:
+        """Запрос остановки прерывает прогон, частичные результаты остаются."""
+        from storage.autotest import AutotestStore
+
+        store = AutotestStore(tmp_path)
+        store.begin("ollama")
+        calls = {"n": 0}
+
+        def handler(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                store.request_stop()  # пользователь нажал «остановить»
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "ок"}}]},
+                headers={"content-type": "application/json"},
+            )
+
+        from providers.client import Provider
+
+        original = Provider.fetch_models
+
+        def fake_models(self, key, timeout=None):
+            return [{"name": "m-1"}, {"name": "m-2"}, {"name": "m-3"}]
+
+        Provider.fetch_models = fake_models
+        try:
+            gateway = self._build(tmp_path, {"http://ollama.test": handler},
+                                  autotest_store=store)
+            result = gateway.run_autotest("ollama", "", "привет", ["text"])
+        finally:
+            Provider.fetch_models = original
+
+        assert result.get("stopped") is True
+        assert len(result["results"]) == 1  # только первый тест успел
+        assert calls["n"] == 1  # остальные не запускались
+        assert store.status()["running"] is False  # прогон завершён
+        assert len(store.load()["results"]) == 1  # частичный результат сохранён
+
+
+class TestGroupRouting:
+    """Запрос своей группы идёт первым; текст не достаётся vision-модели.
+
+    Сортировка внутри уровня: точное совпадение (_fit=0) → надмножество
+    (_fit=1). Уровень (_tier) — белый(1) по-прежнему выше неизвестного(2).
+    """
+
+    @staticmethod
+    def _ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "жив"}}]},
+            headers={"content-type": "application/json"},
+        )
+
+    @staticmethod
+    def _build(tmp_path, entries, handlers):
+        from providers.client import Provider
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            inner = handlers[base]
+            return Provider(url, transport=httpx.MockTransport(inner), **kwargs)
+
+        return Gateway(
+            lambda: entries, KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), capabilities=CapabilityStore(tmp_path),
+        )
+
+    def test_text_request_prefers_the_text_group(self) -> None:
+        """Текстовый запрос: текстовая группа первой, vision — надмножество."""
+        entries = [
+            {"id": "a", "name": "A", "model": "m-a", "enabled": True,
+             "capabilities": "vision, tools", "fallbackPriority": 1},
+            {"id": "b", "name": "B", "model": "m-b", "enabled": True,
+             "capabilities": "", "fallbackPriority": 2},
+        ]
+        text_first = sorted(entries, key=lambda e: Gateway._fit_of(e, set()))
+
+        assert text_first[0]["id"] == "b"  # точное совпадение (текст) впереди
+
+    def test_vision_request_prefers_vision_group(self) -> None:
+        entries = [
+            {"id": "a", "name": "A", "model": "m-a", "enabled": True,
+             "capabilities": "vision, tools", "fallbackPriority": 1},
+            {"id": "b", "name": "B", "model": "m-b", "enabled": True,
+             "capabilities": "vision", "fallbackPriority": 2},
+            {"id": "c", "name": "C", "model": "m-c", "enabled": True,
+             "capabilities": "", "fallbackPriority": 3},
+        ]
+        needed = {"vision"}
+        fits = {e["id"]: Gateway._fit_of(e, needed) for e in entries}
+
+        assert fits["b"] == 0  # ровно vision — точное совпадение
+        assert fits["a"] == 1  # vision+tools — надмножество, дороже
+        assert fits["c"] == 2  # vision нет
+
+    def test_tools_request_prefers_tools_group(self) -> None:
+        entries = [
+            {"id": "a", "name": "A", "model": "m-a", "enabled": True,
+             "capabilities": "vision, tools"},
+            {"id": "b", "name": "B", "model": "m-b", "enabled": True,
+             "capabilities": "tools"},
+        ]
+        needed = {"tools"}
+        fits = {e["id"]: Gateway._fit_of(e, needed) for e in entries}
+
+        assert fits["b"] == 0
+        assert fits["a"] == 1
+
+    def test_full_needs_want_vision_tools_exactly(self) -> None:
+        entry = {"id": "a", "name": "A", "model": "m-a",
+                 "capabilities": "vision, tools"}
+        entry_only_vision = {"id": "b", "name": "B", "model": "m-b",
+                             "capabilities": "vision"}
+
+        assert Gateway._fit_of(entry, {"vision", "tools"}) == 0
+        assert Gateway._fit_of(entry_only_vision, {"vision", "tools"}) == 2
+
+    def test_a_whitelisted_text_model_beats_a_vision_one_on_text(self) -> None:
+        """Сквозной порядок: белый, но внутри — точное совпадение первым."""
+        from storage.lists import WHITELIST_FILES
+
+        tmp = __import__("tempfile").mkdtemp()
+        from pathlib import Path
+        tmp_path = Path(tmp)
+        tmp_path.joinpath(WHITELIST_FILES["text"]).write_text("b/m-b\n", encoding="utf-8")
+        tmp_path.joinpath(WHITELIST_FILES["vision"]).write_text("a/m-a\n", encoding="utf-8")
+        entries = [
+            {"id": "a", "name": "A", "url": "https://a.test/v1", "model": "m-a",
+             "enabled": True, "capabilities": "vision", "fallbackPriority": 1},
+            {"id": "b", "name": "B", "url": "https://b.test/v1", "model": "m-b",
+             "enabled": True, "capabilities": "", "fallbackPriority": 2},
+        ]
+        handlers = {"https://a.test": self._ok, "https://b.test": self._ok}
+        gateway = self._build(tmp_path, entries, handlers)
+
+        status, _, _, provider, _ = gateway.chat(b"", "")
+
+        assert status == 200
+        assert provider == "B"  # обе в белом, но текстовый запрос → текстовая группа
+
+
+class TestRequestRules:
+    """Правила запроса админа: строка в запросе → нужная способность.
+
+    Встроенные признаки (image_url / tools) плюс строки из правил:
+    так админ научает приставку новым маркерам картинок или инструментов.
+    """
+
+    @staticmethod
+    def _rules(tmp_path, request):
+        from storage.rules import RuleStore
+
+        store = RuleStore(tmp_path)
+        for rule in request:
+            store.add("request", text=rule["text"], action=rule["action"])
+        return store
+
+    def test_builtin_markers_still_work(self, tmp_path) -> None:
+        body = json.dumps({"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+        ]}]}).encode("utf-8")
+
+        assert _needs_of(body) == ("vision",)
+
+    def test_a_rule_marks_a_custom_string_as_vision(self, tmp_path) -> None:
+        """Строка админа («нарисуй») в запросе требует vision-модель."""
+        rules = self._rules(tmp_path, [{"text": "нарисуй", "action": "vision"}])
+        body = json.dumps({"messages": [{"role": "user", "content": "нарисуй кота"}]},
+                          ensure_ascii=False).encode("utf-8")
+
+        assert _needs_of(body, rules) == ("vision",)
+
+    def test_a_rule_marks_a_custom_string_as_tools(self, tmp_path) -> None:
+        rules = self._rules(tmp_path, [{"text": "вызови функцию", "action": "tools"}])
+        body = json.dumps({"messages": [{"role": "user", "content": "вызови функцию"}]},
+                          ensure_ascii=False).encode("utf-8")
+
+        assert _needs_of(body, rules) == ("tools",)
+
+    def test_rules_add_to_the_builtin_needs(self, tmp_path) -> None:
+        """Правило дополняет встроенный признак, а не заменяет."""
+        rules = self._rules(tmp_path, [{"text": "добавь инструмент", "action": "tools"}])
+        body = json.dumps({"messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": "x"}},
+            {"type": "text", "text": "добавь инструмент"},
+        ]}]}).encode("utf-8")
+
+        assert set(_needs_of(body, rules)) == {"vision", "tools"}
+
+    def test_a_nonmatching_rule_changes_nothing(self, tmp_path) -> None:
+        rules = self._rules(tmp_path, [{"text": "нарисуй", "action": "vision"}])
+        body = json.dumps({"messages": [{"role": "user", "content": "привет"}]},
+                          ensure_ascii=False).encode("utf-8")
+
+        assert _needs_of(body, rules) == ()
+
+    def test_no_rules_falls_back_to_the_builtins(self, tmp_path) -> None:
+        body = json.dumps({"messages": [{"role": "user", "content": "привет"}]},
+                          ensure_ascii=False).encode("utf-8")
+
+        assert _needs_of(body, None) == ()
+
+

@@ -74,12 +74,49 @@ class TestEventLog:
         assert event["kind"] == "вход"  # в память попало, файл молчит
         assert log.recent()
 
-    def test_bodies_toggle_flips_the_state(self, tmp_path) -> None:
+    def test_bodies_are_always_on_and_not_stored_anywhere(self, tmp_path) -> None:
+        """Переключателя тел больше нет: тела пишутся всегда.
+
+        Регрессия: раньше состояние жило в bodies.state и в окружении
+        AI_BRIDGE_LOG_BODIES; теперь журнал пишет тела по решению
+        хозяина, и никакой файл не может это отключить.
+        """
         log = EventLog(tmp_path)
-        assert log.bodies is False  # по умолчанию выключено
+        assert not hasattr(log, "bodies")  # атрибута-переключателя нет
+        assert not (tmp_path / "bodies.state").exists()  # и файла состояния
 
-        assert log.toggle_bodies() is True
-        assert log.bodies is True
+    def test_base64_is_cut_out_of_bodies(self, tmp_path) -> None:
+        """Картинка в теле — десятки килобайт мусора, который не читают.
 
-        assert log.toggle_bodies() is False
-        assert log.bodies is False
+        Base64 вырезается при записи: в журнале остаётся окружение
+        и заметка о размере, а не стена кодировки.
+        """
+        log = EventLog(tmp_path)
+        blob = "A" * 5000
+        body = f'{{"image_url": "data:image/png;base64,{blob}"}}'
+
+        event = log.record("чат", "u1", "с картинкой", req=body)
+
+        assert "A" * 100 not in event["req"]  # мусор вырезан
+        assert "base64," in event["req"]  # след остался
+        assert "вырезано 5000" in event["req"]
+        # и в файле тоже
+        on_disk = json.loads(log.path.read_text(encoding="utf-8").splitlines()[0])
+        assert "A" * 100 not in on_disk["req"]
+
+    def test_short_base64_like_text_is_left_alone(self, tmp_path) -> None:
+        """Короткие строки не трогаем — вырезал бы обычный текст."""
+        log = EventLog(tmp_path)
+
+        event = log.record("чат", "u1", "обычный ответ", resp="ключ base64,12345")
+
+        assert event["resp"] == "ключ base64,12345"
+
+    def test_base64_in_the_event_text_is_cut_too(self, tmp_path) -> None:
+        """Вырезается в любом строковом поле, не только в телах."""
+        log = EventLog(tmp_path)
+
+        event = log.record("вход", "u1", f"картинка: data:image/jpeg;base64,{'B' * 300}")
+
+        assert "B" * 100 not in event["text"]
+        assert "вырезано 300" in event["text"]

@@ -284,11 +284,15 @@ def _serve(
     import time
 
     from service import autopilot
+    from service.archive import start as start_archiving
     from service.eventlog import EventLog
     from service.gateway import serve as run_server
     from service.space import Spaces, migrate_device_space
     from service.webui import WebUi
+    from storage.capabilities import CapabilityStore
+    from storage.lists import ModelLists
     from storage.reputation import ReputationStore
+    from storage.rules import RuleStore
     from storage.sessions import SessionStore
     from storage.usertokens import UserTokens
     from storage.usage import UsageStore
@@ -298,6 +302,70 @@ def _serve(
     event_log = EventLog(root)
     usage_store = UsageStore(root)
     reputation = ReputationStore(root)
+    capabilities = CapabilityStore(root)
+    # Три списка: белый (4 группы) / серый (персональный) / чёрный в root.
+    lists = ModelLists(root)
+    # Правила «строка → действие» (страница «Правила», только админ).
+    rules = RuleStore(root)
+    # Общая доска «Нашёл bug» (страница «Нашёл bug», для всех вошедших).
+    from storage.board import BoardStore
+    board = BoardStore(root)
+    # Личная почта участников (страница «Сообщения», для всех вошедших).
+    from storage.mail import MailStore
+    mail = MailStore(root)
+    # Уведомления в Telegram: токен бота (админ), chat_id — в профилях.
+    from storage.notify import NotifyStore
+    notify = NotifyStore(root)
+    # Последний прогон автотестов (страница «Автотесты», только админ).
+    from storage.autotest import AutotestStore
+    autotest_store = AutotestStore(root)
+
+    # Миграция старого плоского whitelist.txt: раскладка по группам по
+    # выученной подписи модели. Один раз при старте, повтор безопасен.
+    def _group_of_legacy(name: str) -> str:
+        try:
+            known = capabilities.known(name)
+        except Exception:  # noqa: BLE001
+            known = {}
+        has_v = known.get("vision") is True
+        has_t = known.get("tools") is True
+        if has_v and has_t:
+            return "vision-tools"
+        if has_v:
+            return "vision"
+        if has_t:
+            return "tools"
+        return "text"
+
+    try:
+        moved = lists.migrate_old_whitelist(_group_of_legacy)
+        if moved:
+            print(
+                f"белый список разложен по группам: {len(moved)} моделей "
+                "(старый файл — whitelist.txt.migrated)",
+                flush=True,
+            )
+    except Exception as exc:  # noqa: BLE001 — миграция не должна ронять службу
+        print(f"миграция белого списка не удалась: {exc}", file=sys.stderr)
+    # Серый список: спит теперь провайдер целиком, старые строки
+    # «провайдер/модель» сворачиваются — в корне и у каждого человека.
+    try:
+        from storage.lists import ModelLists as _ModelLists
+
+        grey_dirs = [root]
+        grey_dirs.extend(
+            path.parent for path in (root / "users").glob("*/greylist.txt")
+        )
+        collapsed = 0
+        for directory in grey_dirs:
+            collapsed += len(_ModelLists(directory).migrate_old_grey())
+        if collapsed:
+            print(f"серый список свёрнут по провайдерам: {collapsed} строк", flush=True)
+    except Exception as exc:  # noqa: BLE001 — миграция не должна ронять службу
+        print(f"миграция серого списка не удалась: {exc}", file=sys.stderr)
+    # Ежедневные снимки журнала и статистики — сразу и потом с наступлением
+    # каждого нового дня (service/archive.py).
+    start_archiving(root)
     admin_id = server.user_id
     spaces = Spaces(root, admin_id=admin_id)
     sessions = SessionStore(root)
@@ -319,16 +387,25 @@ def _serve(
 
     state = {"providers": providers, "server_flags": server_flags}
 
+    def refresh_catalogue() -> None:
+        """Обновить кэш каталога из сервера (сразу после правок и по таймеру).
+
+        Без этого кэш устаревает до 300 секунд, и `merge_view` строит вид
+        из старого списка — удалённая запись возвращается и пересохраняется
+        в снапшот (баг: «удалить не получается»).
+        """
+        try:
+            fresh, _, _, flags = server.fetch_catalogue()
+            state["providers"] = fresh
+            state["server_flags"] = flags
+        except ServerError as exc:
+            # Каталог — украшение; без него работают включённые записи.
+            print(f"каталог не обновился: {exc}", file=sys.stderr)
+
     def refresh_loop() -> None:
         while True:
             time.sleep(300)
-            try:
-                fresh, _, _, flags = server.fetch_catalogue()
-                state["providers"] = fresh
-                state["server_flags"] = flags
-            except ServerError as exc:
-                # Каталог — украшение; без него работают включённые записи.
-                print(f"каталог не обновился: {exc}", file=sys.stderr)
+            refresh_catalogue()
 
     def entries_for(user_id: str, *, is_admin: bool) -> list[dict]:
         return ops.merge_view(
@@ -351,6 +428,12 @@ def _serve(
         is_admin = profile.get("role") == "admin"
         return (lambda: entries_for(user_id, is_admin=is_admin)), space.keys
 
+    def user_dir_for(user_id: str):
+        """Каталог человека (для серого списка); None — неизвестен."""
+        if not user_id or users.get(user_id) is None:
+            return None
+        return spaces.for_user(user_id).directory
+
     ui = WebUi(
         lambda: state["providers"],
         server,
@@ -364,6 +447,14 @@ def _serve(
         event_log=event_log,
         usage_store=usage_store,
         reputation=reputation,
+        capabilities=capabilities,
+        lists=lists,
+        refresh=refresh_catalogue,
+        rules=rules,
+        autotest_store=autotest_store,
+        board=board,
+        mail=mail,
+        notify=notify,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
@@ -391,6 +482,11 @@ def _serve(
         event_log=event_log,
         usage_store=usage_store,
         reputation=reputation,
+        capabilities=capabilities,
+        lists=lists,
+        user_dir_for=user_dir_for,
+        rules=rules,
+        autotest_store=autotest_store,
     )
 
 

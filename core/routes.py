@@ -54,10 +54,23 @@ def is_local_url(url: str) -> bool:
 
 
 def enabled(entries: list[dict]) -> list[dict]:
-    """Включённые провайдеры в порядке приоритета (потом по имени)."""
+    """Включённые провайдеры: уровни списков, совпадение группы, приоритет.
+
+    Уровень (`_tier`) ставит гейтвей по спискам: 1 — белый, 2 —
+    неизвестный, 3 — проснувшийся серый, 4 — чёрный (последний шанс).
+    Совпадение (`_fit`) — насколько группа модели подходит именно этому
+    запросу: 0 — точное (текст → текстовая группа, картинка → vision,
+    инструменты → tools), 1 — надмножество, 2 — нужного нет. Без списков
+    обе пометки0 — прежний порядок (приоритет, имя) не меняется.
+    """
     return sorted(
         (entry for entry in entries if entry.get("enabled")),
-        key=lambda entry: (int(entry.get("fallbackPriority") or 0), entry.get("name") or entry["id"]),
+        key=lambda entry: (
+            int(entry.get("_tier") or 0),
+            int(entry.get("_fit") or 0),
+            int(entry.get("fallbackPriority") or 0),
+            entry.get("name") or entry["id"],
+        ),
     )
 
 
@@ -110,6 +123,17 @@ def _capable(entry: dict, needs: tuple[str, ...]) -> bool:
     return all(word in caps for word in needs)
 
 
+def _refused_for(entry: dict, needs: tuple[str, ...]) -> bool:
+    """Доказала ли модель отказ от нужного (а не «просто не заявила»).
+
+    Разница ключевая: незаявленную названную модель пробуем (вдруг умеет),
+    а доказавшую отказ — не ставим первой в цепочку. Отказ накапливает
+    гейтвей в `_refused` из обученной памяти (capabilities.json).
+    """
+    refused = entry.get("_refused") or set()
+    return any(need in refused for need in needs)
+
+
 def advertised_models(entries: list[dict]) -> list[dict]:
     """Модели, которые приставка предлагает клиентам.
 
@@ -147,24 +171,36 @@ def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = ())
         return {"providerId": entry["id"], "model": str(entry.get("model") or "").strip()}
 
     def last_resort(attempts: list[dict], seen: set) -> list[dict]:
-        """Последний шанс — остальные включённые по приоритету, своими
-        моделями. Способности запроса уважаются и здесь: подменять модель
-        на без vision ради картинки — только хуже сделать."""
+        """Последний шанс — остальные включённые по приоритету.
+
+        Способные (заявившие нужное) идут первыми. Немаркированные не
+        выбрасываются: иначе замкнутая петля — выучить vision можно только
+        получив картинку, а роутер давал бы её лишь уже помеченным, и ни
+        одна модель никогда не доказала бы способность. Немаркированная
+        пробуется последней: отказ выучится (следующий раз пропустим),
+        успех откроет vision.
+        """
+        capable, plain = [], []
         for entry in chain:
             if entry["id"] in seen or not str(entry.get("model") or "").strip():
                 continue
-            if needs and not _capable(entry, needs):
-                continue
+            (capable if (not needs or _capable(entry, needs)) else plain).append(entry)
+        for entry in capable:
+            attempts.append(attempt(entry))
+            seen.add(entry["id"])
+        for entry in plain:
             attempts.append(attempt(entry))
             seen.add(entry["id"])
         return attempts
 
-    # Модель не названа: каждый включённый со своей настроенной моделью;
-    # при наличии требований — только подходящие по способностям.
+    # Модель не названа: каждый включённый со своей настроенной моделью.
+    # Способные (заявившие нужное) идут первыми; немаркированные не
+    # отбрасываются — иначе vision нельзя никогда выучить (нужно получить
+    # картинку, чтобы доказать, а фильтр давал бы её только помеченным).
     if not wanted:
         pool = [entry for entry in chain if str(entry.get("model") or "").strip()]
         if needs:
-            pool = [entry for entry in pool if _capable(entry, needs)]
+            pool.sort(key=lambda entry: 0 if _capable(entry, needs) else 1)
         return [attempt(entry) for entry in pool]
 
     # Полное совпадение (включая «префикс/модель» в имени самой модели)
@@ -176,7 +212,24 @@ def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = ())
 
     # «ollama/qwen3» — явный выбор провайдера для модели не из каталога.
     # Префикс решает только порядок: закреплённый идёт первым, но его
-    # отказ переводит дальше, как у обычной модели.
+    # отказ переводит дальше, как у обычной модели. Даже доказавшая
+    # отказ от нужного остаётся в цепочке (в хвосте через _fit) — отказ
+    # бывает временным, и «не умеет» должно сниматься успехом.
+    #
+    # Однако при запросе с картинками/инструментами названная, но
+    # неподходящая модель сразу уходит в хвост: картинку текстовой не
+    # даём. Первыми идут способные (белый список первым).
+    if needs and matches:
+        capable = [entry for entry in matches if _capable(entry, needs)]
+        plain = [entry for entry in matches if not _capable(entry, needs)]
+        attempts = [attempt(entry) for entry in capable]
+        # last_resort видит все записи, кроме названных целиком; они
+        # распределены сами: подходящие уже в голове, неподходящие —
+        # добавятся в самый конец.
+        attempts = last_resort(attempts, {entry["id"] for entry in matches})
+        attempts.extend(attempt(entry) for entry in plain)
+        return _tail_refused(attempts, entries, needs)
+
     if not matches:
         prefix, slash, rest = wanted.partition("/")
         if slash and rest.strip():
@@ -185,10 +238,39 @@ def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = ())
                     pinned = [{"providerId": entry["id"], "model": rest.strip()}]
                     return last_resort(pinned, {entry["id"]})
 
+    # Названная модель с доказанным отказом от нужного не исключается
+    # совсем (иначе «не умеет» не снимется само и модель умрёт насовсем),
+    # а просто уходит в конец цепочки: подходитющие идут первыми. Отказ
+    # часто временный (402/429, обновление модели) — пусть шанс остаётся.
+    # Степень совпадения (_fit=2 для не умеющих нужного) и решает порядок.
+
     attempts = [attempt(entry) for entry in matches]
     # Требования запроса и «последний шанс» — одно и то же движение:
     # дальше по приоритету, с проверкой способностей.
-    return last_resort(attempts, {item["providerId"] for item in attempts})
+    attempts = last_resort(attempts, {item["providerId"] for item in attempts})
+
+    # Доказавшие отказ от нужного уходят в конец цепочки (мягкая
+    # стратегия): закрепление по префиксу или высокий приоритет не
+    # должны ставить их первыми, когда есть подходящие. Из цепочки не
+    # выкидываем — отказ бывает временным, и успех снимает «не умеет».
+    return _tail_refused(attempts, entries, needs)
+
+
+def _tail_refused(attempts: list[dict], entries: list[dict],
+                  needs: tuple[str, ...]) -> list[dict]:
+    """Доказавшие отказ от нужного — в хвост цепочки (но не убраны)."""
+    if not (needs and entries):
+        return attempts
+    by_id = {entry["id"]: entry for entry in entries}
+
+    def _is_refused(attempt: dict) -> bool:
+        entry = by_id.get(attempt["providerId"])
+        return bool(entry) and _refused_for(entry, needs)
+
+    return [a for a in attempts if not _is_refused(a)] + [
+        a for a in attempts if _is_refused(a)
+    ]
+
 
 def should_fallback(status: int) -> bool:
     """Переключать ли на следующего провайдера после ответа `status`."""

@@ -143,6 +143,71 @@ class TestCheck:
         assert "неработающей" in result["dead"]
 
 
+class TestReportChat:
+    """Тест-чат засчитывает проверку: ответ модели — в статистику сообщества."""
+
+    def test_an_answer_is_reported_as_ok(self, _device) -> None:
+        server = _Server(can_edit=False)
+
+        reported = ops.report_chat(
+            server.client, _entry(), {"question": "привет", "answer": "ок", "error": ""},
+            report_for="u9",
+        )
+
+        posts = [i for i in server.seen if i["method"] == "POST" and i["path"] == "/api/ai-stats"]
+        assert reported is True
+        assert len(posts) == 1
+        assert posts[0]["body"]["ok"] is True
+        assert posts[0]["body"]["userId"] == "u9"  # чьим именем записан успех
+
+    def test_a_provider_error_is_reported_as_fail(self, _device) -> None:
+        server = _Server(can_edit=False)
+
+        ops.report_chat(server.client, _entry(), {"error": "HTTP 500: взорвался"})
+
+        posts = [i for i in server.seen if i["method"] == "POST" and i["path"] == "/api/ai-stats"]
+        assert posts[0]["body"]["ok"] is False
+        assert "500" in posts[0]["body"]["error"]
+
+    def test_a_missing_key_never_lies_to_the_statistics(self, _device) -> None:
+        """«Нужен ключ» — состояние приставки, а не поломка провайдера."""
+        server = _Server(can_edit=False)
+
+        reported = ops.report_chat(server.client, _entry(), {"error": "нужен ключ — введите его"})
+
+        assert reported is False
+        assert not any(i["method"] == "POST" for i in server.seen)
+
+    def test_an_unpicked_model_is_not_a_fault_either(self, _device) -> None:
+        server = _Server(can_edit=False)
+
+        reported = ops.report_chat(server.client, _entry(), {"error": "не выбрана модель"})
+
+        assert reported is False
+        assert not any(i["method"] == "POST" for i in server.seen)
+
+
+class TestReportModels:
+    def test_a_fetched_list_counts_as_alive(self, _device) -> None:
+        server = _Server(can_edit=False)
+
+        reported = ops.report_models(server.client, _entry(), ["llama3.2", "qwen3"], report_for="u9")
+
+        posts = [i for i in server.seen if i["method"] == "POST" and i["path"] == "/api/ai-stats"]
+        assert reported is True
+        assert posts[0]["body"]["ok"] is True
+        assert posts[0]["body"]["userId"] == "u9"
+
+    def test_an_empty_list_is_not_success(self, _device) -> None:
+        """Пустой список = провайдер молчит или без ключа — это не успех."""
+        server = _Server(can_edit=False)
+
+        reported = ops.report_models(server.client, _entry(), [])
+
+        assert reported is False
+        assert not any(i["method"] == "POST" for i in server.seen)
+
+
 class TestAdd:
     def test_a_superuser_pushes_server_list_plus_new_entry(self, _device) -> None:
         """Локальные выжившие записи в каталог не попадают."""
@@ -264,6 +329,11 @@ class TestEdit:
         assert sent[0]["context"] == "128K"
 
     def test_empty_form_fields_do_not_erase(self, _device) -> None:
+        """Пустые поля формы не стирают значения, которые не трогали.
+
+        Модель — исключение: её пустое значение = «убрал сам», иначе
+        смена модели не состоялась бы (регрессия: модель прилипала).
+        """
         server = _Server(can_edit=True)
         ops.edit(
             server.client, [_entry()], [_entry()], "ollama",
@@ -271,9 +341,24 @@ class TestEdit:
         )
         result = ops.edit(
             server.client, [_entry(name="Мой Ollama")], [_entry(name="Мой Ollama")],
-            "ollama", {"name": "  ", "model": "  "}, can_edit=True,
+            "ollama", {"name": "  ", "pricing": "  "}, can_edit=True,
         )
         assert result["code"] == 2  # всё пустое → отклонено, ничего не стёрто
+
+    def test_an_emptied_model_is_removed(self, _device) -> None:
+        """Пустое поле модели убирает модель и чистит справку о старой."""
+        server = _Server(can_edit=True)
+        entry = _entry(model="MiMo-V2.5", capabilities="vision")
+
+        result = ops.edit(
+            server.client, [entry], [_entry()], "ollama", {"model": ""},
+            can_edit=True,
+        )
+
+        assert result["code"] == 0
+        assert result["entry"]["model"] == ""  # модель ушла
+        assert result["entry"]["capabilities"] == ""  # справка описывала старую
+        assert "справка о модели очищена" in result["note"]
 
     def test_a_user_cannot_edit_a_catalogue_entry(self, _device) -> None:
         server = _Server(can_edit=False)
@@ -315,6 +400,43 @@ class TestRemove:
 
         assert result["code"] == 0
         assert Snapshot().load() == []
+
+
+class TestMergeNeverDisables:
+    """Просмотр страницы не выключает провайдеров — только тумблер.
+
+    Регрессия 23.10.2026: гонка параллельных рендеров портила снапшот,
+    чтение возвращало пусто, и все 18 провайдеров молча выключались
+    (чат отвечал 502, выбор провайдера в тестах пуст).
+    """
+
+    def test_a_render_with_empty_flags_keeps_enabled(self, _device) -> None:
+        server = _Server(can_edit=False)
+        server.client.fetch_catalogue()
+        snapshot = Snapshot()
+        snapshot.save([_entry(enabled=True)])
+
+        wanted = ops.merge_view(
+            server.client, [_entry()], can_edit=False, server_flags={},
+            snapshot=snapshot,
+        )
+
+        assert wanted[0]["enabled"] is True
+        assert snapshot.load()[0]["enabled"] is True
+
+    def test_empty_providers_do_not_touch_the_snapshot(self, _device) -> None:
+        server = _Server(can_edit=False)
+        snapshot = Snapshot()
+        snapshot.save([_entry(enabled=True)])
+
+        # Каталог ещё не загружен — ни записи, ни перезаписи.
+        wanted = ops.merge_view(
+            server.client, [], can_edit=False, server_flags={},
+            snapshot=snapshot,
+        )
+
+        assert wanted and wanted[0]["enabled"] is True
+        assert snapshot.load()[0]["enabled"] is True
 
 
 class TestPersonalModel:

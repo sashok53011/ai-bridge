@@ -59,6 +59,10 @@ def merge_view(
     """
     store = snapshot or Snapshot()
     local = store.load()
+    # Каталог ещё не загружен (старт службы/сбой сервера): не пересобираем
+    # и не сохраняем — иначе пустой список выключит все переключатели.
+    if not providers:
+        return local
     flags = {
         **server_flags,
         **{entry["id"]: bool(entry.get("enabled")) for entry in local},
@@ -90,6 +94,18 @@ def merge_view(
         ]
 
     wanted = with_local_enabled(listed, local)
+
+    # Просмотр страницы никогда не выключает провайдеров: если человек
+    # когда-то включил запись (enabled=True), она остаётся включённой —
+    # выключить может только явный тумблер. Иначе сбой чтения снапшота
+    # (пустой файл, гонка) молча гасит весь каталог.
+    local_on = {entry["id"]: entry for entry in local if entry.get("enabled")}
+    wanted = [
+        ({**entry, "enabled": True} if entry["id"] in local_on and not entry.get("enabled")
+         else entry)
+        for entry in wanted
+    ]
+
     store.save(wanted)
     return wanted
 
@@ -237,6 +253,67 @@ def check(
         "report_error": report_error,
         "counter": fresh_counter,
     }
+
+
+#: Ответы теста, которые не характеризуют модель: ключ и выбор модели —
+#: это состояние приставки, а не работоспособность провайдера.
+_NOT_MODEL_ERRORS = ("нужен ключ", "не выбрана модель", "у провайдера не выбрана модель")
+
+
+def report_chat(
+    server: PocketBase,
+    provider: dict,
+    outcome: dict,
+    *,
+    report_for: str = "",
+) -> bool:
+    """Засчитать проверку по итогу тест-чата. Успех — ok, отказ — fail.
+
+    Надёжнее старой проверки списком моделей: здесь провайдер обязан
+    ответить на настоящий запрос. «Нужен ключ» и «не выбрана модель» не
+    пишем — это не поломка модели, и солгать статистику нельзя.
+    Возвращает, ушёл ли отчёт.
+    """
+    error = str(outcome.get("error") or "")
+    if any(error.startswith(prefix) for prefix in _NOT_MODEL_ERRORS):
+        return False
+    try:
+        server.report_stats(
+            provider_id=provider["id"],
+            model=provider.get("model") or "",
+            ok=not error,
+            error=error,
+            for_user=report_for,
+        )
+        return True
+    except ServerError:
+        return False  # отчёт — не повод ронять страницу
+
+
+def report_models(
+    server: PocketBase,
+    provider: dict,
+    models: list[str],
+    *,
+    report_for: str = "",
+) -> bool:
+    """Засчитать проверку: провайдер отдал список моделей — он жив.
+
+    Срабатывает при выборе модели (страница «модель» тянет список);
+    пустой список не считается успехом.
+    """
+    if not models:
+        return False
+    try:
+        server.report_stats(
+            provider_id=provider["id"],
+            model=provider.get("model") or "",
+            ok=True,
+            for_user=report_for,
+        )
+        return True
+    except ServerError:
+        return False
 
 
 def add(
@@ -394,7 +471,7 @@ def set_model(
             )
             for entry in updated
         ]
-        note = "справка о модели очищена — заполните для новой"
+        note = "справка о модели очищена"
         new_entry = next(entry for entry in updated if entry["id"] == provider_id)
     else:
         # Личный выбор: помечаем осознанным (picked) — переживёт
@@ -479,7 +556,7 @@ def edit(
             )
             for entry in updated
         ]
-        note = "справка о модели очищена — заполните для новой"
+        note = "справка о модели очищена"
 
     new_entry = next(entry for entry in updated if entry["id"] == provider_id)
     (snapshot or Snapshot()).save(updated)

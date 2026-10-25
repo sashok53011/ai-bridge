@@ -20,12 +20,16 @@ import json
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 from core.models import union_models
 from core.routes import advertised_models, is_local_url, request_needs, route, should_fallback
+from providers import copilot
 from providers.client import NeedsKeyError, Provider, ServerError
+from storage.lists import GREY_CYCLE_LIMIT, ModelLists
+from storage.rules import ACTION_CAPABILITY, LEARN_ACTIONS, describe, match_response
 
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
 _NO_MODELS = {"object": "list", "data": []}
@@ -42,6 +46,43 @@ LOCAL_TIMEOUT = 600.0
 
 #: Вопрос тестового чата: крошечный, но настоящий.
 DEFAULT_QUESTION = "Привет! Ответь одним словом: всё ли работает?"
+
+
+def _now_iso() -> str:
+    """Текущее время в ISO (UTC) — для отметок в результатах тестов."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _reaction(status: int, test_type: str, record: bool,
+              *, capability: str = "", used_tool: bool = False) -> str:
+    """Что сделал бы (или сделал) роутер с таким ответом провайдера."""
+    prefix = "сработала" if record else "сработала бы"
+    if status == 0:
+        return f"{prefix}: чёрный список (сеть/таймаут)"
+    if status >= 400:
+        if status == 402:
+            if test_type == "free":
+                return "сработала: в список «доказано платные»"
+            return f"{prefix}: серый список на сутки"
+        if status in (401, 403):
+            return f"{prefix}: списки не тронуты (дело в ключе)"
+        if status == 404 or status >= 500:
+            return f"{prefix}: чёрный список"
+        if status == 400:
+            if capability:
+                word = "картинки" if capability == "vision" else "инструменты"
+                return f"{prefix}: выучить «не умеет {word}»"
+            return f"{prefix}: запрос отклонён провайдером, списки не тронуты"
+        return f"{prefix}: списки не тронуты (ошибка запроса)"
+    if test_type == "vision":
+        base = "белый список + выучить «умеет картинки»"
+    elif test_type == "tools":
+        base = "белый список + выучить «умеет инструменты»"
+    else:
+        base = "белый список (подтверждена)"
+    if test_type == "tools" and used_tool:
+        base += "; инструмент вызван"
+    return f"{prefix}: {base}"
 
 
 def _hidden_error(payload: bytes) -> str:
@@ -88,13 +129,65 @@ def _garbage_answer(payload: bytes, content_type: str) -> bool:
     return False
 
 
-def _needs_of(body: bytes) -> tuple[str, ...]:
-    """Требования запроса (vision/tools) из его тела; не-JSON — пусто."""
+def _needs_of(body: bytes, rules=None) -> tuple[str, ...]:
+    """Что требует запрос (vision/tools) из его тела; не-JSON — пусто.
+
+    Встроенные признаки OpenAI-формата (image_url / tools) плюс строки
+    из правил запроса админа (storage.rules): так админ может научить
+    приставку новым маркерам картинок или инструментов. Правило ищет
+    строку и в сыром теле, и в значениях полей — кириллица в JSON часто
+    экранирована (\\u0434...), и по сырому тексту её не найти.
+    """
+    needs: list[str] = []
     try:
         data = json.loads(body.decode("utf-8"))
     except (ValueError, UnicodeDecodeError):
-        return ()
-    return request_needs(data)
+        data = None
+    if isinstance(data, dict):
+        needs.extend(request_needs(data))
+    if rules is not None:
+        try:
+            raw = body.decode("utf-8", errors="replace").lower()
+        except Exception:  # noqa: BLE001
+            raw = ""
+        haystack = raw + " " + " ".join(_all_strings(data)).lower() if raw else ""
+        for rule in rules.request_rules():
+            needle = str(rule.get("text") or "").strip().lower()
+            action = str(rule.get("action") or "")
+            capability = ACTION_CAPABILITY.get(action, "")
+            if needle and capability and needle in haystack and capability not in needs:
+                needs.append(capability)
+    return tuple(needs)
+
+
+def _all_strings(value: object) -> list[str]:
+    """Все строки из разобранного JSON (значения полей, куски сообщений)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [text for item in value.values() for text in _all_strings(item)]
+    if isinstance(value, list):
+        return [text for item in value for text in _all_strings(item)]
+    return []
+
+
+def _merge_capabilities(configured: object, known: dict) -> str:
+    """Текст «Способностей» с учётом выученных фактов.
+
+    Умеет — дописывает слово; не умеет — вычёркивает его из текста.
+    Порядок слов из справки сохраняется, выученное добавляется в конец.
+    """
+    words = [
+        word.strip().lower()
+        for word in str(configured or "").split(",")
+        if word.strip()
+    ]
+    for capability, ok in known.items():
+        if ok and capability not in words:
+            words.append(capability)
+        elif not ok and capability in words:
+            words = [word for word in words if word != capability]
+    return ", ".join(words)
 
 
 def _usage_from(payload: bytes) -> dict:
@@ -126,35 +219,60 @@ def _absorb_usage(state: dict, line: str) -> None:
 
 #: Понятные фразы отказа из-за невозможностей модели (400): не умеет
 #: картинки/инструменты — или вообще несовместимый канал (live-модели
-#: Gemini отвечают только через WebSocket).
+#: Gemini отвечают только через WebSocket). Каждой фразе соответствует
+#: способность, которой она касается: пусто — не про способности
+#: (канал WebSocket не даёт права учить vision/tools).
 _CAPABILITY_HINTS = (
-    "image_url is not supported",
-    "images are not supported",
-    "does not support image",
-    "does not support tool",
-    "does not support function",
-    "tool use is not supported",
-    "no tools support",
-    "no image input",
-    "only supports real-time bidirectional streaming",
-    "bidi generatecontent",
-    "bidigeneratecontent",
+    ("image_url is not supported", "vision"),
+    ("images are not supported", "vision"),
+    ("does not support image", "vision"),
+    ("no image input", "vision"),
+    ("does not support tool", "tools"),
+    ("does not support function", "tools"),
+    ("tool use is not supported", "tools"),
+    ("no tools support", "tools"),
+    ("only supports real-time bidirectional streaming", ""),
+    ("bidi generatecontent", ""),
+    ("bidigeneratecontent", ""),
 )
 
+#: Широкий путь (когда точная фраза не совпала): слова-отрицания и слова
+#: про способности. Провайдеры формулируют отказ по-разному (Cohere:
+#: «image content is not supported»), и точный список всегда отстаёт.
+#: Привязка к needs запроса защищает от ложных срабатываний на
+#: по-настоящему кривых запросах («invalid temperature» — не про vision).
+_NEGATIONS = (
+    "not supported", "unsupported", "does not support", "do not support",
+    "doesn't support", "doesnt support", "does not accept", "do not accept",
+    "doesn't accept", "doesnt accept", "cannot", "can't", "cant",
+    "no support", "not allowed", "not permitted", "reject",
+    "not recognized", "unrecognized", "not available", "unable to",
+    "cannot handle", "can't handle",
+)
+_VISION_WORDS = ("image", "images", "vision", "picture", "photo", "multimodal", "visual")
+_TOOLS_WORDS = ("tool", "tools", "function", "functions", "tool_use", "tool call")
 
-def _capability_refusal(payload: bytes) -> str:
-    """Провайдер отверг запрос из-за невозможностей модели (400).
 
-    Узкая эвристика: многие шлюзы отвечают понятными фразами
-    («image_url is not supported», «does not support tools», «только
-    через WebSocket») — такое стоит переключить на подходящую модель,
-    а не отдавать клиенту.
+def _capability_refusal(payload: bytes, needs: tuple[str, ...] = ()) -> tuple[str, str]:
+    """(сообщение, способность) отказа модели (400); ("", "") — не отказ.
+
+    Сначала — точные фразы (включая канал WebSocket). Если не совпало —
+    широкий путь: 400 с отрицанием и упоминанием способности, о которой
+    просил запрос. Так ловится Cohere («image content is not supported»)
+    и подобные формулировки. Способность в ответе — чтобы приставка
+    выучила: заявленное «умеет» провернулось мимо факта провайдера.
     """
     text = payload.decode("utf-8", errors="replace").lower()
-    for hint in _CAPABILITY_HINTS:
+    for hint, capability in _CAPABILITY_HINTS:
         if hint in text:
-            return f"модель отвергла запрос ({hint})"
-    return ""
+            return f"модель отвергла запрос ({hint})", capability
+    if not any(negation in text for negation in _NEGATIONS):
+        return "", ""  # нет отрицания — это не отказ модели
+    if "vision" in needs and any(word in text for word in _VISION_WORDS):
+        return "модель отвергла запрос (не поддерживает картинки)", "vision"
+    if "tools" in needs and any(word in text for word in _TOOLS_WORDS):
+        return "модель отвергла запрос (не поддерживает инструменты)", "tools"
+    return "", ""
 
 
 def test_chat(
@@ -175,10 +293,7 @@ def test_chat(
         {
             "model": entry.get("model") or "",
             "messages": [{"role": "user", "content": question}],
-            # Лимит с запасом: модели с рассуждением (qwen3 и подобные)
-            # тратят часть бюджета на «размышления», и при крошечном
-            # лимите итог в content обрезается в пустоту.
-            "max_tokens": 256,
+            # Без лимита по токенам: ответ всегда полный, как у клиента.
             "temperature": 0,
         },
         ensure_ascii=False,
@@ -207,6 +322,15 @@ def test_chat(
 
     if response.status_code >= 400:
         detail = response.read().decode("utf-8", errors="replace")[:300]
+        # У Copilot свой частый отказ (400 model_not_supported): каталог
+        # /models шире тарифа — человеку нужна причина, а не JSON.
+        if copilot.is_copilot_url(str(entry.get("url") or "")):
+            human = copilot.explain_error(
+                response.status_code, detail,
+                retry_after=str(response.headers.get("retry-after") or ""),
+            )
+            if human:
+                return fail(human)
         return fail(f"HTTP {response.status_code}: {detail}".strip())
 
     payload = response.read()
@@ -293,6 +417,11 @@ class Gateway:
         event_log=None,  # service.eventlog.EventLog | None
         usage_store=None,  # storage.usage.UsageStore | None
         reputation=None,  # storage.reputation.ReputationStore | None
+        capabilities=None,  # storage.capabilities.CapabilityStore | None
+        lists=None,  # storage.lists.ModelLists | None (глобальные каталога)
+        user_dir_for=None,  # Callable[[str], Path | None] — каталог человека (серый список)
+        rules=None,  # storage.rules.RuleStore | None — «строка → действие»
+        autotest_store=None,  # storage.autotest.AutotestStore | None
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -306,6 +435,11 @@ class Gateway:
         self._event_log = event_log
         self._usage_store = usage_store
         self._reputation = reputation
+        self._capabilities = capabilities
+        self._lists = lists
+        self._user_dir_for = user_dir_for
+        self._rules = rules
+        self._autotest_store = autotest_store
         # Реестр доступа: {человек: (время, годен?)} и память о поломке.
         self._access_cache: dict[str, tuple[float, bool]] = {}
         self._access_down_until = 0.0
@@ -441,12 +575,6 @@ class Gateway:
         if self._event_log is not None:
             self._event_log.record(kind, user, text, **fields)
 
-    def _bodies_on(self) -> bool:
-        """Записывать ли тела запросов/ответов (кнопка на странице журнала)."""
-        if self._event_log is None:
-            return False
-        return bool(self._event_log.bodies)
-
     def _record_usage(
         self, user_id: str, entry: dict, model: str, usage: dict, *, ok: bool, switched: bool
     ) -> None:
@@ -513,6 +641,558 @@ class Gateway:
             return attempts
         return free or attempts
 
+    # ------------------------------------------------------------ способности
+
+    #: Как человек называет то, что просил запрос — для журнала.
+    _CAP_WORDS = {"vision": "с картинкой", "tools": "с инструментами"}
+
+    def _learn(
+        self, entry: dict, model: str, capability: str, ok: bool, reason: str = "",
+        *, req: str = "", resp: str = "",
+    ) -> None:
+        """Запомнить доказанный факт и рассказать о нём в журнале.
+
+        Каждый шаг описывается подробно — журнал это видит:
+        - успех на неизвестной модели: «выучила vision»;
+        - успех после прежнего «не умеет»: «перевернула "не умеет"»;
+        - повторный успех: «подтвердила vision»;
+        - отказ провайдера: «выучила "не умеет tools"» / «подтверждено».
+        Отказ канала («только через WebSocket») — не про способности:
+        не учи ни vision, ни tools, но событие отметить всё равно надо.
+        """
+        if self._capabilities is None:
+            return
+        key = self._rep_key(entry, model)
+        subject = f"{key} ({entry.get('name') or entry.get('id')})"
+        if not capability:
+            if reason:
+                fields = {}
+                if req:
+                    fields["req"] = req
+                if resp:
+                    fields["resp"] = resp
+                self.note(
+                    "способности", "—",
+                    f"{subject}: {reason} — не про способности, не учила",
+                    **fields,
+                )
+            return
+        try:
+            was = self._capabilities.known(key).get(capability)
+            self._capabilities.learn(key, capability, ok)
+        except Exception:  # noqa: BLE001 — знания не должны ломать чат
+            return
+        with_what = self._CAP_WORDS.get(capability, f"запросом ({capability})")
+        if ok:
+            if was is None:
+                text = f"{subject}: запрос {with_what} прошёл — выучила {capability}"
+            elif was:
+                text = f"{subject}: запрос {with_what} прошёл — подтвердила {capability}"
+            else:
+                text = (
+                    f"{subject}: запрос {with_what} прошёл — перевернула "
+                    f"«не умеет», теперь {capability}"
+                )
+        else:
+            detail = reason or "провайдер отверг запрос"
+            if was is None:
+                text = f"{subject}: {detail} — выучила «не умеет {capability}»"
+            elif was:
+                text = (
+                    f"{subject}: {detail} — отозвала {capability}: "
+                    "выучила «не умеет»"
+                )
+            else:
+                text = f"{subject}: {detail} — «не умеет {capability}» подтверждено"
+        fields = {}
+        if req:
+            fields["req"] = req
+        if resp:
+            fields["resp"] = resp
+        self.note("способности", "—", text, **fields)
+
+    def _skipped_by_capability(
+        self, entries: list[dict], attempts: list[dict], needs: tuple[str, ...]
+    ) -> list[str]:
+        """Модели, не попавшие в цепочку из-за способностей.
+
+        Нужно для честной диагностики: когда фолбэк «пустой», в ошибке
+        видно, сколько моделей отсеяно и почему («запрос требует vision»),
+        а не только причина последней попытки.
+        """
+        if not needs:
+            return []
+        used = {attempt["providerId"] for attempt in attempts}
+        skipped: list[str] = []
+        for entry in entries:
+            model = str(entry.get("model") or "").strip()
+            if not model or entry["id"] in used:
+                continue
+            caps = str(entry.get("capabilities") or "").lower()
+            if not all(word in caps for word in needs):
+                skipped.append(f"{entry['id']}/{model}")
+        return skipped
+
+    def _apply_lists(self, entries: list[dict], user_id: str = "",
+                     needs: tuple[str, ...] = ()) -> list[dict]:
+        """Четыре уровня списков + степень совпадения группы.
+
+        Уровни (`_tier`): 1 — белый (подтверждённые), 2 — неизвестный,
+        3 — серый этого человека с истёкшим сном, 4 — чёрный (последний
+        шанс). Спящий **провайдер** (серый) исключается целиком — со
+        всеми моделями. Уровень решает, в каком порядке эшелоны идут;
+        внутри эшелона сортирует `core.routes`.
+
+        Степень совпадения (`_fit`) — какой группе модель отвечает на
+        **этот** запрос: 0 — точное совпадение (текстовой запрос → текстовая
+        группа, картинка → vision, инструменты → tools), 1 — надмножество
+        (умеет больше, чем просят — дороже, но сгодится), 2 — не умеет
+        нужного (из цепочки её выкинет фильтр способностей, но пусть
+        сортировка не поднимает её вверх).
+        """
+        if self._lists is None:
+            return entries
+        try:
+            white = self._lists.whitelist()
+            black = self._lists.blacklist()
+            grey = self._grey_of(user_id)
+        except Exception:  # noqa: BLE001 — списки не должны ломать чат
+            return entries
+        now = datetime.now(timezone.utc)
+        needed = set(needs)
+        kept: list[dict] = []
+        for entry in entries:
+            model = str(entry.get("model") or "").strip()
+            key = f"{entry['id']}/{model}".lower()
+            short = model.lower()
+            cell = grey.get(entry["id"])  # серый — провайдером, со всеми моделями
+            if cell and cell["until"] > now:
+                continue  # спит — не трогаем все его модели
+            if black and (key in black or short in black):
+                tier = 4
+            elif (self._lists is not None and
+                  (key in self._lists.paid() or short in self._lists.paid())):
+                tier = 4  # платная — последний шанс, после бесплатных
+            elif white and (key in white or short in white):
+                tier = 1
+            elif cell:  # срок сна истёк — провайдер пробудился
+                tier = 3
+            else:
+                tier = 2
+            fit = self._fit_of(entry, needed)
+            kept.append({**entry, "_tier": tier, "_fit": fit})
+        return kept
+
+    @staticmethod
+    def _fit_of(entry: dict, needed: set) -> int:
+        """Степень совпадения группы модели с запросом.
+
+        Способности берутся из обученного поля «Способности» (оно уже
+        склеено с рукописной справкой в `_taught_entries`).
+        """
+        caps = str(entry.get("capabilities") or "").lower()
+        has = {
+            word for word in ("vision", "tools") if word in caps
+        }
+        if not needed:
+            # Текстовый запрос: точка — текстовая группа; надмножество (vision/tools) дороже.
+            return 0 if not has else 1
+        if has == needed:
+            return 0  # точное совпадение: vision→vision, tools→tools, оба→оба
+        if needed < has:
+            return 1  # умеет больше, чем просят — сгодится, но это надмножество
+        return 2  # нужного нет
+
+    def _grey_of(self, user_id: str) -> dict:
+        """Серый список человека: пусто, если каталога нет."""
+        if not self._user_dir_for or not user_id:
+            return {}
+        directory = self._user_dir_for(user_id)
+        if directory is None:
+            return {}
+        return ModelLists(directory).grey()
+
+    # ------------------------------------------------------------ решения
+
+    #: Мягкие причины: модель жива, но «не сегодня» (лимит/кредиты/«позже»).
+    _SOFT_HINTS = (
+        "insufficient credit", "out of credit", "no credit", "more credits",
+        "try again later", "try later", "rate limit", "too many requests",
+        "quota exceeded", "usage limit", "credits", "баланс", "кредит",
+        "лимит", "квот", "попробуйте позже", "попробуй позже",
+    )
+
+    def _is_soft(self, text: str) -> bool:
+        """Похоже ли сообщение на мягкий отказ (живая модель, временная причина)."""
+        low = str(text or "").lower()
+        return any(hint in low for hint in self._SOFT_HINTS)
+
+    def _grey_store(self, user_id: str):
+        """ModelLists персонального каталога человека; None — каталога нет."""
+        if not self._user_dir_for or not user_id:
+            return None
+        directory = self._user_dir_for(user_id)
+        return ModelLists(directory) if directory is not None else None
+
+    def _key_of(self, entry: dict, model: str) -> str:
+        return f"{entry['id']}/{model}"
+
+    # ------------------------------------------------------------ правила
+
+    def _rule_hits(self, entry: dict, *, req_text: str, resp_text: str,
+                   status: int) -> list[tuple[str, str]]:
+        """Все подошедшие правила ответа провайдера: [(действие, условие)].
+
+        Условие составное (строка в запросе + строка в ответе + статус):
+        все указанные части обязаны совпасть. Срабатывают **все**
+        подошедшие правила по порядку — одной строкой можно и выучить,
+        и в белый положить. Правило админа сильнее встроенного решения:
+        проверяется до него.
+        """
+        if self._rules is None:
+            return []
+        try:
+            rules = self._rules.response_rules(entry["id"])
+        except Exception:  # noqa: BLE001 — правила не должны ломать чат
+            return []
+        hits: list[tuple[str, str]] = []
+        for rule in rules:
+            if match_response(rule, req_text=req_text, resp_text=resp_text,
+                              status=status):
+                action = str(rule.get("action") or "")
+                if action:
+                    hits.append((action, describe(rule)))
+        return hits
+
+    def _apply_rules(self, entry: dict, model: str,
+                     hits: list[tuple[str, str]], user_id: str,
+                     *, status: int = 0, resp: str = "",
+                     req: str = "") -> bool:
+        """Выполнить все подошедшие правила. True — переключиться дальше.
+
+        Действия: grey / black / white / switch / untouched / выучить
+        (can-vision, can-tools, cant-vision, cant-tools). «Годные»
+        действия (белый, только журнал, выучить «умеет») сами по себе
+        не уводят — ответ отдаётся клиенту; серый/чёрный/переключить/
+        «не умеет» уводят к следующему. На ответе с ошибкой приставка
+        уходит к следующему в любом случае. Каждое срабатывание —
+        строка в журнале с условием-основанием.
+        """
+        key = self._key_of(entry, model)
+        leave = False
+        for action, hit in hits:
+            fields: dict = {
+                "model": model, "provider": entry["name"],
+                "rule": hit, "action": action,
+            }
+            if status:
+                fields["status"] = status
+            if resp:
+                fields["resp"] = resp
+            if req:
+                fields["req"] = req
+
+            if action == "grey":
+                self.note("правило", user_id or "—",
+                          f"{entry['name']}: {hit} → серый список (правило)",
+                          **fields)
+                self._decide_soft(entry, model, f"правило: {hit}", user_id,
+                                  status=status, resp=resp, req=req)
+                leave = True
+            elif action == "black":
+                self.note("правило", user_id or "—",
+                          f"{entry['name']}: {hit} → чёрный список (правило)",
+                          **fields)
+                self._decide_hard(entry, model, f"правило: {hit}", user_id,
+                                  status=status, resp=resp, req=req)
+                leave = True
+            elif action == "white":
+                try:
+                    known = self._capabilities.known(key) if self._capabilities else {}
+                except Exception:  # noqa: BLE001
+                    known = {}
+                group = self._group_of(entry, known)
+                self._lists.whitelist_place(key, group, f"правило: {hit}")
+                self.note("правило", user_id or "—",
+                          f"{entry['name']}: {hit} → в белый список "
+                          f"(группа {group})", **fields)
+            elif action == "untouched":
+                self.note("правило", user_id or "—",
+                          f"{entry['name']}: {hit} → списки не тронуты",
+                          **fields)
+            elif action in LEARN_ACTIONS:
+                capability, ok = LEARN_ACTIONS[action]
+                self._learn(entry, model, capability, ok, f"правило: {hit}", req=req, resp=resp)
+                # Новые списки «доказано без vision/tools»: модель, доказавшая
+                # отсутствие, добавляется; доказавшая присутствие — удаляется.
+                if capability == "vision":
+                    if ok:
+                        self._lists.refused_vision_drop(key)
+                    else:
+                        self._lists.refused_vision_add(key)
+                elif capability == "tools":
+                    if ok:
+                        self._lists.refused_tools_drop(key)
+                    else:
+                        self._lists.refused_tools_add(key)
+                verb = "умеет" if ok else "не умеет"
+                word = "картинки" if capability == "vision" else "инструменты"
+                self.note("правило", user_id or "—",
+                          f"{entry['name']}: {hit} → выучено «{verb} {word}»",
+                          **fields)
+                if not ok:
+                    leave = True  # сказала «не умеет» — ответ пустой, уходим
+            else:
+                # switch и любое неизвестное — просто уходим дальше
+                self.note("правило", user_id or "—",
+                          f"{entry['name']}: {hit} → переключение на другого",
+                          **fields)
+                leave = True
+        return leave
+
+    #: Группы белого списка из подписи модели.
+    @staticmethod
+    def _group_of(entry: dict, known: dict) -> str:
+        """Группа модели по обученной подписи: text/vision/tools/vision-tools."""
+        caps = _merge_capabilities(entry.get("capabilities"), known)
+        has_v = "vision" in caps.lower()
+        has_t = "tools" in caps.lower()
+        if has_v and has_t:
+            return "vision-tools"
+        if has_v:
+            return "vision"
+        if has_t:
+            return "tools"
+        return "text"
+
+    def _decide_success(self, entry: dict, model: str, user_id: str,
+                        status: int = 200, resp: str = "",
+                        needs: tuple[str, ...] = (),
+                        req: str = "") -> None:
+        """Успех: в белый список (в группу её подписи), из серого/чёрного — наружу.
+
+        Группа = подпись модели: запрос с картинкой доказал vision —
+        модель ложится в vision-файл (или перекладывается из text, если
+        вдруг уже была подтверждена). Событие пишется **только при смене
+        состояния** — впервые, переложена, вышла из серого/чёрного.
+        Повторный успех уже подтверждённой модели молчит: журнал не
+        захлебнётся. Основание (провайдер, статус, тело) прикладывается.
+
+        Успех с нужной способностью снимает отметку «доказано без …»:
+        модель показала, что умеет.
+        """
+        if self._lists is None:
+            return
+        key = self._key_of(entry, model)
+        try:
+            known: dict = {}
+            if self._capabilities is not None:
+                try:
+                    known = self._capabilities.known(key)
+                except Exception:  # noqa: BLE001
+                    known = {}
+            group = self._group_of(entry, known)
+            was_group = self._lists.whitelist_group(key)
+            was_grey = entry["id"] in self._grey_of(user_id)
+            was_black = key.lower() in self._lists.blacklist()
+            changed = self._lists.whitelist_place(
+                key, group, "подтверждена успехом"
+            )
+            if was_group == group and not (was_grey or was_black) and not changed:
+                return  # уже подтверждена в этой же группе — не шумим
+            self._lists.blacklist_drop(key)
+            grey = self._grey_store(user_id)
+            if grey is not None:
+                grey.grey_drop(entry["id"])  # серый — провайдером
+            # Успех с нужной способностью снимает отметку «не умеет»:
+            # модель показала, что умеет.
+            if "vision" in needs:
+                self._lists.refused_vision_drop(key)
+            if "tools" in needs:
+                self._lists.refused_tools_drop(key)
+            if was_grey or was_black:
+                origin = "из серого" if was_grey else "из чёрного"
+                text = (
+                    f"{entry['name']}: HTTP {status} — подтвердила себя, "
+                    f"{origin} в белый список (группа {group})"
+                )
+            elif was_group and was_group != group:
+                text = (
+                    f"{entry['name']}: HTTP {status} — переложена: "
+                    f"{was_group} → {group} (доказала новую способность)"
+                )
+            else:
+                text = (
+                    f"{entry['name']}: HTTP {status} — подтвердила себя, "
+                    f"впервые в белом списке (группа {group})"
+                )
+            fields = {
+                "model": model, "provider": entry["name"], "status": status,
+                "group": group,
+            }
+            if req:
+                fields["req"] = req
+            if resp:
+                fields["resp"] = resp
+            self.note("решение", user_id or "—", text, **fields)
+        except Exception:  # noqa: BLE001 — списки не должны ломать чат
+            pass
+
+    def _decide_soft(self, entry: dict, model: str, reason: str, user_id: str,
+                     status: int = 0, resp: str = "",
+                     req: str = "") -> None:
+        """Мягкий отказ: провайдер в серый на сутки; третий цикл — чёрный.
+
+        Серый — провайдером (со всеми моделями), циклы считаются по
+        нему; в чёрный уходит конкретная «провайдер/модель».
+        """
+        if self._lists is None:
+            return
+        key = self._key_of(entry, model)
+        fields: dict = {"model": model, "provider": entry["name"]}
+        if status:
+            fields["status"] = status
+        if req:
+            fields["req"] = req
+        if resp:
+            fields["resp"] = resp
+        try:
+            grey = self._grey_store(user_id)
+            if grey is None:
+                return
+            cell = grey.grey().get(entry["id"])
+            cycle = (cell["cycle"] if cell else 0) + 1
+            self._lists.whitelist_drop(key)
+            if cycle >= GREY_CYCLE_LIMIT:
+                grey.grey_drop(entry["id"])
+                self._lists.blacklist_add(
+                    key, f"{reason} · {cycle} цикла сна подряд"
+                )
+                self.note(
+                    "решение", user_id or "—",
+                    f"{entry['name']}: {reason} — {cycle} цикла сна подряд, "
+                    "в чёрном списке",
+                    **fields,
+                )
+                return
+            until = grey.grey_add(entry["id"], reason, cycle=cycle)
+            when = until.strftime("%d.%m %H:%M")
+            self.note(
+                "решение", user_id or "—",
+                f"{entry['name']}: {reason} — серый список до {when} (цикл {cycle})",
+                **fields,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _decide_hard(self, entry: dict, model: str, reason: str, user_id: str,
+                     status: int = 0, resp: str = "", req: str = "") -> None:
+        """Жёсткий отказ: в чёрный список, из белого и серого — наружу."""
+        if self._lists is None:
+            return
+        key = self._key_of(entry, model)
+        fields: dict = {"model": model, "provider": entry["name"]}
+        if status:
+            fields["status"] = status
+        if req:
+            fields["req"] = req
+        if resp:
+            fields["resp"] = resp
+        try:
+            self._lists.whitelist_drop(key)
+            self._lists.blacklist_add(key, reason)
+            # Серый не трогаем: он теперь по провайдеру, а поломка одной
+            # его модели не должна будить (или гасить) остальные.
+            self.note(
+                "решение", user_id or "—",
+                f"{entry['name']}: {reason} — в чёрном списке",
+                **fields,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _decide_client(self, entry: dict, model: str, user_id: str,
+                       status: int = 0, resp: str = "", req: str = "") -> None:
+        """Провайдер отверг запрос (400) не по способности — списки не тронуты.
+
+        Это не поломка модели (не её вина) и не повод учить «не умеет»:
+        запрос неподдерживаемого формата или квирка провайдера. Решение
+        озвучиваем, чтобы в журнале не было тишины, но без обвинений —
+        «вина клиента» звучит резко и часто неверно.
+        """
+        fields: dict = {"model": model, "provider": entry["name"]}
+        if status:
+            fields["status"] = status
+        if req:
+            fields["req"] = req
+        if resp:
+            fields["resp"] = resp
+        self.note(
+            "решение", user_id or "—",
+            f"{entry['name']}: HTTP {status} — запрос отклонён провайдером, "
+            "списки не тронуты",
+            **fields,
+        )
+
+    def _taught_entries(self, entries: list[dict]) -> list[dict]:
+        """Копии записей с выученными способностями в поле «Способности».
+
+        Живой факт перекрывает рукописную справку в обе стороны: успех
+        дописывает способность, честный отказ вычёркивает — кто последний,
+        тот и прав. Маршрутизатор (`core/routes.py`) читает текст поля и
+        не меняется; знание вливается через существующий вход.
+
+        Дополнительно помечаем `_refused` — способности, от которых модель
+        **доказала** отказ (обученный `False` или явное «не умеет …» в
+        справке). Это не то же самое, что «просто не заявлена»: доказанный
+        отказ позволяет роутеру не тратить попытку на заведомо
+        неподходящую модель, даже если клиент её назвал.
+
+        Новые списки «доказано без vision/tools» (novision.txt / notools.txt)
+        дополняют эту память: модель в списке считается отказавшей, и
+        приставка больше не кормит её картинками/инструментами.
+        """
+        if self._capabilities is None and self._lists is None:
+            return entries
+        taught: list[dict] = []
+        for entry in entries:
+            key = self._rep_key(entry, str(entry.get("model") or "").strip())
+            known = {}
+            if self._capabilities is not None:
+                try:
+                    known = self._capabilities.known(key)
+                except Exception:  # noqa: BLE001
+                    known = {}
+            refused = {
+                capability
+                for capability, value in known.items()
+                if value is False
+            }
+            # Явное «не умеет …» в рукописной справке — тоже отказ.
+            text = str(entry.get("capabilities") or "").lower()
+            for capability in ("vision", "tools"):
+                if f"не умеет {capability}" in text:
+                    refused.add(capability)
+            # Новые списки: «доказано без vision/tools» — глобальные, как
+            # blacklist. Модель в списке считается доказавшей отсутствие.
+            if self._lists is not None:
+                model_key = key.lower()
+                short = str(entry.get("model") or "").strip().lower()
+                if model_key in self._lists.refused_vision() or short in self._lists.refused_vision():
+                    refused.add("vision")
+                if model_key in self._lists.refused_tools() or short in self._lists.refused_tools():
+                    refused.add("tools")
+            if known or refused:
+                entry = {
+                    **entry,
+                    "capabilities": _merge_capabilities(
+                        entry.get("capabilities"), known
+                    ) if known else entry.get("capabilities"),
+                    "_refused": refused,
+                }
+            taught.append(entry)
+        return taught
+
     # ------------------------------------------------------------ решения
 
     def models_payload(self, user_id: str = "") -> dict:
@@ -567,6 +1247,220 @@ class Gateway:
             return max(self._timeout, LOCAL_TIMEOUT)
         return self._timeout
 
+    # ------------------------------------------------------------ автотесты
+
+    def run_autotest(
+        self,
+        provider_id: str,
+        image_b64: str,
+        prompt: str,
+        tests: list[str],
+        *,
+        record: bool = False,
+    ) -> dict:
+        """Прогнать тесты по всем моделям провайдера.
+
+        Промпт — только пользовательский: своих подсказок нет. Один
+        прогон = один тип теста × все модели. Возвращает
+        {"provider", "results", "prompt"}; при ошибке — "error".
+        """
+        import time
+
+        prompt = (prompt or "").strip()
+        if not prompt:
+            return {"provider": provider_id, "error": "промпт не задан", "results": []}
+
+        entries = self._entries_provider()
+        entry = next((e for e in entries if e["id"] == provider_id), None)
+        if entry is None:
+            return {"provider": provider_id, "error": "провайдер не найден", "results": []}
+
+        key = self._keys.get(provider_id)
+        if self._autotest_store is not None:
+            self._autotest_store.tick("получение списка моделей…", "")
+        # Список моделей — короткий таймаут: висеть на нём нельзя,
+        # по неудаче просто идём настроенной моделью.
+        try:
+            list_client = self._provider_factory(entry["url"], timeout=15.0)
+            models = [m["name"] for m in list_client.fetch_models(key)]
+        except Exception:  # noqa: BLE001 — нет списка — используем настроенную
+            models = [str(entry.get("model") or "").strip()] if entry.get("model") else []
+        if not models:
+            return {"provider": provider_id, "error": "моделей не найдено", "results": []}
+
+        total = len(models) * len(tests)
+        if self._autotest_store is not None:
+            self._autotest_store.plan(total)
+
+        results: list[dict] = []
+        stopped = False
+        for model in models:
+            if self._autotest_store is not None and self._autotest_store.stop_requested():
+                stopped = True
+                break
+            for test_type in tests:
+                if self._autotest_store is not None and self._autotest_store.stop_requested():
+                    stopped = True
+                    break
+                if self._autotest_store is not None:
+                    self._autotest_store.tick(model, test_type)
+                result = self._run_one_autotest(entry, model, test_type, image_b64, prompt,
+                                               record=record)
+                results.append(result)
+                if self._autotest_store is not None:
+                    self._autotest_store.record(result)
+                    self._autotest_store.advance()
+            if stopped:
+                break
+
+        if self._autotest_store is not None:
+            self._autotest_store.finish(provider_id, results, prompt=prompt)
+
+        if stopped:
+            return {"provider": provider_id, "results": results, "prompt": prompt,
+                    "stopped": True}
+        return {"provider": provider_id, "results": results, "prompt": prompt}
+
+    def _run_one_autotest(self, entry: dict, model: str, test_type: str,
+                          image_b64: str, prompt: str, *, record: bool) -> dict:
+        """Один тест одной модели. Возвращает словарь результата."""
+        import json as _json
+        import time
+
+        body: dict = {"model": model}
+        if test_type == "vision":
+            body["messages"] = [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_b64}},
+            ]}]
+        elif test_type == "tools":
+            body["messages"] = [{"role": "user", "content": prompt}]
+            body["tools"] = [{"type": "function", "function": {
+                "name": "get_current_time",
+                "description": "Возвращает текущее время сервера",
+                "parameters": {"type": "object", "properties": {}},
+            }}]
+            body["tool_choice"] = "auto"
+        elif test_type == "free":
+            body["messages"] = [{"role": "user", "content": prompt}]
+        else:  # text
+            body["messages"] = [{"role": "user", "content": prompt}]
+
+        body_bytes = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req_text = body_bytes.decode("utf-8", errors="replace")
+        key = self._keys.get(entry["id"])
+        client = self._provider_factory(entry["url"], timeout=60.0)
+
+        start = time.monotonic()
+        reaction_status = 0
+        reaction_used_tool = False
+        reaction_cap = ""
+        try:
+            response = client.forward_chat(body_bytes, api_key=key, timeout=60.0, stream=False)
+            elapsed = round(time.monotonic() - start, 1)
+            raw = response.read() if hasattr(response, "read") else b""
+            resp_text = raw.decode("utf-8", errors="replace")
+            status_code = getattr(response, "status_code", 0)
+            reaction_status = status_code
+
+            if status_code >= 400:
+                if status_code == 402:
+                    try:
+                        self._lists.paid_add(f"{entry['id']}/{model}")
+                    except Exception:  # noqa: BLE001
+                        pass
+                if status_code == 400:
+                    try:
+                        _refusal, reaction_cap = _capability_refusal(
+                            raw, needs=(test_type,) if test_type in ("vision", "tools") else ()
+                        )
+                    except Exception:  # noqa: BLE001
+                        reaction_cap = ""
+                result = {
+                    "model": model,
+                    "test": test_type,
+                    "ts": _now_iso(),
+                    "status": "fail",
+                    "http_status": status_code,
+                    "response": f"HTTP {status_code}: {resp_text}",
+                    "used_tool": None,
+                    "duration": elapsed,
+                    "req": req_text,
+                    "resp": resp_text,
+                }
+                if record and status_code == 400 and reaction_cap:
+                    self._learn(entry, model, reaction_cap, False, "автотест",
+                                req=req_text, resp=resp_text)
+                    if reaction_cap == "vision":
+                        self._lists.refused_vision_add(f"{entry['id']}/{model}")
+                    elif reaction_cap == "tools":
+                        self._lists.refused_tools_add(f"{entry['id']}/{model}")
+            else:
+                try:
+                    data = _json.loads(resp_text) if resp_text else {}
+                except ValueError:
+                    data = {}
+                content = ""
+                used_tool = False
+                if isinstance(data, dict) and "choices" in data and data["choices"]:
+                    msg = data["choices"][0].get("message", {}) or {}
+                    content = msg.get("content") or ""
+                    used_tool = bool(msg.get("tool_calls"))
+                elif isinstance(data, dict) and data.get("error"):
+                    content = str(data["error"])
+                else:
+                    content = resp_text
+                reaction_used_tool = used_tool
+                result = {
+                    "model": model,
+                    "test": test_type,
+                    "ts": _now_iso(),
+                    "status": "ok",
+                    "http_status": status_code,
+                    "response": content,
+                    "used_tool": used_tool if test_type == "tools" else None,
+                    "duration": elapsed,
+                    "req": req_text,
+                    "resp": resp_text,
+                }
+                if record:
+                    if test_type == "vision":
+                        self._learn(entry, model, "vision", True, "автотест",
+                                    req=req_text, resp=resp_text)
+                        try:
+                            self._lists.refused_vision_drop(f"{entry['id']}/{model}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    elif test_type == "tools":
+                        self._learn(entry, model, "tools", True, "автотест",
+                                    req=req_text, resp=resp_text)
+                        try:
+                            self._lists.refused_tools_drop(f"{entry['id']}/{model}")
+                        except Exception:  # noqa: BLE001
+                            pass
+            response.close()
+        except Exception as exc:  # noqa: BLE001
+            elapsed = round(time.monotonic() - start, 1)
+            reaction_status = 0
+            result = {
+                "model": model,
+                "test": test_type,
+                "ts": _now_iso(),
+                "status": "error",
+                "http_status": 0,
+                "response": str(exc),
+                "used_tool": None,
+                "duration": elapsed,
+                "req": req_text,
+                "resp": "",
+            }
+
+        result["reaction"] = _reaction(
+            reaction_status, test_type, record,
+            capability=reaction_cap, used_tool=reaction_used_tool,
+        )
+        return result
+
     def chat(self, body: bytes, requested_model: str, user_id: str = ""):
         """Проксирует чат по цепочке маршрутов.
 
@@ -577,14 +1471,16 @@ class Gateway:
         ``(502, ..., [описание со всеми попытками])``.
         """
         entries_provider, keys = self._context(user_id)
-        entries = entries_provider()
-        needs = _needs_of(body)
+        entries = self._taught_entries(entries_provider())
+        needs = _needs_of(body, self._rules)
+        entries = self._apply_lists(entries, user_id, needs)
         attempts = route(entries, requested_model, needs=needs)
         started = time.monotonic()
-        # Тело запроса для журнала — если включена кнопка «тела запросов».
-        body_fields = (
-            {"req": body[:500].decode("utf-8", errors="replace")} if self._bodies_on() else {}
-        )
+        # Тело запроса для журнала — пишется всегда (лимит 4000, на странице
+        # видно целиком).
+        body_fields = {"req": body.decode("utf-8", errors="replace")}
+        # Текст запроса (нижний регистр) — для условий правил ответа.
+        req_text = body.decode("utf-8", errors="replace").lower()
         if not attempts:
             available = ", ".join(model["id"] for model in advertised_models(entries))
             message = f"модель «{requested_model or '—'}» не обслуживается"
@@ -593,6 +1489,12 @@ class Gateway:
                     f"; запрос требует: {', '.join(needs)} — включите провайдера "
                     "с такими способностями (поле «Способности»)"
                 )
+                skipped = self._skipped_by_capability(entries, attempts, needs)
+                if skipped:
+                    message += (
+                        f"; без нужных способностей: {len(skipped)} — "
+                        + ", ".join(skipped[:5])
+                    )
             if available:
                 message += f"; доступны: {available}"
             else:
@@ -604,6 +1506,17 @@ class Gateway:
         # Модели на паузе пропускаются — если остались свободные.
         attempts = self._repute_chain(attempts, by_id)
         problems: list[str] = []
+        # Отказы с классификацией: чем закончилась каждая попытка.
+        failures: list[dict] = []
+
+        def failed(entry: dict, model: str, kind: str, reason: str,
+                   status: int = 0, resp: str = "", req: str = "") -> None:
+            """Запомнить отказ попытки: kind — hard / soft / neutral."""
+            problems.append(f"{entry['name']}: {reason}".strip())
+            failures.append({
+                "entry": entry, "model": model, "kind": kind, "reason": reason,
+                "status": status, "resp": resp, "req": req,
+            })
 
         def served(
             status,
@@ -614,8 +1527,14 @@ class Gateway:
             resp_body: bytes = b"",
             usage: dict | None = None,
             record: bool = True,
+            chat_event: bool = True,
         ):
-            """Успех: отдаём ответ, пишем событие и считаем расходы."""
+            """Успех: отдаём ответ, пишем событие и считаем расходы.
+
+            ``chat_event=False`` — событие «чат» напишет сам поток, когда
+            дойдёт до конца: у потокового ответа тело собирается по ходу
+            и попадает в журнал только целиком.
+            """
             duration = round(time.monotonic() - started, 1)
             fields: dict = {
                 "model": model,
@@ -629,13 +1548,14 @@ class Gateway:
                 fields["tokens_in"] = usage.get("prompt_tokens")
                 fields["tokens_out"] = usage.get("completion_tokens")
             if resp_body:
-                fields["resp"] = resp_body[:500].decode("utf-8", errors="replace")
-            self.note(
-                "чат",
-                user_id or "—",
-                f"{model} через {entry['name']} · HTTP {status} · {duration}s",
-                **fields,
-            )
+                fields["resp"] = resp_body.decode("utf-8", errors="replace")
+            if chat_event:
+                self.note(
+                    "чат",
+                    user_id or "—",
+                    f"{model} через {entry['name']} · HTTP {status} · {duration}s",
+                    **fields,
+                )
             if record:
                 self._record_usage(
                     user_id,
@@ -648,6 +1568,24 @@ class Gateway:
             if status < 400:
                 # Живой ответ снимает с модели все прошлые штрафы.
                 self._healed(entry, model)
+                # Тело ответа — для журнала и для выученных фактов.
+                resp_text = (
+                    resp_body.decode("utf-8", errors="replace") if resp_body else ""
+                )
+                # И доказывает способности: запрос с картинкой/инструментами
+                # прошёл — модель умеет то, что просил клиент.
+                for capability in needs:
+                    self._learn(entry, model, capability, True,
+                                req=body_fields.get("req", ""), resp=resp_text)
+                # Решение: подтверждена — в белый список (только при смене
+                # состояния; основание — статус и фрагмент ответа).
+                self._decide_success(entry, model, user_id, status=status, resp=resp_text,
+                                    needs=needs, req=body_fields.get("req", ""))
+            else:
+                # Ответ дошёл, но это вина клиента (400/413/422) — списки не трогаем.
+                self._decide_client(entry, model, user_id, status=status,
+                                    resp=resp_body.decode("utf-8", errors="replace") if resp_body else "",
+                                    req=body_fields.get("req", ""))
             return status, content_type, chunks, entry["name"], model
 
         for attempt in attempts:
@@ -665,15 +1603,38 @@ class Gateway:
                     stream=True,
                 )
             except ServerError as exc:
-                problems.append(f"{entry['name']}: {exc}")
+                failed(entry, attempt["model"], "hard", str(exc), req=body_fields["req"])
                 continue
 
             if response.status_code >= 400 and should_fallback(response.status_code):
                 # Тело читаем до конца: соединение с отказавшим провайдером
                 # надо закрыть, а причина пригодится, если никто не справится.
-                detail = response.read().decode("utf-8", errors="replace")[:200]
-                problems.append(f"{entry['name']}: HTTP {response.status_code} {detail}".strip())
-                if response.status_code == 404:
+                detail = response.read().decode("utf-8", errors="replace")
+                status = response.status_code
+                # Правило админа сильнее встроенного решения по статусу:
+                # подошедшие правила решают, что делать (все по порядку).
+                hits = self._rule_hits(entry, req_text=req_text,
+                                       resp_text=detail.lower(), status=status)
+                if hits:
+                    self._apply_rules(entry, attempt["model"], hits, user_id,
+                                      status=status, resp=detail, req=body_fields["req"])
+                    # Ошибка остаётся ошибкой: уходим к следующему в любом
+                    # случае (даже если все действия «годные»).
+                    reason = "правило: " + "; ".join(hit for _, hit in hits)
+                    failed(entry, attempt["model"], "neutral", reason,
+                           status=status, resp=detail, req=body_fields["req"])
+                    response.close()
+                    continue
+                reason = f"HTTP {status} {detail}".strip()
+                if status in (402, 429):
+                    kind = "soft"  # кредиты/лимит — временная причина
+                elif status in (401, 403):
+                    kind = "neutral"  # ключ не годится — не поломка модели
+                else:
+                    kind = "hard"
+                failed(entry, attempt["model"], kind, reason, status=status, resp=detail,
+                       req=body_fields["req"])
+                if status == 404:
                     # 404 от чата почти всегда «модель неизвестна провайдеру» —
                     # штраф конкретной модели, не всего провайдера.
                     self._fault(
@@ -687,12 +1648,42 @@ class Gateway:
                 # понятный отказ модели за отсутствие картинок/инструментов —
                 # такое честнее переключить на подходящую модель.
                 raw = response.read()
-                refusal = _capability_refusal(raw)
-                if refusal:
-                    problems.append(f"{entry['name']}: {refusal}")
-                    self._fault(entry, attempt["model"], refusal)
-                    response.close()
-                    continue
+                text = raw.decode("utf-8", errors="replace")
+                # Правило админа сильнее встроенного распознавания отказов.
+                hits = self._rule_hits(entry, req_text=req_text,
+                                       resp_text=text.lower(), status=400)
+                if hits:
+                    leave = self._apply_rules(entry, attempt["model"], hits,
+                                              user_id, status=400, resp=text,
+                                              req=body_fields["req"])
+                    if leave:
+                        reason = "правило: " + "; ".join(h for _, h in hits)
+                        failed(entry, attempt["model"], "neutral", reason,
+                               status=400, resp=text, req=body_fields["req"])
+                        response.close()
+                        continue
+                    # Все действия «годные» — 400 отдаём клиенту как есть
+                    # (как и без правил), списки не тронуты.
+                else:
+                    refusal, refused_capability = _capability_refusal(raw, needs)
+                    if refusal:
+                        self._fault(entry, attempt["model"], refusal)
+                        # Отказ провайдера — тоже факт: заявленное «умеет»
+                        # опровергнуто практикой, и выученный запрет важнее
+                        # рукописной справки. Причина уходит в журнал.
+                        self._learn(entry, attempt["model"], refused_capability,
+                                    False, refusal,
+                                    req=body_fields["req"],
+                                    resp=raw.decode("utf-8", errors="replace"))
+                        # WebSocket-отказ — модель нерабочая для чата (жёсткий);
+                        # отказ по способности — списки не трогаем, только учим.
+                        kind = "hard" if not refused_capability else "neutral"
+                        failed(entry, attempt["model"], kind, refusal,
+                               status=400,
+                               resp=raw.decode("utf-8", errors="replace"),
+                               req=body_fields["req"])
+                        response.close()
+                        continue
 
                 def chunks_400(body=raw):
                     yield body
@@ -714,15 +1705,46 @@ class Gateway:
                 # {"error":}. Ошибки клиента (4xx без фолбэка) идут как есть.
                 payload = response.read()
                 response.close()
-                hidden = _hidden_error(payload)
-                if hidden:
-                    problems.append(f"{entry['name']}: {hidden}")
-                    self._fault(entry, attempt["model"], hidden)
-                    continue
-                if _garbage_answer(payload, content_type):
-                    problems.append(f"{entry['name']}: тело ответа не разбирается как JSON")
-                    self._fault(entry, attempt["model"], "мусор вместо JSON")
-                    continue
+                text = payload.decode("utf-8", errors="replace")
+                # Правило админа сильнее: строка в 200-ответе (например
+                # «maintenance») может велеть уйти или списать в серый.
+                # Условие составное — строка в запросе + статус и т.п.
+                hits = self._rule_hits(entry, req_text=req_text,
+                                       resp_text=text.lower(),
+                                       status=response.status_code)
+                blessed = False  # правила сказали «ответ годный»
+                if hits:
+                    leave = self._apply_rules(
+                        entry, attempt["model"], hits, user_id,
+                        status=response.status_code, resp=text,
+                        req=body_fields["req"],
+                    )
+                    if leave:
+                        reason = "правило: " + "; ".join(h for _, h in hits)
+                        failed(entry, attempt["model"], "neutral", reason,
+                               status=response.status_code, resp=text,
+                               req=body_fields["req"])
+                        continue
+                    # Все действия «годные» (белый / выучить «умеет» /
+                    # только журнал) — правило админа сильнее встроенных
+                    # проверок: отдаём ответ клиенту как есть.
+                    blessed = True
+                if not blessed:
+                    hidden = _hidden_error(payload)
+                    if hidden:
+                        self._fault(entry, attempt["model"], hidden)
+                        kind = "soft" if self._is_soft(hidden) else "hard"
+                        failed(entry, attempt["model"], kind, hidden,
+                               status=response.status_code,
+                               resp=payload.decode("utf-8", errors="replace"), req=body_fields["req"])
+                        continue
+                    if _garbage_answer(payload, content_type):
+                        self._fault(entry, attempt["model"], "мусор вместо JSON")
+                        failed(entry, attempt["model"], "hard",
+                               "тело ответа не разбирается как JSON",
+                               status=response.status_code,
+                               resp=payload.decode("utf-8", errors="replace"), req=body_fields["req"])
+                        continue
 
                 def chunks(body=payload):
                     yield body
@@ -740,20 +1762,29 @@ class Gateway:
             # Поток начат — ошибку в его середине переключить уже нельзя:
             # клиент начал получать данные. Это честное ограничение прокси.
             # Usage ищем построчно по ходу: не все шлюзы отдают его в потоке.
+            # Тело потока собираем для журнала (до 4000 знаков) и пишем
+            # событие «чат» в самом конце — ответ виден целиком.
             stream_state: dict = {}
 
             def chunks(resp=response, state=stream_state):
                 buffer = ""
+                body: list[str] = []  # хвост тела для журнала
+                seen = 0
                 try:
                     for piece in resp.iter_bytes():
-                        buffer += piece.decode("utf-8", errors="replace")
+                        text = piece.decode("utf-8", errors="replace")
+                        if seen < 4000:
+                            body.append(text[: 4000 - seen])
+                            seen += len(text)
+                        buffer += text
                         while "\n" in buffer:
                             line, buffer = buffer.split("\n", 1)
                             _absorb_usage(state, line)
                         yield piece
                 finally:
                     resp.close()
-                    # Поток отдан клиенту — фиксируем расходы по его концу.
+                    # Поток отдан клиенту — фиксируем расходы по его концу
+                    # и пишем событие с собранным телом ответа.
                     self._record_usage(
                         user_id,
                         entry,
@@ -762,16 +1793,60 @@ class Gateway:
                         ok=True,
                         switched=bool(problems),
                     )
+                    duration = round(time.monotonic() - started, 1)
+                    self.note(
+                        "чат",
+                        user_id or "—",
+                        f"{attempt['model']} через {entry['name']} · "
+                        f"HTTP {response.status_code} · {duration}s",
+                        model=attempt["model"],
+                        provider=entry["name"],
+                        status=response.status_code,
+                        duration=duration,
+                        attempts=len(problems) + 1,
+                        **({"resp": "".join(body)} if body else {}),
+                        **body_fields,
+                    )
 
             return served(
                 response.status_code, content_type, entry, attempt["model"], chunks(),
-                record=False,
+                record=False, chat_event=False,
             )
 
+        skipped = self._skipped_by_capability(entries, attempts, needs)
+        if skipped:
+            # Почему фолбэк «пустой»: модели были, но не прошли по
+            # способностям — честнее сказать об этом, чем молчать.
+            problems.append(
+                f"пропущено {len(skipped)} моделей: запрос требует "
+                f"{', '.join(needs)} — " + ", ".join(skipped[:5])
+            )
         message = "ни один провайдер не ответил"
         if problems:
             # Все попытки с причинами: диагностика в одну строку.
             message += ": " + "; ".join(problems[:6])
+        # Решения по каждому отказу: мягкие и жёсткие идут в списки.
+        for item in failures:
+            kind = item["kind"]
+            if kind == "soft":
+                self._decide_soft(item["entry"], item["model"], item["reason"], user_id,
+                                  status=item.get("status", 0), resp=item.get("resp", ""),
+                                  req=item.get("req", ""))
+            elif kind == "hard":
+                self._decide_hard(item["entry"], item["model"], item["reason"], user_id,
+                                  status=item.get("status", 0), resp=item.get("resp", ""),
+                                  req=item.get("req", ""))
+            # neutral — ключ или способность: списки не тронуты, но решение
+            # озвучено, чтобы в журнале не было «тишины».
+            else:
+                self.note(
+                    "решение", user_id or "—",
+                    f"{item['entry']['name']}: {item['reason']} — списки не тронуты",
+                    model=item["model"], provider=item["entry"]["name"],
+                    **({"status": item["status"]} if item.get("status") else {}),
+                    **({"req": item["req"]} if item.get("req") else {}),
+                    **({"resp": item["resp"]} if item.get("resp") else {}),
+                )
         self._record_usage(
             user_id, {"id": "—"}, requested_model or "—", {}, ok=False, switched=False
         )
@@ -828,11 +1903,14 @@ class _Handler(BaseHTTPRequestHandler):
     def gateway(self) -> Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
 
-    def _reject_unauthorized(self, reason: str = "", *, status: int = 401) -> None:
+    def _reject_unauthorized(self, reason: str = "", *, status: int = 401,
+                             close: bool = False) -> None:
         """Отказ в формате, который понимают OpenAI-клиенты.
 
         401 — «нет токена», 403 — «токен есть, но доступа нет»
         (не зарегистрирован, заблокирован, реестр молчит).
+        ``close=True`` — для POST: тело запроса ещё не прочитано,
+        и держать соединение дальше нельзя.
         """
         message = reason or (
             "приставка ждёт свой токен в Authorization: Bearer <токен>; "
@@ -848,15 +1926,27 @@ class _Handler(BaseHTTPRequestHandler):
                     code="missing_token" if status == 401 else "access_denied",
                 )
             ],
+            close=close,
         )
 
     # ------------------------------------------------------------ ответы
 
-    def _send(self, status: int, content_type: str, chunks, *, extra_headers: dict | None = None) -> None:
+    def _send(self, status: int, content_type: str, chunks, *, extra_headers: dict | None = None,
+              close: bool = False) -> None:
+        """Ответ клиенту. ``close=True`` — соединение закрывается после него.
+
+        Закрывать нужно, когда тело запроса ещё не прочитано: на
+        keep-alive соединении его остаток приставка приняла бы за
+        следующий запрос — в журнале это выглядит как «Unsupported
+        method» с мусором из JSON-тела (страница падает с 501).
+        """
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
+        if close:
+            self.send_header("Connection", "close")
+            self.close_connection = True
         if "event-stream" not in content_type:
             # Поток SSE идёт до закрытия соединения, остальное — с длиной.
             payload = b"".join(chunks)
@@ -901,7 +1991,14 @@ class _Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
         except ValueError:
             length = 0
-        body = self.rfile.read(length) if 0 < length <= 1024 * 1024 else b""
+        if 0 < length <= 1024 * 1024:
+            body = self.rfile.read(length)
+        else:
+            # Тела больше мегабайта веб-слою не нужны, но в сокете они
+            # остались бы — соединение после ответа закрывается.
+            body = b""
+            if length > 0:
+                self.close_connection = True
         ui.handle_post(self, self.path, body)
         return True
 
@@ -915,11 +2012,15 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             ok, access_reason = self.gateway.authorize(user_id)
             if not ok:
-                self.gateway.note("модели", user_id, f"доступ не подтверждён: {access_reason}", status=403)
+                self.gateway.note("модели", user_id, access_reason, status=403)
                 self._reject_unauthorized(access_reason, status=403)
                 return
-            self.gateway.note("модели", user_id, "запрошен список")
-            self._send_json(200, self.gateway.models_payload(user_id))
+            payload = self.gateway.models_payload(user_id)
+            self.gateway.note(
+                "модели", user_id,
+                f"список: {len(payload.get('data') or [])} моделей",
+            )
+            self._send_json(200, payload)
             return
         if path.startswith("/v1/"):
             self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
@@ -941,22 +2042,24 @@ class _Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path not in ("/v1/chat/completions", "/chat/completions"):
             if path.startswith("/v1/"):
-                self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
+                self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")],
+                           close=True)
                 return
             if self._try_ui_post():
                 return
-            self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
+            self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")],
+                       close=True)
             return
 
         allowed, user_id, reason = self.gateway.authenticate(self.headers.get("Authorization", ""))
         if not allowed:
             self.gateway.note("чат", "—", "отказ без токена", status=401)
-            self._reject_unauthorized(reason)
+            self._reject_unauthorized(reason, close=True)
             return
         ok, access_reason = self.gateway.authorize(user_id)
         if not ok:
-            self.gateway.note("чат", user_id, f"доступ не подтверждён: {access_reason}", status=403)
-            self._reject_unauthorized(access_reason, status=403)
+            self.gateway.note("чат", user_id, access_reason, status=403)
+            self._reject_unauthorized(access_reason, status=403, close=True)
             return
 
         try:
@@ -968,6 +2071,7 @@ class _Handler(BaseHTTPRequestHandler):
                 400,
                 "application/json",
                 [_error_body("ожидается тело запроса (Content-Length)", code="bad_body")],
+                close=True,
             )
             return
 
@@ -1008,6 +2112,11 @@ def serve(
     event_log=None,
     usage_store=None,
     reputation=None,
+    capabilities=None,
+    lists=None,
+    user_dir_for=None,
+    rules=None,
+    autotest_store=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
@@ -1018,14 +2127,17 @@ def serve(
     онлайн-проверка реестра (зарегистрирован/заблокирован),
     ``event_log`` — журнал событий для страницы «Журнал»,
     ``usage_store`` — расходы моделей для страницы «Статистика»,
-    ``reputation`` — штрафы и паузы моделей («репутация»).
+    ``reputation`` — штрафы и паузы моделей («репутация»),
+    ``capabilities`` — выученные способности моделей (vision/tools),
+    ``rules`` — правила «строка → действие» (страница «Правила»).
     Без токена служба отдаёт только OpenAI-совместимые маршруты.
     """
     gateway = Gateway(
         entries_provider, keys, timeout=timeout, token=token,
         user_tokens=user_tokens, context_for_user=context_for_user,
         api_gate=api_gate, access_checker=access_checker, event_log=event_log,
-        usage_store=usage_store, reputation=reputation,
+        usage_store=usage_store, reputation=reputation, capabilities=capabilities,
+        lists=lists, user_dir_for=user_dir_for, rules=rules, autotest_store=autotest_store,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

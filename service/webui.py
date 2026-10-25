@@ -20,7 +20,12 @@ HttpOnly + SameSite=Strict, чужой Origin отклоняется всегд�
 from __future__ import annotations
 
 import hmac
+import json
+import sys
+import threading
+import time
 import urllib.parse
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Callable
 
@@ -28,12 +33,18 @@ from core.accounts import ROLE_ADMIN, make_session
 from core.catalogue import set_model as set_model_data
 from core.page import (
     add_page,
+    autotest_page,
+    autotest_results_html,
+    bugs_page,
     catalogue_page,
     edit_page,
     key_page,
     login_page,
     logs_page,
+    messages_page,
+    oauth_page,
     pick_model_page,
+    rules_page,
     signup_page,
     stats_page,
     test_page,
@@ -41,11 +52,12 @@ from core.page import (
     tokens_page,
     users_page,
 )
-from core.stats import format_stats, for_line
+from providers import copilot
 from providers.client import NeedsKeyError, PocketBase, Provider, ServerError
 from service import ops
-from service.gateway import test_chat
+from service.gateway import _merge_capabilities, test_chat
 from service.space import Spaces
+from storage.notify import NotifyStore
 from storage.sessions import SessionStore
 from storage.usertokens import UserTokens
 from storage.users import UserStore
@@ -53,13 +65,90 @@ from storage.users import UserStore
 #: Имя cookie входа; значение — id сессии, срок — до закрытия браузера.
 _COOKIE_NAME = "ai_bridge_session"
 
-#: Имя cookie автоскролла журнала.
-_AUTOSCROLL_COOKIE = "ai_bridge_autoscroll"
-
 
 def _same(left: str, right: str) -> bool:
     """Сравнение секретов без утечки и без TypeError на не-ASCII."""
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _rule_note(store, where: str, viewer: dict) -> str:
+    """Описание последнего добавленного правила — для журнала и страницы."""
+    from storage.rules import REQUEST_ACTIONS, RESPONSE_ACTIONS, describe
+
+    data = store.all()
+    rules = data.get(where) or []
+    if not rules:
+        return where
+    rule = rules[-1]
+    actions = RESPONSE_ACTIONS if where == "response" else REQUEST_ACTIONS
+    action = actions.get(str(rule.get("action") or ""), str(rule.get("action") or ""))
+    head = str(rule.get("provider") or where)
+    return f"{head}: {describe(rule)} → {action}"
+
+
+#: Человекочитаемые имена страниц — в журнал, а не каша из слэшей.
+_PAGE_TITLES = {
+    "/": "Каталог",
+    "/index.html": "Каталог",
+    "/add": "Новый провайдер",
+    "/stats": "Статистика",
+    "/tokens": "Приложения и токены",
+    "/messages": "Сообщения",
+    "/bugs": "Нашёл bug",
+    "/logs": "Журнал",
+    "/rules": "Правила",
+    "/autotest": "Автотесты",
+    "/users": "Пользователи",
+}
+
+#: Динамические префиксы: /edit/gemini → «Правка: gemini».
+_PAGE_PREFIXES = (
+    ("/edit/", "правка "),
+    ("/pick/", "выбор модели "),
+    ("/key/", "ключ "),
+    ("/oauth/", "вход github "),
+    ("/test/", "тест "),
+    ("/toggle/", "переключатель "),
+    ("/remove/", "удаление "),
+)
+
+
+def _page_title(path: str) -> str:
+    """Имя страницы для журнала: /messages → «Сообщения», /edit/x → «правка x»."""
+    if path in _PAGE_TITLES:
+        return _PAGE_TITLES[path]
+    for prefix, label in _PAGE_PREFIXES:
+        if path.startswith(prefix):
+            return label + urllib.parse.unquote(path[len(prefix):])
+    return path
+
+
+#: Человекочитаемые имена разделов правил.
+_WHERE_TITLES = {"response": "ответы", "request": "запросы"}
+
+
+def _preview(text: str, limit: int = 150) -> str:
+    """Первые знаки текста для журнала и пушей: суть видна, строка не рвётся."""
+    flat = " ".join(str(text or "").split())
+    return flat[:limit] + ("…" if len(flat) > limit else "")
+
+
+def _rule_at(store, where: str, index: int) -> str:
+    """Описание правила по номеру — для журнала (правка/удаление).
+
+    Журнал должен отвечать «что именно», а не «№0 в response»: через
+    неделю номера сдвигаются, а описание — нет.
+    """
+    from storage.rules import REQUEST_ACTIONS, RESPONSE_ACTIONS, describe
+
+    rules = store.all().get(where) or []
+    if not 0 <= index < len(rules):
+        return f"{_WHERE_TITLES.get(where, where)} №{index} (не найдено)"
+    rule = rules[index]
+    actions = RESPONSE_ACTIONS if where == "response" else REQUEST_ACTIONS
+    action = actions.get(str(rule.get("action") or ""), str(rule.get("action") or ""))
+    head = str(rule.get("provider") or _WHERE_TITLES.get(where, where))
+    return f"{head}: {describe(rule)} → {action}"
 
 
 class WebUi:
@@ -91,6 +180,14 @@ class WebUi:
         event_log=None,  # service.eventlog.EventLog | None
         usage_store=None,  # storage.usage.UsageStore | None
         reputation=None,  # storage.reputation.ReputationStore | None
+        capabilities=None,  # storage.capabilities.CapabilityStore | None
+        lists=None,  # storage.lists.ModelLists | None
+        refresh=None,  # Callable[[], None] — обновить кэш каталога после правок
+        rules=None,  # storage.rules.RuleStore | None
+        autotest_store=None,  # storage.autotest.AutotestStore | None
+        board=None,  # storage.board.BoardStore | None — доска «Нашёл bug»
+        mail=None,  # storage.mail.MailStore | None — личная почта участников
+        notify=None,  # storage.notify.NotifyStore | None — токен Telegram-бота
     ) -> None:
         self._providers_source = providers_source
         self._server = server
@@ -107,6 +204,27 @@ class WebUi:
         self._log = event_log
         self._usage = usage_store
         self._reputation = reputation
+        self._capabilities = capabilities
+        self._lists = lists
+        self._refresh = refresh
+        self._rules = rules
+        self._autotest_store = autotest_store
+        self._board = board
+        self._mail = mail
+        # Токен Telegram-бота: стор есть всегда (AI_BRIDGE_HOME),
+        # без токена уведомления просто выключены.
+        self._notify = notify if notify is not None else NotifyStore()
+        # Ждущие device-flow входа GitHub: (user_id, provider_id) → состояние.
+        self._oauth_pending: dict[tuple[str, str], dict] = {}
+
+    def _refresh_now(self) -> None:
+        """Обновить кэш каталога сразу после админ-правки (если передан)."""
+        if self._refresh is None:
+            return
+        try:
+            self._refresh()
+        except Exception:  # noqa: BLE001 — обновление не должно ронять действие
+            pass
 
     def _event(self, kind: str, user: str, text: str, **fields) -> None:
         """Одно событие в журнал; без журнала — молча пропускаем."""
@@ -192,11 +310,32 @@ class WebUi:
         handler.end_headers()
         handler.wfile.write(body)
 
+    @staticmethod
+    def _send_json(handler: BaseHTTPRequestHandler, status: int, data: dict) -> None:
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        handler.send_response(status)
+        handler.send_header("Content-Type", "application/json; charset=utf-8")
+        handler.send_header("Content-Length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+
     @classmethod
-    def _redirect(cls, handler: BaseHTTPRequestHandler, notice: str = "", *, bad: bool = False) -> None:
-        location = "/" + (f"?notice={urllib.parse.quote(notice)}&bad={1 if bad else 0}" if notice else "")
+    def _redirect(
+        cls,
+        handler: BaseHTTPRequestHandler,
+        notice: str = "",
+        *,
+        bad: bool = False,
+        to: str = "/",
+    ) -> None:
+        """303 на ``to`` (по умолчанию — главная) с уведомлением в URL.
+
+        ``to`` нужно страницам с автообновлением (журнал): после
+        переключателя возвращаем туда же, а не на главную.
+        """
+        query = f"?notice={urllib.parse.quote(notice)}&bad={1 if bad else 0}" if notice else ""
         handler.send_response(303)
-        handler.send_header("Location", location)
+        handler.send_header("Location", to + query)
         handler.send_header("Content-Length", "0")
         handler.end_headers()
 
@@ -245,6 +384,166 @@ class WebUi:
         except Exception:  # noqa: BLE001 — список моделей — украшение, ошибка уйдёт в форму
             return []
 
+    def _local_statuses(self, entries: list[dict]) -> dict[str, str]:
+        """Живые строки состояния локальных провайдеров для каталога.
+
+        Только локальные (localhost/LAN) и включённые; таймаут 1.5 с —
+        висящий сервер не держит страницу (норма — десятки мс).
+        Недоступен — без строки, молча.
+        """
+        from core.routes import is_local_url
+
+        statuses: dict[str, str] = {}
+        for entry in entries:
+            if not entry.get("enabled") or not is_local_url(str(entry.get("url") or "")):
+                continue
+            factory = self._make_provider or Provider
+            try:
+                line = factory(entry["url"], timeout=1.5).local_status()
+            except Exception:  # noqa: BLE001 — статус не должен ломать каталог
+                continue
+            if line:
+                statuses[entry["id"]] = line
+        return statuses
+
+    @staticmethod
+    def _parse_multipart(body: bytes, content_type: str) -> tuple[dict, dict]:
+        """Разобрать multipart/form-data: (поля, файлы).
+
+        Возвращает (form_dict, files_dict), где form_dict — {имя: [значение]},
+        files_dict — {имя: (имя_файла, bytes)}.
+        """
+        form: dict[str, list[str]] = {}
+        files: dict[str, tuple[str, bytes]] = {}
+
+        boundary = None
+        for part in content_type.split(";"):
+            part = part.strip()
+            if part.lower().startswith("boundary="):
+                boundary = part[len("boundary="):].strip().strip('"')
+                break
+        if not boundary:
+            return form, files
+
+        delimiter = ("--" + boundary).encode("utf-8")
+        chunks = body.split(delimiter)
+        for chunk in chunks[1:-1]:
+            if chunk.startswith(b"\r\n"):
+                chunk = chunk[2:]
+            header_end = chunk.find(b"\r\n\r\n")
+            if header_end < 0:
+                continue
+            headers_raw = chunk[:header_end].decode("utf-8", errors="replace")
+            content = chunk[header_end + 4:]
+            if content.endswith(b"\r\n"):
+                content = content[:-2]
+
+            name = None
+            filename = None
+            for line in headers_raw.split("\r\n"):
+                if line.lower().startswith("content-disposition:"):
+                    for token in line.split(";"):
+                        token = token.strip()
+                        if token.lower().startswith("name="):
+                            name = token[len("name="):].strip().strip('"')
+                        elif token.lower().startswith("filename="):
+                            filename = token[len("filename="):].strip().strip('"')
+
+            if name is None:
+                continue
+            if filename:
+                files[name] = (filename, content)
+            else:
+                form.setdefault(name, []).append(content.decode("utf-8", errors="replace").strip())
+
+        return form, files
+
+    def _grey_text(self, viewer: dict) -> str:
+        """Серый список этого человека (персональный каталог) для страницы."""
+        from storage.lists import GREYLIST, ModelLists
+
+        try:
+            directory = self._spaces.for_user(str(viewer["id"])).directory
+            return ModelLists(directory).text(GREYLIST)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _grey_rows(self, viewer: dict) -> list[dict]:
+        """Строки таблицы таймера серого списка: кто спит и сколько осталось.
+
+        Провайдер спит целиком (все модели); остаток — в минутах,
+        причина и номер цикла — из комментария файла.
+        """
+        from storage.lists import ModelLists
+
+        try:
+            directory = self._spaces.for_user(str(viewer["id"])).directory
+            cells = ModelLists(directory).grey()
+        except Exception:  # noqa: BLE001
+            return []
+        now = datetime.now(timezone.utc)
+        rows = []
+        for provider_id, cell in cells.items():
+            left = int((cell["until"] - now).total_seconds() // 60)
+            rows.append(
+                {
+                    "id": provider_id,
+                    "minutes": left,
+                    "reason": cell.get("reason") or "—",
+                    "cycle": int(cell.get("cycle") or 1),
+                }
+            )
+        rows.sort(key=lambda row: row["minutes"])
+        return rows
+
+    def _whitelist_groups(self) -> dict:
+        """Белый список по группам: {группа: содержимое файла}."""
+        from storage.lists import WHITELIST_FILES
+
+        groups: dict = {}
+        for group, filename in WHITELIST_FILES.items():
+            groups[group] = self._lists.text(filename)
+        return groups
+
+    def _site_link(self, handler: BaseHTTPRequestHandler) -> str:
+        """Внешний адрес приставки (scheme://host) — для ссылки в уведомлении.
+
+        Без Host пустая строка: ссылка тогда относительная, тоже работает.
+        """
+        host = (handler.headers.get("Host") or "").strip()
+        if not host:
+            return ""
+        return ("http://" if ":" in host else "https://") + host
+
+    def _push(self, user_id: str, text: str) -> None:
+        """Толкнуть уведомление человеку в Telegram — в фоне.
+
+        Токен берётся из настроек, chat_id — из профиля; нет того или
+        другого — молчим. Сеть не должна держать ответ страницы, поэтому
+        отдельным потоком; ошибка отправки — в stderr (журнал службы),
+        письмо она уже не отменит.
+        """
+        if self._notify is None:
+            return
+        token = self._notify.token()
+        if not token:
+            return
+        chat_id = self._users.tg(user_id)
+        if not chat_id:
+            return
+
+        def worker() -> None:
+            from providers import telegram
+
+            try:
+                error = telegram.send(token, chat_id, text)
+                if error:
+                    print(f"telegram: {error}", file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001 — пуш никогда не роняет действие
+                print(f"telegram: {exc}", file=sys.stderr, flush=True)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     @staticmethod
     def _app_address(handler: BaseHTTPRequestHandler) -> str:
         """Адрес /v1 для приложений — по тому, как страница открыта.
@@ -287,28 +586,32 @@ class WebUi:
         is_admin = role == ROLE_ADMIN
         space = self._spaces.for_user(str(viewer["id"]))
         # Просмотр самого журнала не пишется: страница обновляется каждые
-        # 5 секунд и засоряла бы журнал самим собой.
-        if clean != "/logs":
-            self._event("страница", str(viewer.get("email") or ""), clean or "/")
+        # 5 секунд и засоряла бы журнал самим собой. Страница ожидания
+        # OAuth опрашивается так же часто — молчим и о ней. Имя —
+        # человеческое («Сообщения», а не /messages), путь — поле события.
+        if clean != "/logs" and not clean.startswith("/oauth/"):
+            self._event(
+                "страница",
+                str(viewer.get("email") or ""),
+                _page_title(clean or "/"),
+                path=clean or "/",
+            )
 
         if clean in ("/", "/index.html"):
-            try:
-                stats = self._server.fetch_stats()
-            except ServerError:
-                stats = {}  # счётчик — украшение; без него страница живёт
+            entries = self._entries_for(viewer)
             role_line = f"вы вошли как {viewer.get('email') or '—'} · {'администратор' if is_admin else 'человек'}"
             self._send_html(
                 handler,
                 200,
                 catalogue_page(
-                    self._entries_for(viewer),
-                    stats=stats,
+                    entries,
                     can_edit=is_admin,
                     keyed_ids=frozenset(space.keys.ids()),
                     notice=notice,
                     notice_bad=notice_bad,
                     role=role_line,
                     app_address=self._app_address(handler),
+                    statuses=self._local_statuses(entries),
                 ),
             )
             return
@@ -331,49 +634,177 @@ class WebUi:
             self._send_html(handler, 200, add_page(is_admin=is_admin))
             return
 
+        if clean == "/bugs":
+            # Доска «Нашёл bug» — для всех вошедших: спорить о багах
+            # должны все, а не только администратор.
+            posts = self._board.all() if self._board is not None else []
+            self._send_html(
+                handler,
+                200,
+                bugs_page(
+                    posts,
+                    can_edit=is_admin,
+                    notice=notice,
+                    notice_bad=notice_bad,
+                ),
+            )
+            return
+
+        if clean == "/messages":
+            # Личная почта — для всех вошедших. Админ может открыть
+            # чужой ящик (?box=<id>): полная власть — читает и удаляет.
+            box = (params.get("box") or [""])[0].strip()
+            owner_id = str(viewer["id"])
+            box_owner = None
+            if box and box != owner_id:
+                if not is_admin:
+                    self._forbidden(handler, "чужие ящики — только администратору")
+                    return
+                profile = self._users.get(box)
+                if profile is None:
+                    self._redirect(handler, "нет такого человека", bad=True, to="/messages")
+                    return
+                owner_id = box
+                box_owner = {"id": box, "email": str(profile.get("email") or "")}
+            messages = self._mail.inbox(owner_id) if self._mail is not None else []
+            self._send_html(
+                handler,
+                200,
+                messages_page(
+                    messages,
+                    people=self._users.list_all(),
+                    viewer_id=str(viewer["id"]),
+                    can_edit=is_admin,
+                    mail_on=self._users.mail_enabled(str(viewer["id"])),
+                    box_owner=box_owner,
+                    notify_token=self._notify.token() if self._notify else "",
+                    tg_chat=self._users.tg(str(viewer["id"])),
+                    notice=notice,
+                    notice_bad=notice_bad,
+                ),
+            )
+            return
+
         if clean == "/stats":
-            # Статистика доступна всем вошедшим: человек видит свои
-            # расходы, админ сверху — суммы по всем людям.
-            usage = self._usage.for_user(str(viewer["id"])) if self._usage else {}
-            totals = self._usage.totals() if (self._usage and is_admin) else {}
-            try:
-                community = self._server.fetch_stats()
-            except ServerError:
-                community = {}  # счётчик — украшение; без него страница живёт
+            # Статистика — только админу: здесь его расходы, его списки
+            # и его решения. Обычному человеку эта страница не нужна.
+            if not is_admin:
+                self._forbidden(handler, "статистика — только администратору")
+                return
+            usage = self._usage.totals() if self._usage else {}
             rows = []
             for entry in self._entries_for(viewer):
                 model = str(entry.get("model") or "")
                 key = f"{entry['id']}/{model}"
                 cell = usage.get(key) or {}
-                counter = format_stats(for_line(community, entry["id"], model))
-                all_row = totals.get(key)
+                # Способности: рукописная справка с учётом выученного.
+                caps = str(entry.get("capabilities") or "")
+                if self._capabilities is not None:
+                    try:
+                        known = self._capabilities.known(key)
+                    except Exception:  # noqa: BLE001
+                        known = {}
+                    if known:
+                        caps = _merge_capabilities(caps, known)
                 rows.append(
                     {
                         "model": model or "—",
                         "provider": entry["name"],
+                        "ctx": str(entry.get("context") or ""),
+                        "caps": caps,
                         "requests": int(cell.get("requests", 0)),
                         "fails": int(cell.get("fails", 0)),
-                        "switches": int(cell.get("switches", 0)),
-                        "tokens": (
-                            int(cell.get("prompt", 0)),
-                            int(cell.get("completion", 0)),
-                        ),
-                        "community": counter or "—",
-                        "caps": str(entry.get("capabilities") or "—"),
-                        "all": all_row,
+                        "last": str(cell.get("last") or ""),
                     }
                 )
             rows.sort(key=lambda row: (-row["requests"], row["model"]))
-            penalized = (
-                self._reputation.penalized() if (self._reputation and is_admin) else []
-            )
+            penalized = self._reputation.penalized() if self._reputation else []
             self._send_html(
                 handler,
                 200,
                 stats_page(
-                    rows, can_edit=is_admin, notice=notice, penalized=penalized,
+                    rows, can_edit=True, notice=notice, penalized=penalized,
+                    whitelist=self._whitelist_groups() if self._lists else {},
+                    greylist=self._grey_text(viewer) if self._lists else "",
+                    grey_rows=self._grey_rows(viewer) if self._lists else [],
+                    blacklist=self._lists.text("blacklist.txt") if self._lists else "",
+                    novision=self._lists.text("novision.txt") if self._lists else "",
+                    notools=self._lists.text("notools.txt") if self._lists else "",
+                    paid=self._lists.text("paid.txt") if self._lists else "",
                 ),
             )
+            return
+
+        if clean == "/rules":
+            if not is_admin:
+                self._forbidden(handler, "правила — только администратору")
+                return
+            rules = self._rules.all() if self._rules is not None else {"response": [], "request": []}
+            self._send_html(
+                handler,
+                200,
+                rules_page(rules, self._providers_source(), notice=notice),
+            )
+            return
+
+        if clean == "/autotest":
+            if not is_admin:
+                self._forbidden(handler, "автотесты — только администратору")
+                return
+            last_run = None
+            progress = None
+            if self._autotest_store is not None:
+                status = self._autotest_store.status()
+                if status.get("running"):
+                    progress = status
+                    # Частичные результаты — живьём, пока тест идёт.
+                    last_run = {
+                        "provider": status.get("provider", ""),
+                        "timestamp": status.get("started_at", ""),
+                        "prompt": status.get("prompt", ""),
+                        "results": self._autotest_store.partial(),
+                    }
+                else:
+                    last_run = self._autotest_store.load()
+            self._send_html(
+                handler,
+                200,
+                autotest_page(
+                    self._entries_for(viewer),
+                    last_run=last_run,
+                    progress=progress,
+                    notice=notice,
+                    can_edit=True,
+                ),
+            )
+            return
+
+        if clean == "/autotest/results":
+            if not is_admin:
+                self._send_html(handler, 403, "только администратору")
+                return
+            if self._autotest_store is None:
+                self._send_html(handler, 200, "")
+                return
+            status = self._autotest_store.status()
+            html = autotest_results_html(
+                self._autotest_store.partial(),
+                provider=status.get("provider", ""),
+                timestamp=status.get("started_at", ""),
+                prompt=status.get("prompt", ""),
+                running=bool(status.get("running")),
+            )
+            self._send_html(handler, 200, html)
+            return
+
+        if clean == "/autotest/status":
+            if not is_admin:
+                self._send_json(handler, 403, {"error": "только администратору"})
+                return
+            if self._autotest_store is None:
+                self._send_json(handler, 200, {"running": False})
+                return
+            self._send_json(handler, 200, self._autotest_store.status())
             return
 
         if clean == "/users":
@@ -403,18 +834,12 @@ class WebUi:
             if not is_admin:
                 self._forbidden(handler, "журнал — только администратору")
                 return
-            autoscroll = any(
-                part.strip() == f"{_AUTOSCROLL_COOKIE}=on"
-                for part in (handler.headers.get("Cookie") or "").split(";")
-            )
-            events = self._log.recent(200) if self._log is not None else []
+            events = self._log.recent(500) if self._log is not None else []
             self._send_html(
                 handler,
                 200,
                 logs_page(
                     events,
-                    autoscroll=autoscroll,
-                    bodies=bool(self._log.bodies) if self._log is not None else False,
                     notice=notice,
                 ),
             )
@@ -437,6 +862,39 @@ class WebUi:
                     can_edit=is_admin,
                     login_url=entry.get("loginUrl", ""),
                     key_url=entry.get("getApiKeyUrl", ""),
+                    oauth=copilot.is_copilot_url(entry.get("url")),
+                ),
+            )
+            return
+
+        if clean.startswith("/oauth/"):
+            # Страница ожидания device-flow: код уже выдан, ждём подтверждения.
+            provider_id = urllib.parse.unquote(clean[len("/oauth/") :])
+            entry = self._find(viewer, provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            pending = self._oauth_pending.get((str(viewer["id"]), provider_id))
+            if pending is None:
+                self._redirect(handler, "вход через GitHub не начат", bad=True,
+                               to=f"/key/{urllib.parse.quote(provider_id)}")
+                return
+            if time.time() > pending["deadline"]:
+                del self._oauth_pending[(str(viewer["id"]), provider_id)]
+                self._redirect(handler, "код истёк — начните вход заново", bad=True,
+                               to=f"/key/{urllib.parse.quote(provider_id)}")
+                return
+            self._send_html(
+                handler,
+                200,
+                oauth_page(
+                    entry["name"],
+                    provider_id=provider_id,
+                    user_code=pending["user_code"],
+                    verify_url=pending["url"],
+                    interval=int(pending.get("interval") or 5),
+                    notice=notice if notice_bad else "",
+                    can_edit=is_admin,
                 ),
             )
             return
@@ -450,7 +908,16 @@ class WebUi:
             if entry is None:
                 self._not_found(handler)
                 return
-            self._send_html(handler, 200, edit_page(entry))
+            self._send_html(
+                handler,
+                200,
+                edit_page(
+                    entry,
+                    notice=notice if notice_bad else "",
+                    has_key=bool(space.keys.get(provider_id)),
+                    oauth=copilot.is_copilot_url(entry.get("url")),
+                ),
+            )
             return
 
         if clean.startswith("/pick/"):
@@ -460,6 +927,8 @@ class WebUi:
                 self._not_found(handler)
                 return
             models = self._models_of(entry, space.keys.get(provider_id))
+            # Список моделей получен — провайдер жив: засчитать проверку.
+            ops.report_models(self._server, entry, models, report_for=str(viewer["id"]))
             facts = " · ".join(
                 str(entry[key])
                 for key in ("context", "pricing", "capabilities")
@@ -489,11 +958,20 @@ class WebUi:
             return
 
         clean = urllib.parse.urlsplit(path).path
-        form = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"))
+        content_type = handler.headers.get("Content-Type", "")
+
+        if content_type.startswith("multipart/form-data"):
+            form, files = self._parse_multipart(body, content_type)
+        else:
+            form = urllib.parse.parse_qs(body.decode("utf-8", errors="replace"))
+            files = {}
 
         def field(name: str) -> str:
             values = form.get(name, [""])
             return values[0].strip() if values else ""
+
+        def file_field(name: str) -> tuple[str, bytes] | None:
+            return files.get(name)
 
         # -------------------------------------------------------- без сессии
         if clean == "/login":
@@ -548,22 +1026,6 @@ class WebUi:
             self._redirect(handler, notice)
             return
 
-        if clean.startswith("/check/"):
-            provider_id = urllib.parse.unquote(clean[len("/check/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            kwargs = {} if self._make_provider is None else {"make_provider": self._make_provider}
-            result = ops.check(
-                self._server, entry, space.keys.get(provider_id),
-                report_for=user_id, **kwargs,
-            )
-            notice = self._check_notice(entry, result)
-            self._event("проверка", str(viewer.get("email") or ""), notice)
-            self._redirect(handler, notice)
-            return
-
         if clean.startswith("/test/"):
             provider_id = urllib.parse.unquote(clean[len("/test/") :])
             entry = self._find(viewer, provider_id)
@@ -574,6 +1036,9 @@ class WebUi:
                 entry, space.keys.get(provider_id),
                 **({} if self._make_provider is None else {"make_provider": self._make_provider}),
             )
+            # Тест — главная проверка провайдера: настоящий ответ модели
+            # засчитывается в статистику сообщества под именем человека.
+            ops.report_chat(self._server, entry, outcome, report_for=str(viewer["id"]))
             self._event(
                 "тест",
                 str(viewer.get("email") or ""),
@@ -626,6 +1091,69 @@ class WebUi:
             self._redirect(handler, f"{entry['name']}: ключ сохранён в вашем пространстве")
             return
 
+        if clean.startswith("/oauth/"):
+            provider_id = urllib.parse.unquote(clean[len("/oauth/") :])
+            entry = self._find(viewer, provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            key_to = f"/key/{urllib.parse.quote(provider_id)}"
+            oauth_to = f"/oauth/{urllib.parse.quote(provider_id)}"
+            state = (user_id, provider_id)
+            if field("action") != "check":
+                # Начало входа: GitHub выдаёт одноразовый код и ссылку.
+                if not copilot.is_copilot_url(entry.get("url")):
+                    self._redirect(handler, "этот провайдер входит через GitHub только "
+                                   "по адресу Copilot", bad=True, to=key_to)
+                    return
+                flow = copilot.start_device_flow()
+                if flow.get("error"):
+                    self._redirect(handler, f"вход не начался: {flow['error']}", bad=True,
+                                   to=key_to)
+                    return
+                self._oauth_pending[state] = {
+                    "device_code": flow["device_code"],
+                    "user_code": flow["user_code"],
+                    "url": flow["url"],
+                    "interval": int(flow.get("interval") or 5),
+                    "deadline": time.time() + int(flow.get("expires_in") or 900),
+                }
+                self._event("вход", str(viewer.get("email") or ""),
+                            f"{entry['name']}: начат вход через GitHub")
+                self._redirect(handler, "", to=oauth_to)
+                return
+            # Проверка: один опрос GitHub — готов ли токен.
+            pending = self._oauth_pending.get(state)
+            if pending is None:
+                self._redirect(handler, "вход через GitHub не начат", bad=True, to=key_to)
+                return
+            if time.time() > pending["deadline"]:
+                del self._oauth_pending[state]
+                self._redirect(handler, "код истёк — начните вход заново", bad=True, to=key_to)
+                return
+            kind, value = copilot.poll_device_flow(pending["device_code"])
+            if kind == "done":
+                del self._oauth_pending[state]
+                space.keys.set(provider_id, value)
+                self._event("ключ", str(viewer.get("email") or ""),
+                            f"{entry['name']}: вход через GitHub выполнен, ключ сохранён")
+                self._redirect(handler, f"{entry['name']}: вход через GitHub выполнен, "
+                               "ключ сохранён", to=key_to)
+                return
+            if kind == "error":
+                del self._oauth_pending[state]
+                self._event("вход", str(viewer.get("email") or ""),
+                            f"{entry['name']}: вход через GitHub не состоялся ({value})")
+                self._redirect(handler, value, bad=True, to=key_to)
+                return
+            # Ещё не подтверждено — возвращаемся на страницу ожидания,
+            # её скрипт сам спросит GitHub через несколько секунд.
+            if value == "slow_down":
+                # GitHub просит опрашивать реже (RFC 8628).
+                pending["interval"] = int(pending.get("interval") or 5) + 5
+            self._redirect(handler, "", to=oauth_to)
+            return
+
         if clean == "/tokens/api":
             turned_on = not self._users.api_enabled(user_id)
             self._users.set_api(user_id, turned_on)
@@ -649,12 +1177,24 @@ class WebUi:
                 return
             token = self._user_tokens.create(user_id, name)
             self._event("токен", str(viewer.get("email") or ""), f"создан «{name}»")
-            self._send_html(handler, 200, token_created_page(token, name))
+            self._send_html(
+                handler, 200, token_created_page(token, name, can_edit=is_admin)
+            )
             return
 
         if clean == "/tokens/revoke":
-            if self._user_tokens.revoke(user_id, field("tail")):
-                self._event("токен", str(viewer.get("email") or ""), "отозван")
+            tail = field("tail")
+            # Название токена — до отзыва, иначе в журнале останется хвост.
+            name = next(
+                (str(t.get("name") or "") for t in self._user_tokens.list_for(user_id)
+                 if str(t.get("tail") or "") == tail),
+                "",
+            )
+            if self._user_tokens.revoke(user_id, tail):
+                self._event(
+                    "токен", str(viewer.get("email") or ""),
+                    f"отозван «{name}»" if name else f"отозван (…{tail})",
+                )
                 self._redirect(handler, "токен отозван")
             else:
                 self._redirect(handler, "такого токена нет", bad=True)
@@ -725,12 +1265,276 @@ class WebUi:
             if result["entry"] is None:
                 self._redirect(handler, result["error"] or "не получилось", bad=True)
                 return
+            if is_admin:
+                self._refresh_now()  # запись ушла на сервер — свежий каталог
             self._event(
                 "провайдер",
                 str(viewer.get("email") or ""),
                 f"добавлен {result['entry']['name']}: {result['note'] or result['error']}",
+                url=values["url"],
+            )
+            # Каталог — общее дело: кто бы ни добавил, админу в Telegram.
+            self._push(
+                self._admin_id,
+                f"Новый провайдер: {result['entry']['name']} — "
+                f"добавил {str(viewer.get('email') or '—')}\n"
+                f"{self._site_link(handler)}/",
             )
             self._redirect(handler, f"{result['entry']['name']}: {result['note'] or result['error']}")
+            return
+
+        # ------------------------------------------------------- доска багов
+        # Общий разговор для всех вошедших: сообщение, комментарий,
+        # статус с обязательным пояснением. Удаление — только админу,
+        # но проверяется оно здесь же, ниже, а не общим шлагбаумом.
+        if clean in ("/bugs/post", "/bugs/comment", "/bugs/status", "/bugs/drop"):
+            if self._board is None:
+                self._redirect(handler, "доска не подключена", bad=True, to="/bugs")
+                return
+            who = str(viewer.get("email") or viewer.get("id") or "—")
+            journal = ""  # текст для журнала — содержательный, не «опубликовано»
+            if clean == "/bugs/post":
+                text = field("text")
+                error = self._board.add(author=who, text=text)
+                note = "сообщение опубликовано" if not error else error
+                if not error:
+                    preview = _preview(text)
+                    journal = f"новый баг: «{preview}»"
+                    # Админ должен узнать о баге даже не глядя на доску.
+                    self._push(
+                        self._admin_id,
+                        f"Новый баг на доске от {who}: {preview}\n"
+                        f"{self._site_link(handler)}/bugs",
+                    )
+            elif clean == "/bugs/comment":
+                text = field("text")
+                error = self._board.comment(field("id"), author=who, text=text)
+                note = "комментарий добавлен" if not error else error
+                if not error:
+                    journal = f"комментарий: «{_preview(text)}»"
+            elif clean == "/bugs/status":
+                from storage.board import STATUSES as _STATUS_LABELS
+
+                why = field("why")
+                error = self._board.set_status(
+                    field("id"), author=who, key=field("key"), why=why
+                )
+                note = (
+                    f"статус «{_STATUS_LABELS.get(field('key'), field('key'))}» — пояснение записано"
+                    if not error
+                    else error
+                )
+                if not error:
+                    label = _STATUS_LABELS.get(field("key"), field("key"))
+                    journal = f"статус «{label}»: почему — «{_preview(why)}»"
+            else:
+                if not is_admin:
+                    self._forbidden(handler, "удаление сообщений — только администратору")
+                    return
+                post = self._board.get(field("id"))  # до удаления — что именно сносили
+                ok = self._board.drop(field("id"))
+                error = "" if ok else "нет такого сообщения"
+                note = "сообщение удалено" if ok else error
+                if ok:
+                    journal = f"удалён баг: «{_preview(str(post.get('text') if post else ''))}»"
+            if not error:
+                self._event("баг", who, journal or note)
+            self._redirect(handler, note, bad=bool(error), to="/bugs")
+            return
+
+        # ---------------------------------------------------------- почта
+        # Личные письма и рассылки. Отказ от приёма перенаправляет
+        # письма администратору — ящик остаётся открытым, власть полная.
+        if clean in ("/messages/send", "/messages/mail", "/messages/drop"):
+            if self._mail is None:
+                self._redirect(handler, "почта не подключена", bad=True, to="/messages")
+                return
+            who = str(viewer.get("email") or viewer.get("id") or "—")
+            journal = ""  # для журнала: кому и о чём (в redirect — короткий note)
+            if clean == "/messages/send":
+                target = field("to")
+                text = field("text")
+                preview = _preview(text)
+                if target == "*":
+                    if not is_admin:
+                        self._forbidden(handler, "рассылка — только администратору")
+                        return
+                    error = self._mail.send(
+                        author_id=str(viewer["id"]), author=who, to="*", text=text
+                    )
+                    note = "рассылка отправлена всем" if not error else error
+                    if not error:
+                        journal = f"рассылка всем: «{preview}»"
+                else:
+                    if not target:
+                        note = error = "адресат не выбран"
+                    else:
+                        profile = self._users.get(target)
+                        recipient = str(profile.get("email") or target) if profile else target
+                        # Отказ от приёма: письмо уходит администратору,
+                        # а адресат остаётся в поле orig_to — видно, за кого.
+                        # Самому админу перенаправлять некуда — он и есть
+                        # получатель, его ящик и так полная власть.
+                        redirected = (
+                            profile is not None
+                            and target != self._admin_id
+                            and not self._users.mail_enabled(target)
+                        )
+                        if redirected:
+                            error = self._mail.send(
+                                author_id=str(viewer["id"]),
+                                author=who,
+                                to=self._admin_id,
+                                text=text,
+                                orig_to=recipient,
+                            )
+                            note = (
+                                f"адресат не принимает сообщения — письмо у администратора "
+                                f"(за {recipient})"
+                                if not error
+                                else error
+                            )
+                            if not error:
+                                journal = (
+                                    f"за {recipient} (не принимает): «{preview}»"
+                                )
+                        else:
+                            error = self._mail.send(
+                                author_id=str(viewer["id"]),
+                                author=who, to=target, text=text
+                            )
+                            note = f"письмо отправлено ({recipient})" if not error else error
+                            if not error:
+                                journal = f"письмо для {recipient}: «{preview}»"
+                if not error:
+                    self._event("письмо", who, journal or note)
+                    # Пуш в Telegram: адресату (или админу за отказавшегося),
+                    # при рассылке — всем, у кого задан chat_id.
+                    push = (
+                        f"Новое письмо от {who}: {_preview(text)}\n"
+                        f"{self._site_link(handler)}/messages"
+                    )
+                    if target == "*":
+                        for person in self._users.list_all():
+                            self._push(str(person.get("id") or ""), push)
+                    elif redirected:
+                        self._push(self._admin_id, push)
+                    else:
+                        self._push(target, push)
+                self._redirect(handler, note, bad=bool(error), to="/messages")
+                return
+
+            if clean == "/messages/mail":
+                # Свой тумблер приёма: включил — пишут снова напрямую.
+                now = self._users.mail_enabled(str(viewer["id"]))
+                self._users.set_mail(str(viewer["id"]), not now)
+                note = (
+                    "личные письма за вас будет получать администратор"
+                    if now
+                    else "снова принимаете сообщения"
+                )
+                self._event("почт", who, note)
+                self._redirect(handler, note, to="/messages")
+                return
+
+            # Удаление письма — только админ (полная власть над почтой).
+            if not is_admin:
+                self._forbidden(handler, "удаление писем — только администратору")
+                return
+            ok = self._mail.drop(field("id"))
+            note = "письмо удалено" if ok else "письмо не найдено"
+            self._event("почт", who, note)
+            self._redirect(handler, note, bad=not ok, to="/messages")
+            return
+
+        # ------------------------------------------------- уведомления
+        # Telegram без вебхука: токен задаёт админ, chat_id каждый сам
+        # («узнать» читает getUpdates), тест — живой вызов API.
+        if clean in ("/notify/token", "/notify/hello", "/notify/chat",
+                     "/notify/detect", "/notify/test"):
+            from providers import telegram
+
+            who = str(viewer.get("email") or viewer.get("id") or "—")
+
+            if clean == "/notify/token":
+                if not is_admin:
+                    self._forbidden(handler, "токен бота — только администратору")
+                    return
+                token = field("token").strip()
+                self._notify.set_token(token)
+                bad = False
+                if token:
+                    name, error = telegram.hello(token)
+                    if error:
+                        note, bad = f"токен сохранён, но: {error}", True
+                    else:
+                        note = f"бот {name} принял токен"
+                else:
+                    note = "токен стёрт — уведомления выключены"
+                self._event("уведомление", who, note)
+                self._redirect(handler, note, bad=bad, to="/messages")
+                return
+
+            if clean == "/notify/hello":
+                if not is_admin:
+                    self._forbidden(handler, "токен бота — только администратору")
+                    return
+                token = self._notify.token()
+                if not token:
+                    self._redirect(handler, "токен не задан", bad=True, to="/messages")
+                    return
+                name, error = telegram.hello(token)
+                note = f"бот {name} на связи" if not error else error
+                self._redirect(handler, note, bad=bool(error), to="/messages")
+                return
+
+            if clean == "/notify/chat":
+                chat_id = field("chat").strip()
+                self._users.set_tg(str(viewer["id"]), chat_id)
+                note = (
+                    f"chat_id сохранён: {chat_id}" if chat_id
+                    else "chat_id стёрт — уведомления вам не шлются"
+                )
+                self._event("уведомление", who, note)
+                self._redirect(handler, note, to="/messages")
+                return
+
+            if clean == "/notify/detect":
+                # Человек уже написал боту — читаем getUpdates и запоминаем.
+                token = self._notify.token()
+                if not token:
+                    self._redirect(
+                        handler,
+                        "сначала администратор должен сохранить токен бота",
+                        bad=True, to="/messages",
+                    )
+                    return
+                chat_id, error = telegram.last_chat_id(token)
+                if error:
+                    self._redirect(handler, error, bad=True, to="/messages")
+                    return
+                self._users.set_tg(str(viewer["id"]), str(chat_id))
+                note = f"ваш chat_id: {chat_id} — сохранён"
+                self._event("уведомление", who, note)
+                self._redirect(handler, note, to="/messages")
+                return
+
+            # /notify/test — письмо самому себе: проверка всей цепочки.
+            chat_id = self._users.tg(str(viewer["id"]))
+            if not chat_id:
+                self._redirect(handler, "сначала задайте chat_id", bad=True, to="/messages")
+                return
+            token = self._notify.token()
+            if not token:
+                self._redirect(handler, "токен бота не задан", bad=True, to="/messages")
+                return
+            error = telegram.send(
+                token, chat_id,
+                "Проверка: приставка связалась с Telegram. Уведомления работают.",
+            )
+            note = "тестовое уведомление отправлено" if not error else error
+            self._event("уведомление", who, note)
+            self._redirect(handler, note, bad=bool(error), to="/messages")
             return
 
         # -------------------------------------------------------- только админ
@@ -751,6 +1555,10 @@ class WebUi:
                 provider_id, can_edit=True,
                 snapshot=admin_space.snapshot, key_store=admin_space.keys,
             )
+            if result["code"] == 0:
+                # Кэш каталога устарел при push — обновляем сразу, иначе
+                # следующая перерисовка вернёт запись из старого кэша.
+                self._refresh_now()
             notice = (result["note"] and f"{entry['name']}: {result['note']}") or ""
             self._event("провайдер", str(viewer.get("email") or ""), notice or result["error"])
             self._redirect(handler, result["error"] or notice)
@@ -766,24 +1574,244 @@ class WebUi:
                 name: field(name)
                 for name in (
                     "name", "url", "model", "fallbackPriority",
-                    "loginUrl", "getApiKeyUrl", "logoUrl", "infoUrl",
-                    "context", "pricing", "capabilities",
+                    "getApiKeyUrl",
                 )
             }
+            if field("action") == "fetch":
+                # Показать модели: ничего не сохраняем, только перерисовать
+                # форму со списком. Ключ — введённый сейчас, иначе сохранённый.
+                key = field("api_key") or admin_space.keys.get(provider_id)
+                models: list[str] = []
+                error = ""
+                if not changes["url"]:
+                    error = "введите адрес провайдера — по нему запросим модели"
+                else:
+                    factory = self._make_provider or Provider
+                    try:
+                        models = [
+                            item["name"]
+                            for item in factory(changes["url"], timeout=15.0).fetch_models(key)
+                        ]
+                        if not models:
+                            error = "провайдер не вернул ни одной модели"
+                    except NeedsKeyError:
+                        error = (
+                            "без ключа список недоступен — введите API-ключ "
+                            "и нажмите кнопку ещё раз"
+                        )
+                    except Exception as exc:  # noqa: BLE001 — причина уходит в подсказку
+                        error = f"список не получился ({exc})"
+                values = {name: field(name) for name in (
+                    "name", "url", "model", "fallbackPriority",
+                    "getApiKeyUrl", "api_key",
+                )}
+                self._send_html(
+                    handler,
+                    200,
+                    edit_page(
+                        entry,
+                        values=values,
+                        models=models if models else None,
+                        models_error=error,
+                        has_key=bool(admin_space.keys.get(provider_id)),
+                        oauth=copilot.is_copilot_url(changes["url"] or entry.get("url")),
+                    ),
+                )
+                return
+            # Ключ живёт на устройстве (хранилище), поля определения — в каталоге.
+            key_note = ""
+            if field("api_key"):
+                admin_space.keys.set(provider_id, field("api_key"))
+                key_note = " · ключ обновлён"
+                self._event(
+                    "ключ", str(viewer.get("email") or ""),
+                    f"{entry['name']}: сохранён при правке",
+                )
             result = ops.edit(
                 self._server, self._entries_for(viewer), self._providers_source(),
                 provider_id, changes, can_edit=True, snapshot=admin_space.snapshot,
             )
+            if result["error"] is None:
+                self._refresh_now()  # кэш устарел при push — свежий каталог
             notice = f"{entry['name']}: сохранено" if result["error"] is None else result["error"]
             if result["error"] is None and result.get("note"):
                 notice += f" · {result['note']}"
+            notice += key_note
             self._event(
                 "правка",
                 str(viewer.get("email") or ""),
                 notice,
                 **{key: value for key, value in changes.items() if value},
             )
-            self._redirect(handler, notice)
+            self._redirect(handler, notice, to=f"/edit/{urllib.parse.quote(provider_id)}")
+            return
+
+        if clean == "/rules/add":
+            if not is_admin or self._rules is None:
+                self._forbidden(handler, "правила — только администратору")
+                return
+            where = field("where")
+            ok = self._rules.add(
+                where,
+                text=field("text"),
+                action=field("action"),
+                provider=field("provider"),
+                req=field("req"),
+                status=field("status"),
+            )
+            if ok:
+                note = _rule_note(self._rules, where, viewer)
+                self._event("правило", str(viewer.get("email") or ""), f"добавлено {note}")
+                self._redirect(handler, f"правило добавлено ({note})", to="/rules")
+            else:
+                self._redirect(
+                    handler,
+                    "не получилось: нужно действие, провайдер и хотя бы "
+                    "строка в ответе или статус",
+                    bad=True, to="/rules",
+                )
+            return
+
+        if clean == "/rules/edit":
+            if not is_admin or self._rules is None:
+                self._forbidden(handler, "правила — только администратору")
+                return
+            where = field("where")
+            try:
+                index = int(field("index"))
+            except ValueError:
+                index = -1
+            before = _rule_at(self._rules, where, index)  # до правки
+            ok = self._rules.edit(
+                where,
+                index,
+                text=field("text"),
+                action=field("action"),
+                provider=field("provider"),
+                req=field("req"),
+                status=field("status"),
+            )
+            after = _rule_at(self._rules, where, index) if ok else ""
+            self._event(
+                "правило", str(viewer.get("email") or ""),
+                f"изменено: {before}" + (f" → {after}" if ok else " (не найдено)"),
+            )
+            self._redirect(
+                handler,
+                "правило изменено" if ok else "правило не найдено (порядок мог сдвинуться)",
+                bad=not ok, to="/rules",
+            )
+            return
+
+        if clean == "/rules/drop":
+            if not is_admin or self._rules is None:
+                self._forbidden(handler, "правила — только администратору")
+                return
+            where = field("where")
+            try:
+                index = int(field("index"))
+            except ValueError:
+                index = -1
+            before = _rule_at(self._rules, where, index)  # до удаления
+            ok = self._rules.drop(where, index)
+            self._event(
+                "правило", str(viewer.get("email") or ""),
+                f"убрано: {before}" if ok else f"убрано не удалось ({before})",
+            )
+            self._redirect(
+                handler,
+                "правило убрано" if ok else "правило не найдено",
+                bad=not ok, to="/rules",
+            )
+            return
+
+        if clean == "/autotest/stop":
+            if not is_admin:
+                self._forbidden(handler, "автотесты — только администратору")
+                return
+            if self._autotest_store is None:
+                self._redirect(handler, "хранилище не подключено", bad=True, to="/autotest")
+                return
+            status = self._autotest_store.request_stop()
+            if status.get("running"):
+                self._event("автотест", str(viewer.get("email") or ""), "остановка запрошена")
+                self._redirect(handler, "останавливаю после текущего теста…", to="/autotest")
+            else:
+                self._redirect(handler, "тест сейчас не идёт", bad=True, to="/autotest")
+            return
+
+        if clean == "/autotest/run":
+            if not is_admin:
+                self._forbidden(handler, "автотесты — только администратору")
+                return
+            if getattr(handler.server, "gateway", None) is None:
+                self._redirect(handler, "гейтвей не подключён", bad=True, to="/autotest")
+                return
+
+            gateway = handler.server.gateway
+            provider_id = field("provider")
+            prompt = field("prompt")
+            if not prompt:
+                self._redirect(
+                    handler,
+                    "введите промпт — тест идёт только с вашим текстом",
+                    bad=True, to="/autotest",
+                )
+                return
+            image_url = field("image_url")
+            use_test_image = field("use_test_image") == "1"
+            record = field("record") == "1"
+            tests = [field("test") or "text"]
+
+            # Картинка: загруженный файл → URL → тестовая 1×1 PNG.
+            image_b64 = ""
+            uploaded = file_field("image")
+            if uploaded is not None:
+                filename, content = uploaded
+                if content:
+                    import base64 as _b64
+                    import mimetypes as _mt
+
+                    mime = _mt.guess_type(filename)[0] or "image/png"
+                    image_b64 = "data:" + mime + ";base64," + _b64.b64encode(content).decode("ascii")
+            if not image_b64 and image_url:
+                image_b64 = image_url
+            if not image_b64 and use_test_image:
+                image_b64 = (
+                    "data:image/png;base64,"
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+                )
+
+            # Новый прогон удаляет старый: сбрасываем и запускаем в фоне,
+            # чтобы страница сразу показала прогресс и опрашивала статус.
+            store = self._autotest_store
+            if store is not None and store.status().get("running"):
+                self._redirect(handler, "тест уже идёт — дождитесь окончания", bad=True,
+                               to="/autotest")
+                return
+            if store is not None:
+                store.begin(provider_id, prompt)
+
+            def background() -> None:
+                try:
+                    result = gateway.run_autotest(provider_id, image_b64, prompt, tests,
+                                                  record=record)
+                    if store is not None and result.get("error"):
+                        store.fail(str(result["error"]))
+                except Exception as exc:  # noqa: BLE001
+                    if store is not None:
+                        store.fail(str(exc))
+
+            threading.Thread(target=background, daemon=True).start()
+
+            self._event(
+                "автотест", str(viewer.get("email") or ""),
+                f"{provider_id}: запущен — «{_preview(prompt, 80)}»",
+            )
+            # Post/redirect/GET: без редиректа перезагрузка страницы (и
+            # автообновление по окончании) повторно отправила бы форму —
+            # и тест стартовал бы снова и снова.
+            self._redirect(handler, "Тест пошёл — прогресс ниже.", to="/autotest")
             return
 
         if clean == "/users/block":
@@ -805,7 +1833,8 @@ class WebUi:
             self._event(
                 "блокировка",
                 str(viewer.get("email") or ""),
-                f"{target}: {'заблокирован' if blocked else 'разблокирован'}",
+                f"{remote.get(target, {}).get('email') or target}: "
+                f"{'заблокирован' if blocked else 'разблокирован'}",
             )
             return
 
@@ -814,6 +1843,9 @@ class WebUi:
             if target == user_id:
                 self._redirect(handler, "себя удалить нельзя", bad=True)
                 return
+            # Почта — до purge(): очищенный профиль не ответит, кто удалён.
+            profile = self._users.get(target) or {}
+            victim = str(profile.get("email") or target)
             try:
                 self._server.delete_user(target)
             except ServerError as exc:
@@ -822,7 +1854,10 @@ class WebUi:
             self._user_tokens.drop_user(target)
             self._sessions.drop_user(target)
             self._users.purge(target)
-            self._event("удаление", str(viewer.get("email") or ""), f"пользователь {target} удалён")
+            self._event(
+                "удаление", str(viewer.get("email") or ""),
+                f"пользователь {victim} удалён: аккаунт, токены и пространство",
+            )
             self._redirect(handler, "пользователь удалён: аккаунт, токены и пространство")
             return
 
@@ -836,37 +1871,22 @@ class WebUi:
             self._redirect(handler, f"модель {key} прощена — штрафы сняты")
             return
 
-        if clean == "/logs/autoscroll":
-            currently_on = any(
-                part.strip() == f"{_AUTOSCROLL_COOKIE}=on"
-                for part in (handler.headers.get("Cookie") or "").split(";")
-            )
-            value = "off" if currently_on else "on"
-            handler.send_response(303)
-            handler.send_header("Location", "/logs")
-            handler.send_header(
-                "Set-Cookie", f"{_AUTOSCROLL_COOKIE}={value}; Path=/; Max-Age=31536000"
-            )
-            handler.send_header("Content-Length", "0")
-            handler.end_headers()
-            self._event("журнал", str(viewer.get("email") or ""), f"автоскролл {value}")
-            return
-
-        if clean == "/logs/bodies":
-            if self._log is None:
-                self._redirect(handler, "журнал не подключён", bad=True)
+        if clean.startswith("/stats/save/"):
+            # Правка списков руками: файл в состоянии приставки, действие
+            # мгновенное (файлы перечитаются на каждый запрос).
+            if not is_admin or self._lists is None:
+                self._forbidden(handler, "правка списков — только администратору")
                 return
-            turned_on = self._log.toggle_bodies()
+            which = urllib.parse.unquote(clean[len("/stats/save/") :])
+            ok = self._lists.write_text(which, field("text"))
             self._event(
-                "журнал",
-                str(viewer.get("email") or ""),
-                f"тела запросов {'включены' if turned_on else 'выключены'}",
+                "списки", str(viewer.get("email") or ""),
+                f"{which}: {'сохранено' if ok else 'неизвестный файл'}",
             )
             self._redirect(
                 handler,
-                "тела запросов пишутся — не оставляйте включённым надолго"
-                if turned_on
-                else "запись тел выключена",
+                f"{which}: сохранено" if ok else f"{which}: неизвестный файл",
+                bad=not ok, to="/stats",
             )
             return
 
@@ -874,7 +1894,7 @@ class WebUi:
             if self._log is not None:
                 self._log.clear()
             self._event("журнал", str(viewer.get("email") or ""), "очищен")
-            self._redirect(handler, "журнал очищен")
+            self._redirect(handler, "журнал очищен", to="/logs")
             return
 
         self._not_found(handler)
@@ -929,6 +1949,11 @@ class WebUi:
             self._send_html(handler, 200, signup_page(f"регистрация не прошла: {exc}"))
             return
         self._event("регистрация", email, "аккаунт создан")
+        # Новый участник — админ должен знать сразу.
+        self._push(
+            self._admin_id,
+            f"Новый человек на приставке: {email}\n{self._site_link(handler)}/users",
+        )
         try:
             user_id, email, can_edit = self._authenticator(email, password)
         except ServerError:
@@ -937,23 +1962,3 @@ class WebUi:
         role = ROLE_ADMIN if can_edit else "user"
         self._users.remember(user_id, email, role=role)
         self._start_session(handler, {"id": user_id, "email": email, "role": role})
-
-    # ------------------------------------------------------------ мелочи
-
-    @staticmethod
-    def _check_notice(entry: dict, result: dict) -> str:
-        """Короткий итог проверки для строки уведомления."""
-        if result["dead"]:
-            return f"{entry['name']}: {result['dead']}"
-        outcome = result["outcome"]
-        if outcome["ok"]:
-            text = f"{entry['name']}: работает"
-            if outcome["model"]:
-                text += f" · модель {outcome['model']}"
-        else:
-            text = f"{entry['name']}: {outcome['error'] or 'не получилось'}"
-        if result["report_error"]:
-            text += f" (отчёт не ушёл: {result['report_error']})"
-        elif outcome["report"] and result["counter"]:
-            text += f" · счётчик: {result['counter']}"
-        return text

@@ -285,20 +285,36 @@ class TestEditEntry:
         assert updated[0]["model"] == "qwen3"
         assert updated[0]["url"] == "http://localhost:11434/v1"  # не тронуто
 
-    def test_empty_fields_do_not_erase(self) -> None:
+    def test_empty_fields_do_not_erase(self, tmp_path=None) -> None:
         """Пустой input в форме не должен стирать значение.
 
         Пустые поля отбрасываются до правки; если пусто всё — правка
         отклоняется, а не молча стирает запись.
         """
-        updated, _ = edit_entry(
-            [_entry()], "ollama", {"model": "  ", "name": "  ", "url": ""}
+        updated, error = edit_entry(
+            [_entry()], "ollama", {"name": "  ", "url": ""}
         )
         assert updated is None  # всё пустое → отклонено, ничего не стёрто
+        assert "нечего менять" in error
 
         updated, _ = edit_entry([_entry()], "ollama", {"model": "qwen3", "name": "  "})
         assert updated[0]["name"] == "Ollama"  # пустое имя не тронуто
         assert updated[0]["model"] == "qwen3"
+
+    def test_an_emptied_model_is_removed(self) -> None:
+        """Модель — явное исключение: очистил поле — модели нет.
+
+        Регрессия: раньше пустое значение отбрасывалось как «нетронутое»,
+        и модель вернулась бы при любой правке — убрать её было нельзя.
+        """
+        updated, error = edit_entry(
+            [_entry(model="MiMo-V2.5", pricing="$1")], "ollama", {"model": ""}
+        )
+        assert error == ""
+        assert updated[0]["model"] == ""  # пустое поле = модель убрана
+        # Остальные поля правки не пострадали:
+        assert updated[0]["name"] == _entry()["name"]
+        assert updated[0]["url"] == _entry()["url"]
 
     def test_a_bad_priority_is_refused(self) -> None:
         updated, error = edit_entry([_entry()], "ollama", {"fallbackPriority": "дорого"})
