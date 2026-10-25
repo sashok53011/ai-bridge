@@ -48,6 +48,69 @@ class TestSnapshot:
         snap.clear()
         assert snap.load() == []
 
+
+class TestConcurrentWrites:
+    """Параллельные сохранения не портят файл.
+
+    Регрессия 23.10.2026: два рендера страницы писали снапшот одновременно,
+    файл недописывался, чтение возвращало пусто — и все провайдеры
+    молча выключались. Писать можно только атомарно и под замком.
+    """
+
+    def test_parallel_saves_leave_a_valid_file(self, tmp_path) -> None:
+        import json
+        import threading
+
+        snap = Snapshot(tmp_path)
+        errors: list[Exception] = []
+
+        def writer(n: int) -> None:
+            for i in range(40):
+                try:
+                    snap.save([
+                        _entry(enabled=True, name=f"w{n}-{i}"),
+                        _entry(id="second", name="второй", enabled=True),
+                    ])
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+        threads = [
+            threading.Thread(target=writer, args=(n,)) for n in range(6)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert not errors
+        raw = json.loads((tmp_path / "snapshot.json").read_text(encoding="utf-8"))
+        assert isinstance(raw, list) and raw  # файл валиден и непуст
+        loaded = snap.load()
+        assert loaded and all(entry["enabled"] for entry in loaded)
+
+    def test_a_reader_never_sees_a_torn_file(self, tmp_path) -> None:
+        """Читатель во время записи видит либо старое, либо новое — не мусор."""
+        import threading
+
+        snap = Snapshot(tmp_path)
+        snap.save([_entry(enabled=True)])
+        stop = threading.Event()
+        torn: list[bool] = []
+
+        def reader() -> None:
+            while not stop.is_set():
+                if not snap.load():  # пусто = повреждённый файл
+                    torn.append(True)
+
+        thread = threading.Thread(target=reader, daemon=True)
+        thread.start()
+        for i in range(60):
+            snap.save([_entry(enabled=True, name=f"m{i}")])
+        stop.set()
+        thread.join()
+
+        assert not torn
+
     def test_keys_and_snapshot_live_side_by_side(self, tmp_path) -> None:
         """Разные файлы: снапшот не трогает ключи и наоборот."""
         keys = KeyStore(tmp_path)

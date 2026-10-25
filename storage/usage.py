@@ -109,10 +109,16 @@ class UsageStore:
                         continue
                     total = summary.setdefault(
                         str(key),
-                        {"requests": 0, "switches": 0, "prompt": 0, "completion": 0},
+                        {"requests": 0, "fails": 0, "switches": 0,
+                         "prompt": 0, "completion": 0, "last": ""},
                     )
                     total["requests"] += int(cell.get("requests", 0))
+                    total["fails"] += int(cell.get("fails", 0))
                     total["switches"] += int(cell.get("switches", 0))
                     total["prompt"] += int(cell.get("prompt", 0))
                     total["completion"] += int(cell.get("completion", 0))
+                    # Самая поздняя отметка «последний запрос» по всем людям.
+                    stamp = str(cell.get("last") or "")
+                    if stamp > total["last"]:
+                        total["last"] = stamp
             return summary

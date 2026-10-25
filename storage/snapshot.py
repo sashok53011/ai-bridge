@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from pathlib import Path
 
 from core.catalogue import normalize
@@ -21,6 +22,11 @@ from storage.keys import default_dir
 
 class Snapshot:
     """Список провайдеров, который человек видел последним."""
+
+    #: Общий замок: чтение+запись из разных потоков не должны мешать
+    #: друг другу — иначе два рендера страницы портят файл (а повреждённый
+    #  снапшот читается как пустой — и все переключатели выключаются).
+    _lock = threading.Lock()
 
     def __init__(self, directory: Path | None = None) -> None:
         self.directory = directory or default_dir()
@@ -51,10 +57,10 @@ class Snapshot:
         return result
 
     def load(self) -> list[dict]:
-        return self._read()
+        with self._lock:
+            return self._read()
 
     def save(self, providers: list[dict]) -> None:
-        self.directory.mkdir(parents=True, exist_ok=True)
         clean: list[dict] = []
         for item in providers:
             entry = normalize(item)
@@ -65,12 +71,19 @@ class Snapshot:
             entry["picked"] = bool(item.get("picked"))
             clean.append(entry)
         payload = json.dumps(clean, ensure_ascii=False, indent=2)
-        self.path.write_text(payload, encoding="utf-8")
-        try:
-            # Снапшот не секретен, но и не публичен: как у ключей.
-            os.chmod(self.path, 0o600)
-        except OSError:
-            pass
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            # Атомарная запись (временный файл + замена): параллельный
+            # читатель никогда не увидит недописанный JSON — а поломанного
+            # файла возвращался пустой список и выключал все флаги.
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(payload, encoding="utf-8")
+            os.replace(tmp, self.path)
+            try:
+                # Снапшот не секретен, но и не публичен: как у ключей.
+                os.chmod(self.path, 0o600)
+            except OSError:
+                pass
 
     def clear(self) -> None:
         try:

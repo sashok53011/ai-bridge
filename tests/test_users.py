@@ -56,3 +56,21 @@ class TestUserStore:
 
     def test_an_unknown_person_has_no_api_access(self, tmp_path) -> None:
         assert UserStore(tmp_path).api_enabled("никого") is False
+
+    def test_mail_is_accepted_by_default_and_can_be_refused(self, tmp_path) -> None:
+        """Ящик не закрывается: только переключатель «не получать»."""
+        store = UserStore(tmp_path)
+        store.remember("u1", "a@b.c")
+
+        assert store.mail_enabled("u1") is True
+
+        store.set_mail("u1", False)
+        assert store.mail_enabled("u1") is False
+        assert UserStore(tmp_path).mail_enabled("u1") is False  # переживает перезапуск
+
+        store.set_mail("u1", True)
+        assert store.mail_enabled("u1") is True
+
+    def test_an_unknown_person_is_assumed_to_accept_mail(self, tmp_path) -> None:
+        """Нет профиля — отказываться не от кого: принимает."""
+        assert UserStore(tmp_path).mail_enabled("никого") is True

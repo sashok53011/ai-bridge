@@ -103,6 +103,49 @@ class UserStore:
             json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
+    def mail_enabled(self, user_id: str) -> bool:
+        """Принимает ли человек личные письма (по умолчанию — да).
+
+        Выключил — письма за него получает администратор (поле
+        ``orig_to`` в почте): ящик не закрывается, полная власть
+        остаётся у админа, но человек не получает чужих сообщений.
+        """
+        profile = self.get(user_id)
+        if not isinstance(profile, dict):
+            return True  # профиля нет — нечего и выключать
+        return profile.get("mail", "on") != "off"
+
+    def set_mail(self, user_id: str, enabled: bool) -> None:
+        """Переключает приём писем; профиль должен существовать."""
+        profile = self.get(user_id) or {"id": str(user_id), "email": ""}
+        profile["mail"] = "on" if enabled else "off"
+        path = self._path(user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def tg(self, user_id: str) -> str:
+        """Chat_id для Telegram-уведомлений; пусто — не настроено."""
+        profile = self.get(user_id)
+        if not isinstance(profile, dict):
+            return ""
+        return str(profile.get("tg") or "")
+
+    def set_tg(self, user_id: str, chat_id: str) -> None:
+        """Сохраняет chat_id человека (пусто — уведомления ему не шлются)."""
+        profile = self.get(user_id) or {"id": str(user_id), "email": ""}
+        chat_id = str(chat_id or "").strip()
+        if chat_id:
+            profile["tg"] = chat_id
+        else:
+            profile.pop("tg", None)
+        path = self._path(user_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     def purge(self, user_id: str) -> None:
         """Полностью вычищает личное пространство человека."""
         shutil.rmtree(user_dir(user_id, self.directory), ignore_errors=True)
