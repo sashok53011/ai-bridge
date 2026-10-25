@@ -29,9 +29,10 @@ def _style() -> str:
     --bg: #f4f8f6; --card: #ffffff; --text: #1b2a24; --muted: #5c6b64;
     --line: #e2e9e5; --accent: #0e9f6e; --accent-deep: #0a7d56;
     --accent-soft: rgba(14, 159, 110, .10);
-    /* Полоса шапки: по умолчанию следует за акцентом; свои цвета (в
-       браузере) разводят её и кнопки на две независимые переменные. */
+    /* Четыре своих цвета: полоса (шапка) и кнопки, у каждого — верх и
+       низ. По умолчанию всё следует за акцентом; пипетки разводят. */
     --nav-a: var(--accent); --nav-b: var(--accent-deep);
+    --soft: var(--accent-soft); --head: #ffffff;
     --bad: #c0392b; --bad-soft: rgba(192, 57, 43, .10);
     --warn-soft: rgba(176, 140, 20, .14); --blue-soft: rgba(42, 90, 128, .12); }
   @media (prefers-color-scheme: dark) { :root {
@@ -84,7 +85,7 @@ def _style() -> str:
   button.danger { color: var(--bad); }
   form { display: inline; }
   .role { color: var(--muted); font-size: .85rem; }
-  .notice { background: var(--accent-soft); color: var(--text); padding: .5rem .8rem;
+  .notice { background: var(--soft); color: var(--text); padding: .5rem .8rem;
     border-radius: .6rem; }
   .notice.bad { background: var(--bad-soft); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 1rem;
@@ -102,39 +103,44 @@ def _style() -> str:
     margin-right: .4rem; }
   .topnav .brand:hover { text-decoration: underline; }
   .topnav nav { display: flex; gap: .45rem; align-items: center; font-size: .9rem; flex-wrap: wrap; }
-  .topnav nav a { color: rgba(255, 255, 255, .85); text-decoration: none; font-weight: 500;
-    padding: .2rem .65rem; border: 1px solid rgba(255, 255, 255, .35); border-radius: 999px; }
-  .topnav nav a:hover { color: #fff; background: rgba(255, 255, 255, .16);
-    border-color: rgba(255, 255, 255, .65); text-decoration: none; }
-  .topnav button.out { background: none; color: rgba(255, 255, 255, .65); font-size: .9rem;
-    padding: .2rem .65rem; border: 1px solid rgba(255, 255, 255, .35); border-radius: 999px; }
-  .topnav button.out:hover { color: #fff; background: rgba(255, 255, 255, .16);
-    border-color: rgba(255, 255, 255, .65); }
+  .topnav nav a { color: color-mix(in srgb, var(--head) 85%, transparent); text-decoration: none;
+    font-weight: 500; padding: .2rem .65rem;
+    border: 1px solid color-mix(in srgb, var(--head) 40%, transparent); border-radius: 999px; }
+  .topnav nav a:hover { color: var(--head); background: color-mix(in srgb, var(--head) 16%, transparent);
+    border-color: color-mix(in srgb, var(--head) 65%, transparent); text-decoration: none; }
+  .topnav button.out { background: none; color: color-mix(in srgb, var(--head) 65%, transparent);
+    font-size: .9rem; padding: .2rem .65rem;
+    border: 1px solid color-mix(in srgb, var(--head) 40%, transparent); border-radius: 999px; }
+  .topnav button.out:hover { color: var(--head); background: color-mix(in srgb, var(--head) 16%, transparent);
+    border-color: color-mix(in srgb, var(--head) 65%, transparent); }
   /* Переключатель цветовой темы и «свои цвета» в шапке. */
   .theme-switch { display: inline-flex; align-items: center; }
-  #theme-sel { padding: .2rem .6rem; font-size: .85rem; border: 1px solid rgba(255, 255, 255, .35);
-    background: rgba(255, 255, 255, .15); color: #fff; border-radius: 999px;
-    cursor: pointer; font: inherit; }
-  #theme-sel:hover { border-color: rgba(255, 255, 255, .6); }
+  #theme-sel { padding: .2rem .6rem; font-size: .85rem;
+    border: 1px solid color-mix(in srgb, var(--head) 40%, transparent);
+    background: color-mix(in srgb, var(--head) 15%, transparent); color: var(--head);
+    border-radius: 999px; cursor: pointer; font: inherit; }
+  #theme-sel:hover { border-color: color-mix(in srgb, var(--head) 65%, transparent); }
   #theme-sel option { color: var(--text); background: var(--card); }
   .topnav.plain #theme-sel { border-color: var(--line); background: var(--card);
     color: var(--text); }
-  /* Свои цвета: пилюля-заголовок, при клике — панелька с двумя
-     независимыми цветами: кнопки и полоса шапки. */
+  /* Свои цвета: пилюля-заголовок, при клике — панелька с четырьмя
+     независимыми пипетками: полоса верх/низ, кнопки верх/низ. */
   .colors { position: relative; }
   .colors summary { list-style: none; display: inline-block; padding: .2rem .6rem;
-    font-size: .85rem; border: 1px solid rgba(255, 255, 255, .35);
-    background: rgba(255, 255, 255, .15); color: #fff; border-radius: 999px; cursor: pointer; }
+    font-size: .85rem; border: 1px solid color-mix(in srgb, var(--head) 40%, transparent);
+    background: color-mix(in srgb, var(--head) 15%, transparent); color: var(--head);
+    border-radius: 999px; cursor: pointer; }
   .colors summary::-webkit-details-marker { display: none; }
-  .colors summary:hover { border-color: rgba(255, 255, 255, .6); }
+  .colors summary:hover { border-color: color-mix(in srgb, var(--head) 65%, transparent); }
   .topnav.plain .colors summary { border-color: var(--line); background: var(--card);
     color: var(--text); }
   .colors .panel { position: absolute; right: 0; top: calc(100% + .35rem); z-index: 5;
-    display: flex; gap: .5rem; align-items: center; white-space: nowrap;
+    display: flex; gap: .45rem .6rem; align-items: center; flex-wrap: wrap;
+    max-width: min(92vw, 27rem);
     background: var(--card); color: var(--text); border: 1px solid var(--line);
     border-radius: .8rem; padding: .5rem .7rem; box-shadow: 0 6px 18px rgba(0, 0, 0, .18); }
   .colors .panel label { display: inline-flex; align-items: center; gap: .3rem; margin: 0;
-    font-size: .8rem; color: var(--muted); }
+    font-size: .8rem; color: var(--muted); white-space: nowrap; }
   .colors .panel input[type=color] { width: 2.2rem; height: 1.5rem; padding: 0;
     border: 1px solid var(--line); border-radius: 999px; background: var(--card);
     cursor: pointer; }
@@ -235,18 +241,22 @@ def _nav(*, can_edit: bool) -> str:
         '<option value="purple">фиолетовая</option>'
         '</select></label>'
     )
-    # Свои цвета — два независимых: что красить в кнопках и какого
-    # цвета быть полосе шапки. В свёрнутом виде — одна пилюля (на
-    # телефоне место дорого), раскрывается в панельку с двумя
-    # образцами и «сбросить».
+    # Свои цвета — четыре независимых: полоса шапки (верх) и нежный
+    # фон (низ), кнопки на шапке (верх) и кнопки на странице (низ).
+    # В свёрнутом виде — одна пилюля (на телефоне место дорого),
+    # раскрывается в панельку с четырьмя образцами и «сбросить».
     colors = (
         '<details class="colors" title="свои цвета">'
         '<summary aria-label="свои цвета">🎨</summary>'
         '<div class="panel">'
-        '<label>кнопки <input type="color" id="color-accent" value="#0e9f6e" '
-        'aria-label="цвет кнопок"></label>'
-        '<label>полоса <input type="color" id="color-nav" value="#0e9f6e" '
+        '<label>полоса верх <input type="color" id="color-nav" value="#0e9f6e" '
         'aria-label="цвет полосы шапки"></label>'
+        '<label>полоса низ <input type="color" id="color-soft" value="#0e9f6e" '
+        'aria-label="цвет нежного фона"></label>'
+        '<label>кнопки верх <input type="color" id="color-head" value="#ffffff" '
+        'aria-label="цвет кнопок на шапке"></label>'
+        '<label>кнопки низ <input type="color" id="color-accent" value="#0e9f6e" '
+        'aria-label="цвет кнопок на странице"></label>'
         '<button type="button" class="ghost pill" id="color-reset">сбросить</button>'
         '</div></details>'
     )
@@ -262,8 +272,12 @@ def _nav(*, can_edit: bool) -> str:
   else if(saved==="purple") root.classList.add("theme-purple");
   var accent=localStorage.getItem("ai-bridge-accent");
   var nav=localStorage.getItem("ai-bridge-nav");
+  var soft=localStorage.getItem("ai-bridge-soft");
+  var head=localStorage.getItem("ai-bridge-head");
   if(accent){ root.style.setProperty("--accent",accent); root.classList.add("custom-accent"); }
   if(nav){ root.style.setProperty("--nav-a",nav); root.classList.add("custom-nav"); }
+  if(soft){ root.style.setProperty("--soft","color-mix(in srgb, "+soft+" 12%, transparent)"); }
+  if(head){ root.style.setProperty("--head",head); }
 })();
 </script>"""
     # Живые правила: выбор пресета сбрасывает свои цвета (иначе
@@ -271,18 +285,31 @@ def _nav(*, can_edit: bool) -> str:
     ui_script = """<script>
 (function(){
   var root=document.documentElement;
-  var AK="ai-bridge-accent", NK="ai-bridge-nav";
+  var AK="ai-bridge-accent", NK="ai-bridge-nav", SK="ai-bridge-soft", HK="ai-bridge-head";
   var sel=document.getElementById("theme-sel");
-  var ca=document.getElementById("color-accent");
-  var cn=document.getElementById("color-nav");
+  var pAcc=document.getElementById("color-accent");
+  var pNav=document.getElementById("color-nav");
+  var pSoft=document.getElementById("color-soft");
+  var pHead=document.getElementById("color-head");
   var reset=document.getElementById("color-reset");
-  function hex(v){ v=(v||"").trim(); return /^#[0-9a-f]{6}$/i.test(v) ? v : null; }
-  function syncInputs(){
-    var cs=getComputedStyle(root);
-    var a=hex(cs.getPropertyValue("--accent")), n=hex(cs.getPropertyValue("--nav-a"));
-    if(a && ca) ca.value=a;
-    if(n && cn) cn.value=n;
+  function hex(v){
+    v=(v||"").trim();
+    if(/^#[0-9a-f]{6}$/i.test(v)) return v;
+    var m=v.match(/^rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
+    if(!m) return null;
+    return "#"+[m[1],m[2],m[3]].map(function(x){
+      var h=(+x).toString(16); return h.length<2 ? "0"+h : h;
+    }).join("");
   }
+  function put(input, value){ var h=hex(value); if(input && h) input.value=h; }
+  function syncInputs(){
+    var computed=getComputedStyle(root);
+    put(pAcc, computed.getPropertyValue("--accent"));
+    put(pNav, computed.getPropertyValue("--nav-a"));
+    put(pSoft, computed.getPropertyValue("--soft"));
+    put(pHead, computed.getPropertyValue("--head"));
+  }
+  function load(input, key){ var v=localStorage.getItem(key); if(input && v) input.value=v; }
   function setAccent(v){
     if(v){ root.style.setProperty("--accent",v); root.classList.add("custom-accent"); localStorage.setItem(AK,v); }
     else { root.style.removeProperty("--accent"); root.classList.remove("custom-accent"); localStorage.removeItem(AK); }
@@ -291,6 +318,16 @@ def _nav(*, can_edit: bool) -> str:
     if(v){ root.style.setProperty("--nav-a",v); root.classList.add("custom-nav"); localStorage.setItem(NK,v); }
     else { root.style.removeProperty("--nav-a"); root.classList.remove("custom-nav"); localStorage.removeItem(NK); }
   }
+  function setSoft(v){
+    if(v){ root.style.setProperty("--soft","color-mix(in srgb, "+v+" 12%, transparent)"); localStorage.setItem(SK,v); }
+    else { root.style.removeProperty("--soft"); localStorage.removeItem(SK); }
+  }
+  function setHead(v){
+    if(v){ root.style.setProperty("--head",v); localStorage.setItem(HK,v); }
+    else { root.style.removeProperty("--head"); localStorage.removeItem(HK); }
+  }
+  function clearAll(){ setAccent(""); setNav(""); setSoft(""); setHead(""); }
+  load(pAcc,AK); load(pNav,NK); load(pSoft,SK); load(pHead,HK);
   if(sel){
     sel.value=localStorage.getItem("ai-bridge-theme")||"system";
     sel.addEventListener("change",function(){
@@ -300,12 +337,14 @@ def _nav(*, can_edit: bool) -> str:
       else if(sel.value==="yellow") root.classList.add("theme-yellow");
       else if(sel.value==="purple") root.classList.add("theme-purple");
       // Пресет сбрасывает свои цвета — иначе непонятно, что действует.
-      setAccent(""); setNav(""); syncInputs();
+      clearAll(); syncInputs();
     });
   }
-  if(ca) ca.addEventListener("input",function(){ setAccent(hex(ca.value)); });
-  if(cn) cn.addEventListener("input",function(){ setNav(hex(cn.value)); });
-  if(reset) reset.addEventListener("click",function(){ setAccent(""); setNav(""); syncInputs(); });
+  if(pAcc) pAcc.addEventListener("input",function(){ setAccent(hex(pAcc.value)); });
+  if(pNav) pNav.addEventListener("input",function(){ setNav(hex(pNav.value)); });
+  if(pSoft) pSoft.addEventListener("input",function(){ setSoft(hex(pSoft.value)); });
+  if(pHead) pHead.addEventListener("input",function(){ setHead(hex(pHead.value)); });
+  if(reset) reset.addEventListener("click",function(){ clearAll(); syncInputs(); });
   syncInputs();
 })();
 </script>"""
@@ -498,17 +537,17 @@ def catalogue_page(
     overflow-wrap: anywhere; }}
   th {{ font-size: .8rem; text-transform: lowercase; letter-spacing: .03em; color: var(--muted); }}
   tbody tr:last-child td {{ border-bottom: none; }}
-  tr.on td {{ background: var(--accent-soft); }}
+  tr.on td {{ background: var(--soft); }}
   .actions {{ white-space: nowrap; }}
   .actions form {{ margin-right: .3rem; }}
   .facts {{ display: block; font-size: .8em; color: var(--muted); }}
   /* Живое состояние локального сервера — что в памяти прямо сейчас. */
   .localstatus {{ display: inline-block; margin-top: .15rem; font-size: .78rem;
-    color: var(--accent); background: var(--accent-soft);
+    color: var(--accent); background: var(--soft);
     padding: .1rem .5rem; border-radius: 999px; }}
   img.logo {{ height: 1.3em; vertical-align: middle; margin-right: .3rem; }}
   .empty {{ opacity: .6; text-align: center; padding: 2rem; }}
-  .addr code {{ font-family: monospace; user-select: all; background: var(--accent-soft);
+  .addr code {{ font-family: monospace; user-select: all; background: var(--soft);
     padding: .15rem .4rem; border-radius: .35rem; }}
   .add {{ margin-top: 1.5rem; }}
   input[type=password] {{ font-family: monospace; }}
@@ -517,7 +556,7 @@ def catalogue_page(
     table.catalogue thead {{ display: none; }}
     table.catalogue tr {{ display: block; border: 1px solid var(--line);
       border-radius: .8rem; margin: .6rem 0; padding: .3rem .5rem; background: var(--card); }}
-    table.catalogue tr.on {{ background: var(--accent-soft); }}
+    table.catalogue tr.on {{ background: var(--soft); }}
     table.catalogue td {{ display: block; border: none; padding: .2rem .2rem; }}
     .actions {{ white-space: normal; }}
   }}
@@ -1083,7 +1122,7 @@ def bugs_page(
   .bug-head {{ display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
     font-size: .9rem; }}
   .bug-text {{ white-space: pre-wrap; overflow-wrap: anywhere; margin: .45rem 0 .2rem; }}
-  .bug-why {{ background: var(--accent-soft); border-radius: .5rem; padding: .35rem .6rem;
+  .bug-why {{ background: var(--soft); border-radius: .5rem; padding: .35rem .6rem;
     font-size: .88rem; margin-top: .4rem; overflow-wrap: anywhere; }}
   .bug-comments {{ list-style: none; margin: .5rem 0 0; padding: 0;
     border-top: 1px dashed var(--line); }}
@@ -1448,11 +1487,11 @@ def tokens_page(
   th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }}
   th {{ font-size: .8rem; color: var(--muted); }}
   h2 {{ font-size: 1.1rem; margin-top: 1.6rem; }}
-  .api {{ background: var(--accent-soft); padding: .6rem .8rem; border-radius: .6rem;
+  .api {{ background: var(--soft); padding: .6rem .8rem; border-radius: .6rem;
     display: flex; justify-content: space-between; align-items: center; gap: 1rem;
     flex-wrap: wrap; }}
   .api.off {{ background: var(--bad-soft); }}
-  .addr code {{ font-family: monospace; user-select: all; background: var(--accent-soft);
+  .addr code {{ font-family: monospace; user-select: all; background: var(--soft);
     padding: .15rem .4rem; border-radius: .35rem; }}
 </style>
 </head>
@@ -1926,7 +1965,7 @@ def logs_page(
     max-width: 13rem; }}
   td.text {{ overflow-wrap: break-word; }}
   /* Сводка сверху: период, виды событий, участники. */
-  .summary {{ background: var(--accent-soft); border-radius: .7rem;
+  .summary {{ background: var(--soft); border-radius: .7rem;
     padding: .55rem .8rem; margin-bottom: .8rem; }}
   .summary p {{ margin: .25rem 0; }}
   .summary .badge {{ margin-right: .3rem; }}
@@ -2572,13 +2611,13 @@ def autotest_page(
   .answer-md p, .answer-md ul, .answer-md ol {{ margin: .3rem 0; }}
   .answer-md h1, .answer-md h2, .answer-md h3 {{ margin: .4rem 0 .2rem;
     font-size: 1rem; }}
-  .answer-md code {{ background: var(--accent-soft); padding: .05rem .3rem;
+  .answer-md code {{ background: var(--soft); padding: .05rem .3rem;
     border-radius: .3rem; font-family: monospace; }}
   .answer-text {{ margin-top: .5rem; overflow-wrap: anywhere; }}
   .answer-text p, .answer-text ul, .answer-text ol {{ margin: .3rem 0; }}
   .answer-text h1, .answer-text h2, .answer-text h3 {{ margin: .4rem 0 .2rem;
     font-size: 1rem; }}
-  .answer-text code {{ background: var(--accent-soft); padding: .05rem .3rem;
+  .answer-text code {{ background: var(--soft); padding: .05rem .3rem;
     border-radius: .3rem; font-family: monospace; }}
   .codeblock {{ position: relative; margin: .35rem 0; }}
   .codeblock pre {{ background: #101a24; color: #d7e3ee; padding: .8rem .7rem .6rem;

@@ -989,7 +989,7 @@ class TestNavLook:
         """Разделы (и «выйти») — овальные пилюли, а не голые ссылки."""
         page = self._page()
         assert (
-            "padding: .2rem .65rem; border: 1px solid rgba(255, 255, 255, .35); "
+            "border: 1px solid color-mix(in srgb, var(--head) 40%, transparent); "
             "border-radius: 999px"
         ) in page
         assert ".topnav nav a:hover" in page
@@ -1008,6 +1008,29 @@ class TestNavLook:
         page = self._page()
         assert "box-shadow: 0 2px 6px color-mix(in srgb, var(--nav-a)" in page
 
+    def test_four_independent_colors_with_four_inputs(self) -> None:
+        """Четыре цвета: полоса верх/низ и кнопки верх/низ — у каждого своя пипетка."""
+        page = self._page()
+        for node in ("color-nav", "color-soft", "color-head", "color-accent", "color-reset"):
+            assert f'id="{node}"' in page, node
+        assert 'type="color"' in page
+        for label in ("полоса верх", "полоса низ", "кнопки верх", "кнопки низ"):
+            assert label in page, label
+
+    def test_the_soft_background_is_its_own_variable(self) -> None:
+        """Нежный фон (подсветки, уведомления) — отдельная переменная --soft."""
+        page = self._page()
+        assert "--soft: var(--accent-soft)" in page  # следует за кнопками, пока своя не задана
+        assert "background: var(--soft)" in page  # подложки читают именно её
+        assert "background: var(--accent-soft)" not in page  # старых прямых чтений больше нет
+
+    def test_header_buttons_follow_their_own_variable(self) -> None:
+        """Кнопки шапки (выйти, тема, пипетка) — свой цвет --head."""
+        page = self._page()
+        assert "--head: #ffffff" in page
+        assert "color: color-mix(in srgb, var(--head) 85%, transparent)" in page
+        assert "border: 1px solid color-mix(in srgb, var(--head) 40%, transparent)" in page
+
     def test_the_panel_offers_two_color_inputs_and_a_reset(self) -> None:
         page = self._page()
         assert 'id="color-accent"' in page
@@ -1018,20 +1041,22 @@ class TestNavLook:
     def test_saved_colors_apply_before_the_header_is_drawn(self) -> None:
         """Свои цвета применяются ранним скриптом — без мигания белым."""
         page = self._page()
-        assert page.index('localStorage.getItem("ai-bridge-accent")') < page.index(
-            '<header class="topnav">'
-        )
-        assert page.index('localStorage.getItem("ai-bridge-nav")') < page.index(
-            '<header class="topnav">'
-        )
+        for key in ("ai-bridge-accent", "ai-bridge-nav", "ai-bridge-soft", "ai-bridge-head"):
+            assert page.index(f'localStorage.getItem("{key}")') < page.index(
+                '<header class="topnav">'
+            ), key
 
     def test_choosing_a_preset_clears_custom_colors(self) -> None:
         """Пресет темы сбрасывает свои цвета — иначе непонятно, что действует."""
         page = self._page()
-        assert 'var AK="ai-bridge-accent", NK="ai-bridge-nav"' in page
-        assert "localStorage.removeItem(AK)" in page
-        assert "localStorage.removeItem(NK)" in page
-        assert 'setAccent(""); setNav(""); syncInputs();' in page  # сброс в обе стороны
+        assert (
+            'var AK="ai-bridge-accent", NK="ai-bridge-nav", '
+            'SK="ai-bridge-soft", HK="ai-bridge-head"'
+        ) in page
+        assert (
+            'function clearAll(){ setAccent(""); setNav(""); setSoft(""); setHead(""); }'
+            in page
+        )
 
     def test_remove_is_a_trash_icon_with_an_explanation(self) -> None:
         """«Убрать» — корзина (место для телефона), смысл — в подсказке."""
