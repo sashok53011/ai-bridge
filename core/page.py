@@ -29,6 +29,9 @@ def _style() -> str:
     --bg: #f4f8f6; --card: #ffffff; --text: #1b2a24; --muted: #5c6b64;
     --line: #e2e9e5; --accent: #0e9f6e; --accent-deep: #0a7d56;
     --accent-soft: rgba(14, 159, 110, .10);
+    /* Полоса шапки: по умолчанию следует за акцентом; свои цвета (в
+       браузере) разводят её и кнопки на две независимые переменные. */
+    --nav-a: var(--accent); --nav-b: var(--accent-deep);
     --bad: #c0392b; --bad-soft: rgba(192, 57, 43, .10);
     --warn-soft: rgba(176, 140, 20, .14); --blue-soft: rgba(42, 90, 128, .12); }
   @media (prefers-color-scheme: dark) { :root {
@@ -47,6 +50,11 @@ def _style() -> str:
     .theme-yellow { --accent: #fbbf24; --accent-deep: #d97706; --accent-soft: rgba(251, 191, 36, .14); }
     .theme-purple { --accent: #a78bfa; --accent-deep: #7c3aed; --accent-soft: rgba(167, 139, 250, .14); }
   }
+  /* Свои цвета (кладёт браузер): производные оттенки считает CSS от
+     выбранного base-цвета, JS только запоминает и применяет его. */
+  html.custom-accent { --accent-deep: color-mix(in srgb, var(--accent) 78%, #000);
+    --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent); }
+  html.custom-nav { --nav-b: color-mix(in srgb, var(--nav-a) 74%, #000); }
   * { box-sizing: border-box; }
   html { background: var(--bg); }
   body { font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text);
@@ -68,6 +76,11 @@ def _style() -> str:
     border-color: var(--accent-deep); color: #fff; }
   button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
   button.ghost:hover { color: var(--accent); }
+  /* Рамка-пилюля для ghost-кнопок, которым надо быть «как у соседей»
+     (в каталоге — «тест» и «убрать»). Остальные ghost-кнопки оставляем
+     без рамки — их приведём к пилюлям при следующей правке тех страниц
+     (заметка в AGENTS.md). */
+  button.ghost.pill { border-color: var(--line); }
   button.danger { color: var(--bad); }
   form { display: inline; }
   .role { color: var(--muted); font-size: .85rem; }
@@ -78,28 +91,53 @@ def _style() -> str:
     padding: .8rem 1rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }
   /* Таблица шире карточки — прокручивается внутри неё, а не лезет наружу. */
   .card { overflow-x: auto; }
-  /* Шапка — изумрудная плашка: логотип-ссылка слева, разделы справа. */
+  /* Шапка — плашка своего цвета: логотип-ссылка слева, разделы справа.
+     Разделы — пилюли с рамкой (как ссылки-действия в строках), «выйти»
+     в той же форме, но приглушено. */
   .topnav { display: flex; justify-content: space-between; align-items: center;
-    gap: 1rem; flex-wrap: wrap; padding: .55rem .9rem; border-radius: .9rem;
-    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-    box-shadow: 0 2px 6px rgba(14, 159, 110, .25); }
-  .topnav .brand { font-weight: 700; font-size: 1.1rem; color: #fff; text-decoration: none; }
+    gap: .5rem; flex-wrap: wrap; padding: .55rem .9rem; border-radius: .9rem;
+    background: linear-gradient(135deg, var(--nav-a), var(--nav-b));
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--nav-a) 40%, transparent); }
+  .topnav .brand { font-weight: 700; font-size: 1.1rem; color: #fff; text-decoration: none;
+    margin-right: .4rem; }
   .topnav .brand:hover { text-decoration: underline; }
-  .topnav nav { display: flex; gap: .9rem; align-items: center; font-size: .9rem; flex-wrap: wrap; }
-  .topnav nav a { color: rgba(255, 255, 255, .85); text-decoration: none; font-weight: 500; }
-  .topnav nav a:hover { color: #fff; text-decoration: underline; }
-  .topnav button.out { background: none; border: none; color: rgba(255, 255, 255, .65);
-    padding: 0; font-size: .9rem; }
-  .topnav button.out:hover { color: #fff; }
-  /* Переключатель цветовой темы в шапке. */
+  .topnav nav { display: flex; gap: .45rem; align-items: center; font-size: .9rem; flex-wrap: wrap; }
+  .topnav nav a { color: rgba(255, 255, 255, .85); text-decoration: none; font-weight: 500;
+    padding: .2rem .65rem; border: 1px solid rgba(255, 255, 255, .35); border-radius: 999px; }
+  .topnav nav a:hover { color: #fff; background: rgba(255, 255, 255, .16);
+    border-color: rgba(255, 255, 255, .65); text-decoration: none; }
+  .topnav button.out { background: none; color: rgba(255, 255, 255, .65); font-size: .9rem;
+    padding: .2rem .65rem; border: 1px solid rgba(255, 255, 255, .35); border-radius: 999px; }
+  .topnav button.out:hover { color: #fff; background: rgba(255, 255, 255, .16);
+    border-color: rgba(255, 255, 255, .65); }
+  /* Переключатель цветовой темы и «свои цвета» в шапке. */
   .theme-switch { display: inline-flex; align-items: center; }
-  #theme-sel { padding: .2rem .5rem; font-size: .85rem; border: 1px solid rgba(255, 255, 255, .35);
-    background: rgba(255, 255, 255, .15); color: #fff; border-radius: .5rem;
+  #theme-sel { padding: .2rem .6rem; font-size: .85rem; border: 1px solid rgba(255, 255, 255, .35);
+    background: rgba(255, 255, 255, .15); color: #fff; border-radius: 999px;
     cursor: pointer; font: inherit; }
   #theme-sel:hover { border-color: rgba(255, 255, 255, .6); }
   #theme-sel option { color: var(--text); background: var(--card); }
   .topnav.plain #theme-sel { border-color: var(--line); background: var(--card);
     color: var(--text); }
+  /* Свои цвета: пилюля-заголовок, при клике — панелька с двумя
+     независимыми цветами: кнопки и полоса шапки. */
+  .colors { position: relative; }
+  .colors summary { list-style: none; display: inline-block; padding: .2rem .6rem;
+    font-size: .85rem; border: 1px solid rgba(255, 255, 255, .35);
+    background: rgba(255, 255, 255, .15); color: #fff; border-radius: 999px; cursor: pointer; }
+  .colors summary::-webkit-details-marker { display: none; }
+  .colors summary:hover { border-color: rgba(255, 255, 255, .6); }
+  .topnav.plain .colors summary { border-color: var(--line); background: var(--card);
+    color: var(--text); }
+  .colors .panel { position: absolute; right: 0; top: calc(100% + .35rem); z-index: 5;
+    display: flex; gap: .5rem; align-items: center; white-space: nowrap;
+    background: var(--card); color: var(--text); border: 1px solid var(--line);
+    border-radius: .8rem; padding: .5rem .7rem; box-shadow: 0 6px 18px rgba(0, 0, 0, .18); }
+  .colors .panel label { display: inline-flex; align-items: center; gap: .3rem; margin: 0;
+    font-size: .8rem; color: var(--muted); }
+  .colors .panel input[type=color] { width: 2.2rem; height: 1.5rem; padding: 0;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--card);
+    cursor: pointer; }
   /* Вход/регистрация — шапка без плашки, они ещё не в системе. */
   .topnav.plain { background: none; box-shadow: none; padding: .2rem 0;
     border-bottom: 1px solid var(--line); border-radius: 0; }
@@ -185,9 +223,9 @@ def _nav(*, can_edit: bool) -> str:
         links.append('<a href="/rules">правила</a>')
         links.append('<a href="/autotest">автотесты</a>')
         links.append('<a href="/users">пользователи</a>')
-    # Переключатель цветовой темы: сохраняется в браузере (localStorage)
-    # и применяется сразу, без перезагрузки страницы.
-    theme_switch = (
+    # Вид шапки живёт в браузере: тема и свои цвета (кнопки, полоса)
+    # хранятся в localStorage, применяются сразу, без перезагрузки.
+    theme_select = (
         '<label class="theme-switch" title="цветовая тема">'
         '<select id="theme-sel" aria-label="цветовая тема">'
         '<option value="system">системная</option>'
@@ -196,36 +234,84 @@ def _nav(*, can_edit: bool) -> str:
         '<option value="yellow">жёлтая</option>'
         '<option value="purple">фиолетовая</option>'
         '</select></label>'
-        '<script>'
-        '(function(){'
-        'var key="ai-bridge-theme";'
-        'var sel=document.getElementById("theme-sel");'
-        'if(!sel) return;'
-        'var saved=localStorage.getItem(key)||"system";'
-        'sel.value=saved;'
-        'sel.addEventListener("change",function(){'
-        '  localStorage.setItem(key,sel.value);'
-        '  var root=document.documentElement;'
-        '  root.classList.remove("theme-blue","theme-yellow","theme-purple");'
-        '  if(sel.value==="blue") root.classList.add("theme-blue");'
-        '  else if(sel.value==="yellow") root.classList.add("theme-yellow");'
-        '  else if(sel.value==="purple") root.classList.add("theme-purple");'
-        '});'
-        '})();'
-        '</script>'
     )
+    # Свои цвета — два независимых: что красить в кнопках и какого
+    # цвета быть полосе шапки. В свёрнутом виде — одна пилюля (на
+    # телефоне место дорого), раскрывается в панельку с двумя
+    # образцами и «сбросить».
+    colors = (
+        '<details class="colors" title="свои цвета">'
+        '<summary aria-label="свои цвета">🎨</summary>'
+        '<div class="panel">'
+        '<label>кнопки <input type="color" id="color-accent" value="#0e9f6e" '
+        'aria-label="цвет кнопок"></label>'
+        '<label>полоса <input type="color" id="color-nav" value="#0e9f6e" '
+        'aria-label="цвет полосы шапки"></label>'
+        '<button type="button" class="ghost pill" id="color-reset">сбросить</button>'
+        '</div></details>'
+    )
+    # Ранний скрипт: применяется до отрисовки шапки — цвета не мигают.
     theme_script = """<script>
 (function(){
-  var key="ai-bridge-theme";
   var root=document.documentElement;
+  var key="ai-bridge-theme";
   var saved=localStorage.getItem(key)||"system";
   root.classList.remove("theme-blue","theme-yellow","theme-purple");
   if(saved==="blue") root.classList.add("theme-blue");
   else if(saved==="yellow") root.classList.add("theme-yellow");
   else if(saved==="purple") root.classList.add("theme-purple");
+  var accent=localStorage.getItem("ai-bridge-accent");
+  var nav=localStorage.getItem("ai-bridge-nav");
+  if(accent){ root.style.setProperty("--accent",accent); root.classList.add("custom-accent"); }
+  if(nav){ root.style.setProperty("--nav-a",nav); root.classList.add("custom-nav"); }
 })();
 </script>"""
-    links.append(theme_switch)
+    # Живые правила: выбор пресета сбрасывает свои цвета (иначе
+    # непонятно, что действует); пипетки красят сразу по движению.
+    ui_script = """<script>
+(function(){
+  var root=document.documentElement;
+  var AK="ai-bridge-accent", NK="ai-bridge-nav";
+  var sel=document.getElementById("theme-sel");
+  var ca=document.getElementById("color-accent");
+  var cn=document.getElementById("color-nav");
+  var reset=document.getElementById("color-reset");
+  function hex(v){ v=(v||"").trim(); return /^#[0-9a-f]{6}$/i.test(v) ? v : null; }
+  function syncInputs(){
+    var cs=getComputedStyle(root);
+    var a=hex(cs.getPropertyValue("--accent")), n=hex(cs.getPropertyValue("--nav-a"));
+    if(a && ca) ca.value=a;
+    if(n && cn) cn.value=n;
+  }
+  function setAccent(v){
+    if(v){ root.style.setProperty("--accent",v); root.classList.add("custom-accent"); localStorage.setItem(AK,v); }
+    else { root.style.removeProperty("--accent"); root.classList.remove("custom-accent"); localStorage.removeItem(AK); }
+  }
+  function setNav(v){
+    if(v){ root.style.setProperty("--nav-a",v); root.classList.add("custom-nav"); localStorage.setItem(NK,v); }
+    else { root.style.removeProperty("--nav-a"); root.classList.remove("custom-nav"); localStorage.removeItem(NK); }
+  }
+  if(sel){
+    sel.value=localStorage.getItem("ai-bridge-theme")||"system";
+    sel.addEventListener("change",function(){
+      localStorage.setItem("ai-bridge-theme",sel.value);
+      root.classList.remove("theme-blue","theme-yellow","theme-purple");
+      if(sel.value==="blue") root.classList.add("theme-blue");
+      else if(sel.value==="yellow") root.classList.add("theme-yellow");
+      else if(sel.value==="purple") root.classList.add("theme-purple");
+      // Пресет сбрасывает свои цвета — иначе непонятно, что действует.
+      setAccent(""); setNav(""); syncInputs();
+    });
+  }
+  if(ca) ca.addEventListener("input",function(){ setAccent(hex(ca.value)); });
+  if(cn) cn.addEventListener("input",function(){ setNav(hex(cn.value)); });
+  if(reset) reset.addEventListener("click",function(){ setAccent(""); setNav(""); syncInputs(); });
+  syncInputs();
+})();
+</script>"""
+    links.append(theme_select)
+    links.append(colors)
+    links.append(ui_script)
     links.append(
         '<form method="post" action="/logout">'
         '<button class="out" type="submit">выйти</button></form>'
@@ -303,10 +389,11 @@ def _provider_row(
         f'<span class="localstatus">⚡ {escape(status)}</span>' if status else ""
     )
 
-    # Действие над строкой. Админ правит определение (править/убрать),
-    # человек ведёт своё пространство: ключ, тест, своя модель. Проверка —
-    # кнопкой «тест»: настоящий ответ модели надёжнее списка моделей и он
-    # же засчитывается в статистику сообщества.
+    # Действие над строкой. Админ правит определение (править/убрать —
+    # корзиной, место на телефоне дорогое), человек ведёт своё пространство:
+    # ключ, тест, своя модель. Проверка — кнопкой «тест»: настоящий ответ
+    # модели надёжнее списка моделей и он же засчитывается в статистику
+    # сообщества.
     entry_id = escape(entry["id"], quote=True)
     state = "on" if entry.get("enabled") else "off"
     actions = [
@@ -316,7 +403,7 @@ def _provider_row(
         f'title="{"выключен — нажмите, чтобы включить" if not entry.get("enabled") else "включён — нажмите, чтобы выключить"}">'
         f'<span class="knob"></span></button></form>',
         f'<form method="post" action="/test/{entry_id}">'
-        f'<button type="submit" class="ghost">тест</button></form>',
+        f'<button type="submit" class="ghost pill">тест</button></form>',
         f'<a class="btn-ghost" href="/key/{entry_id}">ключ</a>',
         f'<a class="btn-ghost" href="/pick/{entry_id}">модель</a>',
     ]
@@ -333,7 +420,8 @@ def _provider_row(
         if can_remove(entry, is_superuser=can_edit):
             actions.append(
                 f'<form method="post" action="/remove/{entry_id}">'
-                f'<button type="submit" class="ghost danger">убрать</button></form>'
+                f'<button type="submit" class="ghost danger pill" '
+                f'title="убрать провайдера" aria-label="убрать">🗑</button></form>'
             )
 
     # Адрес провайдера на страницах не показывается никому — ни человеку,

@@ -975,6 +975,79 @@ class TestNavigation:
         assert 'href="/logs"' in token_created_page("uib-x", "phone", can_edit=True)
 
 
+class TestNavLook:
+    """Вид шапки: разделы — пилюли, свои цвета живут в браузере.
+
+    Шапка одна на все страницы, поэтому проверяется на каталоге.
+    """
+
+    @staticmethod
+    def _page(**kwargs) -> str:
+        return catalogue_page([_entry()], can_edit=True, **kwargs)
+
+    def test_sections_are_pills_with_a_visible_border(self) -> None:
+        """Разделы (и «выйти») — овальные пилюли, а не голые ссылки."""
+        page = self._page()
+        assert (
+            "padding: .2rem .65rem; border: 1px solid rgba(255, 255, 255, .35); "
+            "border-radius: 999px"
+        ) in page
+        assert ".topnav nav a:hover" in page
+        assert ".topnav button.out" in page
+
+    def test_two_colors_are_independent_but_default_to_one(self) -> None:
+        """Кнопки и полоса шапки — две разные переменные; по умолчанию равны."""
+        page = self._page()
+        assert "--nav-a: var(--accent)" in page  # полоса = акцент, пока не задана своя
+        assert "linear-gradient(135deg, var(--nav-a), var(--nav-b))" in page
+        assert "html.custom-accent" in page
+        assert "html.custom-nav" in page
+
+    def test_the_header_shadow_follows_the_picked_color(self) -> None:
+        """Тень полосы считается от её цвета — не остаётся зелёной при синем."""
+        page = self._page()
+        assert "box-shadow: 0 2px 6px color-mix(in srgb, var(--nav-a)" in page
+
+    def test_the_panel_offers_two_color_inputs_and_a_reset(self) -> None:
+        page = self._page()
+        assert 'id="color-accent"' in page
+        assert 'id="color-nav"' in page
+        assert 'id="color-reset"' in page
+        assert 'type="color"' in page
+
+    def test_saved_colors_apply_before_the_header_is_drawn(self) -> None:
+        """Свои цвета применяются ранним скриптом — без мигания белым."""
+        page = self._page()
+        assert page.index('localStorage.getItem("ai-bridge-accent")') < page.index(
+            '<header class="topnav">'
+        )
+        assert page.index('localStorage.getItem("ai-bridge-nav")') < page.index(
+            '<header class="topnav">'
+        )
+
+    def test_choosing_a_preset_clears_custom_colors(self) -> None:
+        """Пресет темы сбрасывает свои цвета — иначе непонятно, что действует."""
+        page = self._page()
+        assert 'var AK="ai-bridge-accent", NK="ai-bridge-nav"' in page
+        assert "localStorage.removeItem(AK)" in page
+        assert "localStorage.removeItem(NK)" in page
+        assert 'setAccent(""); setNav(""); syncInputs();' in page  # сброс в обе стороны
+
+    def test_remove_is_a_trash_icon_with_an_explanation(self) -> None:
+        """«Убрать» — корзина (место для телефона), смысл — в подсказке."""
+        page = self._page()
+        assert 'action="/remove/ollama"' in page
+        assert 'aria-label="убрать"' in page
+        assert ">убрать</button>" not in page  # слова в кнопке больше нет
+
+    def test_test_and_remove_carry_the_pill_class(self) -> None:
+        """Обе кнопки строки каталога получают рамку-пилюлю."""
+        page = self._page()
+        assert 'class="ghost pill"' in page  # тест
+        assert 'class="ghost danger pill"' in page  # убрать
+        assert "button.ghost.pill" in page  # и правило в CSS
+
+
 class TestAutotestAnswers:
     """Результаты тестов: форматированный, raw и реакция роутера."""
 
