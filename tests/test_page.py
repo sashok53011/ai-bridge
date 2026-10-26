@@ -1293,6 +1293,27 @@ class TestTestPageExtras:
         assert 'name="image_url"' in page
         assert "картинка" in page  # поле подписано
 
+    def test_any_model_from_the_catalogue_is_pickable(self) -> None:
+        """Список всех моделей каталога — тест идёт на любой выбранной."""
+        page = chat_test_page(
+            "Pollinations.ai", "настроенная", "привет", answer="ок",
+            provider_id="pollinations",
+            models=["openai/gpt-5.4-nano", "moonshotai/kimi-k3",
+                    "community/sharktide/3D-agent"],
+            current_model="настроенная",
+        )
+        assert 'name="test_model"' in page
+        assert 'value="community/sharktide/3D-agent"' in page
+        assert 'value=""' in page  # «как настроено» — по умолчанию
+        assert any("selected" in line and "настроенная" in line
+                   for line in page.splitlines())  # выбрана настроенная
+
+    def test_no_catalogue_no_model_field(self) -> None:
+        """Список не получен — поля нет, тест идёт на настроенной."""
+        page = chat_test_page("Ollama", "qwen3", "привет", answer="ок",
+                              provider_id="ollama")
+        assert 'name="test_model"' not in page
+
     def test_the_chat_answer_is_rendered_as_markdown(self) -> None:
         """Ответ медиа-модели или агента — картинкой и ссылкой, не текстом."""
         page = chat_test_page(

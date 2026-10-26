@@ -437,6 +437,26 @@ class TestTestChat:
 
         assert isinstance(fake.seen["messages"][0]["content"], str)
 
+    def test_a_chosen_model_overrides_the_configured_one(self) -> None:
+        """Поле «модель»: тест можно пустить на любой модели из каталога."""
+        fake = _FakeModel({"choices": [{"message": {"content": "ок"}}]})
+
+        result = run_test_chat(_entry(), "sk", model="openai/gpt-5.4-nano",
+                               make_provider=lambda url, **kw: fake)
+
+        assert result["error"] == ""
+        assert fake.seen["model"] == "openai/gpt-5.4-nano"
+
+    def test_a_chosen_model_replaces_even_an_empty_configured_one(self) -> None:
+        """Без настроенной модели, но с выбранной — тест всё равно идёт."""
+        fake = _FakeModel({"choices": [{"message": {"content": "ок"}}]})
+
+        result = run_test_chat(_entry(model=""), "sk", model="moonshotai/kimi-k3",
+                               make_provider=lambda url, **kw: fake)
+
+        assert result["error"] == ""
+        assert fake.seen["model"] == "moonshotai/kimi-k3"
+
     def test_a_hidden_error_in_a_200_is_reported_not_swallowed(self) -> None:
         fake = _FakeModel({"error": {"message": "insufficient quota"}})
 

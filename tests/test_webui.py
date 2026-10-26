@@ -1755,6 +1755,47 @@ class TestImageTestPage:
         assert isinstance(content, list)
         assert content[1]["image_url"]["url"] == "https://x/pic.png"
 
+    def test_a_picked_model_reaches_the_chat_request(self, harness) -> None:
+        """Select «модель»: тест можно пустить на любой модели каталога."""
+        seen: dict = {}
+
+        def provider(url, **kwargs):
+            class _Chat:
+                status_code = 200
+                headers: dict = {}
+
+                @staticmethod
+                def read() -> bytes:
+                    return json.dumps(
+                        {"choices": [{"message": {"content": "с другой модели"}}]}
+                    ).encode("utf-8")
+
+            class _P:
+                @staticmethod
+                def forward_chat(body, *, api_key, timeout, stream):
+                    seen.update(json.loads(body))
+                    return _Chat()
+
+                @staticmethod
+                def fetch_models(key: str = ""):
+                    return [{"name": "llama3.2"}, {"name": "moonshotai/kimi-k3"}]
+
+            return _P()
+
+        _, base = harness([_entry()], make_provider=provider)
+
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            client.post("/key", data={"id": "ollama", "api_key": "sk-test"})
+            response = client.post("/test/ollama", data={
+                "question": "привет",
+                "test_model": "moonshotai/kimi-k3",
+            })
+
+        assert response.status_code == 200
+        assert "с другой модели" in response.text
+        assert seen["model"] == "moonshotai/kimi-k3"
+
 
 class TestMediaTestRoutes:
     """Страница теста: озвучка, 3D и вектор — свои маршруты и результаты."""

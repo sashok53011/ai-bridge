@@ -2923,6 +2923,8 @@ def test_page(
     can_edit: bool = False,
     provider_id: str = "",
     media: dict[str, list[dict]] | None = None,
+    models: list[str] | None = None,
+    current_model: str = "",
     image_result: dict | None = None,
     audio_result: dict | None = None,
     music_result: dict | None = None,
@@ -2955,11 +2957,26 @@ def test_page(
             f"{notice_html}\n{answer_html}"
         )
 
+    prompt_form = ""
+    model_field = ""
+    if models:
+        options = "".join(
+            f'<option value="{escape(str(name), quote=True)}">'
+            f"{escape(str(name))}</option>"
+            for name in models
+        )
+        model_field = f"""    <label>модель (любая из каталога — тест идёт на ней)
+      <select name="test_model">
+        <option value="" selected>как настроено ({escape(current_model or "—")})</option>
+        {options}
+      </select>
+    </label>
+"""
     prompt_form = f"""
 <div class="card">
   <h2>Свой промпт</h2>
   <form method="post" action="/test/{escape(provider_id, quote=True)}">
-    <label>вопрос модели (свой текст)
+{model_field}    <label>вопрос модели (свой текст)
       <textarea name="question" rows="3"
                 placeholder="например: Ответь одним словом — привет"></textarea>
     </label>

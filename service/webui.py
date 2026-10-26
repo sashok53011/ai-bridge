@@ -266,6 +266,13 @@ class WebUi:
             else {"make_provider": self._make_provider}
         )
         media = media_models(entry, key, **kwargs)
+        # Каталог моделей — для select «любая модель» в форме промпта
+        # (провайдер недоступен — поля нет, тест идёт на настроенной).
+        models: list[str] = []
+        try:
+            models = [str(name) for name in self._models_of(entry, key) if name]
+        except Exception:  # noqa: BLE001
+            models = []
         voices: list[str] = []
         if media.get("audio") or media.get("voice"):
             # Голоса — отдельный каталог (у Pollinations /audio/models);
@@ -280,6 +287,7 @@ class WebUi:
             entry["name"], entry.get("model", ""), question,
             answer=answer, error=error, can_edit=is_admin,
             provider_id=str(entry["id"]), media=media, voices=voices,
+            models=models, current_model=str(entry.get("model") or ""),
             **results,
         )
 
@@ -1124,6 +1132,9 @@ class WebUi:
             image_url = field("image_url").strip()
             if image_url:
                 chat_kwargs["image_url"] = image_url
+            picked = field("test_model").strip()
+            if picked:
+                chat_kwargs["model"] = picked
             outcome = test_chat(entry, key, **chat_kwargs)
             # Тест — главная проверка провайдера: настоящий ответ модели
             # засчитывается в статистику сообщества под именем человека.

@@ -1,4 +1,4 @@
-# AGENTS.md
+﻿# AGENTS.md
 
 Краткие правила для агентов. О продукте и сервере — [CONTEXT.md](CONTEXT.md)
 (читать целиком перед работой), о запуске и деплое — [README.md](README.md).
@@ -6,7 +6,7 @@
 ## Команды
 
 - `uv sync` — зависимости (httpx, cryptography; dev: pytest). Python >= 3.11.
-- `uv run pytest` — все тесты: ≈960 шт., ~80 с, **полностью офлайн**
+- `uv run pytest` — все тесты: ≈970 шт., ~80 с, **полностью офлайн**
   (сеть замокана через `httpx.MockTransport`).
 - `uv run pytest tests/test_catalogue.py` — один файл;
   `uv run pytest -k reconcile` — по имени.

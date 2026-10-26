@@ -943,6 +943,7 @@ def test_chat(
     make_provider: Callable[..., Provider] = Provider,
     question: str = DEFAULT_QUESTION,
     image_url: str = "",
+    model: str = "",
     timeout: float = 60.0,
 ) -> dict:
     """Небольшой тестовый чат: настоящий запрос с крошечным лимитом.
@@ -952,8 +953,11 @@ def test_chat(
     модели это доли цента — на странице об этом сказано честно.
     ``image_url`` — картинка в вопросе: её ждут vision-модели и
     агенты-генераторы вроде 3D-для-Blender («картинка → ссылку»).
+    ``model`` — пусто = настроенная модель; непусто = любая модель из
+    каталога (список на странице теста).
     """
     image_url = (image_url or "").strip()
+    model = (model or "").strip()
     content: object = question
     if image_url:
         content = [
@@ -962,7 +966,7 @@ def test_chat(
         ]
     payload = json.dumps(
         {
-            "model": entry.get("model") or "",
+            "model": model or entry.get("model") or "",
             "messages": [{"role": "user", "content": content}],
             # Без лимита по токенам: ответ всегда полный, как у клиента.
             "temperature": 0,
@@ -973,7 +977,7 @@ def test_chat(
     def fail(text: str) -> dict:
         return {"question": question, "answer": "", "error": text}
 
-    if not entry.get("model"):
+    if not (model or entry.get("model")):
         return fail("у провайдера не выбрана модель — выберите её кнопкой «модель»")
     if not key:
         return fail("нужен ключ — введите его кнопкой «ключ»")
