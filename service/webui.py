@@ -1121,6 +1121,9 @@ class WebUi:
             chat_kwargs = dict(kwargs)
             if question:
                 chat_kwargs["question"] = question
+            image_url = field("image_url").strip()
+            if image_url:
+                chat_kwargs["image_url"] = image_url
             outcome = test_chat(entry, key, **chat_kwargs)
             # Тест — главная проверка провайдера: настоящий ответ модели
             # засчитывается в статистику сообщества под именем человека.

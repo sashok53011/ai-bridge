@@ -32,6 +32,23 @@ class TestRender:
         page = render("1. раз\n2. два")
         assert "<ol>" in page and page.count("<li>") == 2
 
+    def test_an_image_becomes_a_picture(self) -> None:
+        """Ответы медиа-моделей: ![alt](url) — настоящая картинка."""
+        page = render("![кот в космосе](https://x/pic.png)")
+        assert '<img src="https://x/pic.png"' in page
+        assert 'alt="кот в космосе"' in page
+        assert 'loading="lazy"' in page
+
+    def test_a_javascript_image_stays_text(self) -> None:
+        page = render("![x](javascript:alert(1))")
+        assert "<img" not in page
+
+    def test_an_image_does_not_swallow_the_link_syntax(self) -> None:
+        """После картинки обычные ссылки остаются ссылками."""
+        page = render("![кот](https://x/p.png) и [ссылка](https://y/z)")
+        assert '<img src="https://x/p.png"' in page
+        assert '<a href="https://y/z"' in page
+
     def test_a_link_is_safe(self) -> None:
         page = render("[сайт](https://example.com/x)")
         assert 'href="https://example.com/x"' in page

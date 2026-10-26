@@ -1287,6 +1287,22 @@ class TestTestPageExtras:
         assert 'action="/test/pollinations"' in page
         assert 'name="question"' in page
 
+    def test_the_prompt_form_can_carry_a_picture(self) -> None:
+        """Агенты вроде 3D-для-Blender ждут картинку в чате (image_url)."""
+        page = self._page()
+        assert 'name="image_url"' in page
+        assert "картинка" in page  # поле подписано
+
+    def test_the_chat_answer_is_rendered_as_markdown(self) -> None:
+        """Ответ медиа-модели или агента — картинкой и ссылкой, не текстом."""
+        page = chat_test_page(
+            "Pollinations.ai", "3D-agent", "привет",
+            answer="![сгенерировано](https://x/pic.png)\n\nhttps://x/model.glb",
+            provider_id="pollinations",
+        )
+        assert '<img src="https://x/pic.png"' in page
+        assert "https://x/model.glb" in page  # голая ссылка остаётся видимой текстом
+
     def test_image_section_appears_only_with_models(self) -> None:
         page = self._page(media={"image": [
             {"name": "flux.1-schnell", "paid": False},

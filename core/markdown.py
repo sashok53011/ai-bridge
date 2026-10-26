@@ -1,7 +1,8 @@
 """Крошечный markdown → HTML для страниц приставки.
 
 Поддерживает то, что реально присылают модели: заголовки, списки,
-жирный/курсив, встроенный код, блоки кода ```lang```, ссылки http/https.
+жирный/курсив, встроенный код, блоки кода ```lang```, ссылки http/https
+и картинки ``![alt](url)`` (ответы медиа-моделей).
 Всё остальное остаётся текстом. HTML экранируется — чужой ответ не может
 вставить тег или обработчик.
 
@@ -20,6 +21,8 @@ _NUMBERED = re.compile(r"^\s*\d+[.)]\s+(.*)$")
 _CODE_SPAN = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+#: Картинки медиа-моделей: ![alt](url) — только http/https, как ссылки.
+_IMAGE = re.compile(r"!\[([^\]]*)\]\((https?://[^\s)]+)\)")
 _LINK = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 
 
@@ -92,11 +95,13 @@ def render(text: object) -> str:
 
 
 def _inline(text: str) -> str:
-    """Строка без абзацев: экранирование, код, выделение, ссылки."""
+    """Строка без абзацев: экранирование, код, выделение, картинки, ссылки."""
     value = html.escape(text)
     value = _CODE_SPAN.sub(r"<code>\1</code>", value)
     value = _BOLD.sub(r"<strong>\1</strong>", value)
     value = _ITALIC.sub(r"<em>\1</em>", value)
+    # Картинки — до ссылок: иначе _LINK разберёт внутренние [alt](url).
+    value = _IMAGE.sub(r'<img src="\2" alt="\1" loading="lazy">', value)
     value = _LINK.sub(
         r'<a href="\2" target="_blank" rel="noopener">\1</a>', value
     )

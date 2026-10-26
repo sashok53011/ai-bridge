@@ -415,6 +415,28 @@ class TestTestChat:
         assert "не выбрана модель" in run_test_chat(_entry(model=""), "sk")["error"]
         assert "нужен ключ" in run_test_chat(_entry(), "")["error"]
 
+    def test_an_image_url_rides_along_for_vision_and_3d_agents(self) -> None:
+        """Своё поле «картинка»: агенты вроде 3D для Blender ждут image_url."""
+        fake = _FakeModel({"choices": [{"message": {"content": "готово"}}]})
+
+        result = run_test_chat(_entry(), "sk", image_url="https://x/pic.png",
+                               make_provider=lambda url, **kw: fake)
+
+        assert result["error"] == ""
+        content = fake.seen["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[0]["type"] == "text"
+        assert content[0]["text"]  # вопрос ушёл текстом
+        assert content[1]["image_url"]["url"] == "https://x/pic.png"
+
+    def test_without_an_image_url_the_body_stays_a_plain_string(self) -> None:
+        """Обычный вопрос — как раньше: content строкой, не списком."""
+        fake = _FakeModel({"choices": [{"message": {"content": "ок"}}]})
+
+        run_test_chat(_entry(), "sk", make_provider=lambda url, **kw: fake)
+
+        assert isinstance(fake.seen["messages"][0]["content"], str)
+
     def test_a_hidden_error_in_a_200_is_reported_not_swallowed(self) -> None:
         fake = _FakeModel({"error": {"message": "insufficient quota"}})
 

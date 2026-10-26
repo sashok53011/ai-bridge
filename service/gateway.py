@@ -942,6 +942,7 @@ def test_chat(
     *,
     make_provider: Callable[..., Provider] = Provider,
     question: str = DEFAULT_QUESTION,
+    image_url: str = "",
     timeout: float = 60.0,
 ) -> dict:
     """Небольшой тестовый чат: настоящий запрос с крошечным лимитом.
@@ -949,11 +950,20 @@ def test_chat(
     Возвращает {"question", "answer", "error"}: проверяет не только
     список моделей, а что ключ принят и модель отвечает. На платной
     модели это доли цента — на странице об этом сказано честно.
+    ``image_url`` — картинка в вопросе: её ждут vision-модели и
+    агенты-генераторы вроде 3D-для-Blender («картинка → ссылку»).
     """
+    image_url = (image_url or "").strip()
+    content: object = question
+    if image_url:
+        content = [
+            {"type": "text", "text": question},
+            {"type": "image_url", "image_url": {"url": image_url}},
+        ]
     payload = json.dumps(
         {
             "model": entry.get("model") or "",
-            "messages": [{"role": "user", "content": question}],
+            "messages": [{"role": "user", "content": content}],
             # Без лимита по токенам: ответ всегда полный, как у клиента.
             "temperature": 0,
         },

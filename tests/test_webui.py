@@ -1716,6 +1716,45 @@ class TestImageTestPage:
 
         assert "/imgtest/" not in response.text
 
+    def test_an_image_url_reaches_the_chat_body(self, harness) -> None:
+        """Поле «картинка» формы: image_url долетает до запроса чата."""
+        seen: dict = {}
+
+        def provider(url, **kwargs):
+            class _Chat:
+                status_code = 200
+                headers: dict = {}
+
+                @staticmethod
+                def read() -> bytes:
+                    return json.dumps(
+                        {"choices": [{"message": {"content": "вижу"}}]}
+                    ).encode("utf-8")
+
+            class _P:
+                @staticmethod
+                def forward_chat(body, *, api_key, timeout, stream):
+                    seen.update(json.loads(body))
+                    return _Chat()
+
+            return _P()
+
+        _, base = harness([_entry()], make_provider=provider)
+
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            client.post("/key", data={"id": "ollama", "api_key": "sk-test"})
+            response = client.post("/test/ollama", data={
+                "question": "что на картинке?",
+                "image_url": "https://x/pic.png",
+            })
+
+        assert response.status_code == 200
+        assert "вижу" in response.text
+        content = seen["messages"][0]["content"]
+        assert isinstance(content, list)
+        assert content[1]["image_url"]["url"] == "https://x/pic.png"
+
 
 class TestMediaTestRoutes:
     """Страница теста: озвучка, 3D и вектор — свои маршруты и результаты."""

@@ -2945,7 +2945,9 @@ def test_page(
         notice_html = (
             f'<p class="notice bad">{escape(error)}</p>' if error else ""
         )
-        answer_html = f"<p>{escape(answer)}</p>" if answer else ""
+        # Ответ — markdown (ссылки и ![картинки] оживают; чужой HTML
+        # рендерер экранирует, как и в автотестах).
+        answer_html = f"<div class=\"answer-md\">{render_markdown(answer)}</div>" if answer else ""
         chat_html = (
             f'<p class="role">Тест — настоящий, но крошечный запрос: на платной модели он\n'
             f'стоит доли цента.</p>\n'
@@ -2960,6 +2962,10 @@ def test_page(
     <label>вопрос модели (свой текст)
       <textarea name="question" rows="3"
                 placeholder="например: Ответь одним словом — привет"></textarea>
+    </label>
+    <label>картинка к вопросу (URL, необязательно) — для vision-моделей
+      и агентов-генераторов, например 3D-для-Blender
+      <input name="image_url" placeholder="https://…/picture.png">
     </label>
     <button type="submit" class="primary">спросить</button>
     <span class="role">крошечная просьба: на платной модели — доли цента</span>
