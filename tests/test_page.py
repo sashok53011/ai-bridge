@@ -1264,3 +1264,74 @@ class TestAutotestMediaResults:
         """Ответ провайдера — чужие данные: javascript: не становится ссылкой."""
         html = self._html("image", "javascript:alert(1)")
         assert "<img" not in html
+
+
+class TestTestPageExtras:
+    """Страница «Тест»: свой промпт и секция генерации картинок."""
+
+    @staticmethod
+    def _page(**kwargs) -> str:
+        return chat_test_page("Pollinations.ai", "flux.1-schnell", "привет",
+                              answer="Да", provider_id="pollinations", **kwargs)
+
+    def test_your_own_prompt_form_is_always_here(self) -> None:
+        page = self._page()
+        assert 'action="/test/pollinations"' in page
+        assert 'name="question"' in page
+
+    def test_image_section_appears_only_with_models(self) -> None:
+        page = self._page(image_models=[{"name": "flux.1-schnell", "paid": False},
+                                        {"name": "flux-2-pro", "paid": True}])
+        assert 'action="/imgtest/pollinations"' in page
+        assert 'name="prompt"' in page
+        assert 'value="flux.1-schnell"' in page
+        assert "платная" in page  # дорогая модель помечена
+
+        plain = chat_test_page("Ollama", "qwen3", "привет", answer="ок",
+                               provider_id="ollama")
+        assert "/imgtest/" not in plain  # у провайдера без меты секции нет
+
+    def test_the_result_box_waits_for_a_picture(self) -> None:
+        page = self._page(image_models=[{"name": "flux.1-schnell", "paid": False}])
+        assert "genbox" in page
+        assert "<img" not in page
+
+    def test_a_generated_picture_is_shown_in_the_box(self) -> None:
+        page = self._page(
+            image_models=[{"name": "flux.1-schnell", "paid": False}],
+            image_result={"model": "flux.1-schnell", "prompt": "кот",
+                          "url": "https://media.test/pic.png", "b64": "", "error": ""},
+        )
+        assert "<img" in page
+        assert "https://media.test/pic.png" in page
+        assert "кот" in page  # подпись: что и какой моделью
+
+    def test_base64_becomes_a_data_uri(self) -> None:
+        page = self._page(
+            image_models=[{"name": "flux.1-schnell", "paid": False}],
+            image_result={"model": "flux.1-schnell", "prompt": "кот",
+                          "url": "", "b64": "QUJD", "error": ""},
+        )
+        assert "data:image/png;base64,QUJD" in page
+
+    def test_an_image_error_is_a_notice(self) -> None:
+        page = self._page(
+            image_models=[{"name": "flux.1-schnell", "paid": False}],
+            image_result={"model": "", "prompt": "", "url": "", "b64": "",
+                          "error": "HTTP 400: нет кредитов"},
+        )
+        assert "HTTP 400: нет кредитов" in page
+        assert "notice bad" in page
+
+    def test_a_foreign_scheme_never_becomes_an_image(self) -> None:
+        page = self._page(
+            image_models=[{"name": "flux.1-schnell", "paid": False}],
+            image_result={"model": "m", "prompt": "x",
+                          "url": "javascript:alert(1)", "b64": "", "error": ""},
+        )
+        assert "<img" not in page
+
+    def test_the_answer_block_hides_without_a_question(self) -> None:
+        """После генерации страница не показывает чужой чат-вопрос."""
+        page = chat_test_page("Pollinations.ai", "", "", provider_id="pollinations")
+        assert "крошечный запрос" not in page

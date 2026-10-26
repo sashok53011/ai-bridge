@@ -1605,6 +1605,103 @@ class TestTestReports:
         )
 
 
+class TestImageTestPage:
+    """Дополнительный тест на странице «Тест»: секция генерации и её результат."""
+
+    @staticmethod
+    def _image_provider(url, **kwargs):
+        class _Chat:
+            status_code = 200
+            headers: dict = {}
+
+            @staticmethod
+            def read() -> bytes:
+                return json.dumps(
+                    {"choices": [{"message": {"content": "Да"}}]}
+                ).encode("utf-8")
+
+        class _Image:
+            status_code = 200
+            headers: dict = {}
+
+            @staticmethod
+            def read() -> bytes:
+                return json.dumps(
+                    {"data": [{"url": "https://media.test/pic.png"}]}
+                ).encode("utf-8")
+
+        class _Provider:
+            @staticmethod
+            def forward_chat(body, *, api_key, timeout, stream):
+                return _Chat()
+
+            @staticmethod
+            def forward_path(path, body, *, api_key, timeout, stream):
+                assert path == "/images/generations"
+                return _Image()
+
+            @staticmethod
+            def fetch_model_meta(key: str = "") -> dict:
+                return {"flux.1-schnell": {
+                    "category": "image",
+                    "endpoints": ["/v1/images/generations"],
+                    "paid": False,
+                }}
+
+        return _Provider()
+
+    def test_the_test_page_offers_the_image_form(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._image_provider)
+
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            response = client.post("/test/ollama")
+
+        assert response.status_code == 200
+        assert 'action="/imgtest/ollama"' in response.text
+        assert 'value="flux.1-schnell"' in response.text
+        assert 'name="question"' in response.text  # и свой промпт к чату
+
+    def test_a_generated_picture_is_shown(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._image_provider)
+
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            client.post("/key", data={"id": "ollama", "api_key": "sk-test"})
+            response = client.post(
+                "/imgtest/ollama", data={"prompt": "кот", "model": "flux.1-schnell"},
+            )
+
+        assert response.status_code == 200
+        assert "<img" in response.text
+        assert "https://media.test/pic.png" in response.text
+
+    def test_a_provider_without_meta_has_no_section(self, harness) -> None:
+        """Без метаданных каталога секции генерации нет — не у всех подряд."""
+        class _Bare:
+            @staticmethod
+            def forward_chat(body, *, api_key, timeout, stream):
+                class _Chat:
+                    status_code = 200
+                    headers: dict = {}
+
+                    @staticmethod
+                    def read() -> bytes:
+                        return json.dumps(
+                            {"choices": [{"message": {"content": "Да"}}]}
+                        ).encode("utf-8")
+
+                return _Chat()
+
+        _, base = harness([_entry()], make_provider=lambda url, **kw: _Bare())
+
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            response = client.post("/test/ollama")
+
+        assert "/imgtest/" not in response.text
+
+
 class TestStats:
     """Страница «Статистика»: расходы по моделям, доступна всем вошедшим."""
 

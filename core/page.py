@@ -2786,6 +2786,35 @@ def pick_model_page(
 </html>"""
 
 
+def _image_box(result: dict | None) -> str:
+    """Поле результата генерации: картинка, data-URI, ошибка или пустое место.
+
+    Ссылка чужая — только http/https (_safe_url): из ответа провайдера
+    не должно родиться «javascript:».
+    """
+    if not result:
+        return '<div class="genbox"><p class="role">картинка появится здесь</p></div>'
+    if str(result.get("error") or ""):
+        return (
+            f'<div class="genbox"><p class="notice bad">'
+            f'{escape(str(result["error"]))}</p></div>'
+        )
+    url = _safe_url(str(result.get("url") or ""))
+    b64 = str(result.get("b64") or "").strip()
+    if url:
+        src = url
+    elif b64:
+        src = b64 if b64.startswith("data:") else "data:image/png;base64," + b64
+    else:
+        return '<div class="genbox"><p class="notice bad">в ответе нет картинки</p></div>'
+    caption = escape(str(result.get("prompt") or ""))
+    model_name = escape(str(result.get("model") or ""))
+    return (
+        f'<div class="genbox"><img src="{escape(src, quote=True)}" alt="сгенерировано">'
+        f'<p class="role">{model_name} · «{caption}»</p></div>'
+    )
+
+
 def test_page(
     provider_name: str,
     model: str,
@@ -2794,12 +2823,70 @@ def test_page(
     answer: str = "",
     error: str = "",
     can_edit: bool = False,
+    provider_id: str = "",
+    image_models: list[dict] | None = None,
+    image_result: dict | None = None,
 ) -> str:
-    """Итог тестового чата: один вопрос — один ответ или честная ошибка."""
-    notice_html = (
-        f'<p class="notice bad">{escape(error)}</p>' if error else ""
-    )
-    answer_html = f"<p>{escape(answer)}</p>" if answer else ""
+    """Страница теста: чат-ответ, свой промпт и генерация картинки.
+
+    ``question`` пуст — чат-блок скрыт (страница открыта после
+    генерации); ``image_models`` непусто — секция «Картинка» с выбором
+    модели (платные помечены); ``image_result`` — что показать в поле
+    картинки: ссылку, data-URI или честную ошибку.
+    """
+    chat_html = ""
+    if question:
+        notice_html = (
+            f'<p class="notice bad">{escape(error)}</p>' if error else ""
+        )
+        answer_html = f"<p>{escape(answer)}</p>" if answer else ""
+        chat_html = (
+            f'<p class="role">Тест — настоящий, но крошечный запрос: на платной модели он\n'
+            f'стоит доли цента.</p>\n'
+            f'<p class="q">«{escape(question)}»</p>\n'
+            f"{notice_html}\n{answer_html}"
+        )
+
+    prompt_form = f"""
+<div class="card">
+  <h2>Свой промпт</h2>
+  <form method="post" action="/test/{escape(provider_id, quote=True)}">
+    <label>вопрос модели (свой текст)
+      <textarea name="question" rows="3"
+                placeholder="например: Ответь одним словом — привет"></textarea>
+    </label>
+    <button type="submit" class="primary">спросить</button>
+    <span class="role">крошечная просьба: на платной модели — доли цента</span>
+  </form>
+</div>"""
+
+    image_html = ""
+    models = image_models or []
+    if models:
+        options = "".join(
+            f'<option value="{escape(str(item.get("name") or ""), quote=True)}">'
+            f'{escape(str(item.get("name") or ""))}'
+            f'{" · платная" if item.get("paid") else ""}</option>'
+            for item in models
+        )
+        image_html = f"""
+<div class="card">
+  <h2>Картинка</h2>
+  <p class="role">Настоящий запрос генерации: бесплатной моделью — бесплатно,
+  платной — доли цента.</p>
+  <form method="post" action="/imgtest/{escape(provider_id, quote=True)}">
+    <label>модель
+      <select name="model">{options}</select>
+    </label>
+    <label>промпт
+      <textarea name="prompt" rows="3" required
+                placeholder="например: кот в космосе, детская книжка"></textarea>
+    </label>
+    <button type="submit" class="primary">сгенерировать</button>
+  </form>
+  {_image_box(image_result)}
+</div>"""
+
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -2809,16 +2896,17 @@ def test_page(
 <style>
 {_style()}
   .q {{ opacity: .6; }}
+  .genbox {{ margin-top: .7rem; }}
+  .genbox img {{ max-width: 24rem; border-radius: .6rem; display: block; }}
+  .genbox .role {{ margin-top: .3rem; }}
 </style>
 </head>
 <body>
 {_nav(can_edit=can_edit)}
 <h1>Тест: {escape(provider_name)} · {escape(model or "—")}</h1>
-<p class="role">Тест — настоящий, но крошечный запрос: на платной модели он
-стоит доли цента.</p>
-<p class="q">«{escape(question)}»</p>
-{notice_html}
-{answer_html}
+{chat_html}
+{prompt_form}
+{image_html}
 </body>
 </html>"""
 

@@ -431,6 +431,91 @@ def _capability_refusal(payload: bytes, needs: tuple[str, ...] = ()) -> tuple[st
     return "", ""
 
 
+def image_models(
+    entry: dict,
+    key: str,
+    *,
+    make_provider: Callable[..., Provider] = Provider,
+) -> list[dict]:
+    """Image-модели провайдера для формы генерации: ``[{"name", "paid"}]``.
+
+    Только метаданные каталога: секция «Картинка» появляется там, где
+    провайдер честно заявил image-модели (Pollinations), а не у всех
+    подряд; метаданных нет или каталог не отвечает — пусто, секции нет.
+    """
+    try:
+        meta = make_provider(entry["url"], timeout=15.0).fetch_model_meta(key)
+    except Exception:  # noqa: BLE001 — секция лучше исчезнет, чем задержит тест
+        return []
+    return [
+        {"name": name, "paid": bool(meta_dict.get("paid"))}
+        for name, meta_dict in sorted(meta.items())
+        if _meta_fits(meta_dict, "image")
+    ]
+
+
+def generate_image(
+    entry: dict,
+    key: str,
+    *,
+    prompt: str,
+    model: str,
+    make_provider: Callable[..., Provider] = Provider,
+    timeout: float = 120.0,
+) -> dict:
+    """Генерация картинки одним запросом — дополнительный тест страницы.
+
+    Возвращает ``{"model", "prompt", "url", "b64", "error"}``: ссылку
+    страница покажет картинкой, base64 — data-URI (разово, в журнал не
+    пишется). Без промпта, модели или ключа ничего не отправляется —
+    каждая нехватка честной строкой.
+    """
+    prompt = (prompt or "").strip()
+    model = (model or "").strip()
+
+    def fail(text: str) -> dict:
+        return {"model": model, "prompt": prompt, "url": "", "b64": "", "error": text}
+
+    if not prompt:
+        return fail("промпт не задан")
+    if not model:
+        return fail("модель не выбрана")
+    if not key:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    payload = json.dumps(
+        {"model": model, "prompt": prompt, "n": 1, "response_format": "url"},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    try:
+        response = make_provider(entry["url"], timeout=timeout).forward_path(
+            "/images/generations", payload, api_key=key, timeout=timeout, stream=False,
+        )
+    except NeedsKeyError:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+    except ServerError as exc:
+        return fail(str(exc))
+
+    if response.status_code >= 400:
+        detail = response.read().decode("utf-8", errors="replace")[:300]
+        return fail(f"HTTP {response.status_code}: {detail}".strip())
+
+    try:
+        data = json.loads(response.read().decode("utf-8", errors="replace"))
+    except ValueError:
+        return fail("провайдер ответил не-JSON на генерацию картинки")
+    items = data.get("data") if isinstance(data, dict) else None
+    item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+    url = str(item.get("url") or "").strip()
+    b64 = str(item.get("b64_json") or "").strip()
+    if url:
+        return {"model": model, "prompt": prompt, "url": url, "b64": "", "error": ""}
+    if b64:
+        return {"model": model, "prompt": prompt, "url": "", "b64": b64, "error": ""}
+    return fail("в ответе нет картинки (data пусто)")
+
+
 def test_chat(
     entry: dict,
     key: str,

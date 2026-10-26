@@ -55,7 +55,7 @@ from core.page import (
 from providers import copilot
 from providers.client import NeedsKeyError, PocketBase, Provider, ServerError
 from service import ops
-from service.gateway import _merge_capabilities, test_chat
+from service.gateway import _merge_capabilities, generate_image, image_models, test_chat
 from service.space import Spaces
 from storage.notify import NotifyStore
 from storage.sessions import SessionStore
@@ -1057,10 +1057,16 @@ class WebUi:
             if entry is None:
                 self._not_found(handler)
                 return
-            outcome = test_chat(
-                entry, space.keys.get(provider_id),
-                **({} if self._make_provider is None else {"make_provider": self._make_provider}),
+            key = space.keys.get(provider_id)
+            kwargs = (
+                {} if self._make_provider is None else {"make_provider": self._make_provider}
             )
+            # Свой промпт приходит из формы на странице; пустой — как всегда,
+            # крошечный вопрос по умолчанию.
+            question = field("question").strip()
+            if question:
+                kwargs = {**kwargs, "question": question}
+            outcome = test_chat(entry, key, **kwargs)
             # Тест — главная проверка провайдера: настоящий ответ модели
             # засчитывается в статистику сообщества под именем человека.
             ops.report_chat(self._server, entry, outcome, report_for=str(viewer["id"]))
@@ -1076,7 +1082,42 @@ class WebUi:
                 test_page(
                     entry["name"], entry.get("model", ""),
                     outcome["question"], answer=outcome["answer"], error=outcome["error"],
-                    can_edit=is_admin,
+                    can_edit=is_admin, provider_id=provider_id,
+                    image_models=image_models(entry, key, **kwargs),
+                ),
+            )
+            return
+
+        if clean.startswith("/imgtest/"):
+            provider_id = urllib.parse.unquote(clean[len("/imgtest/") :])
+            entry = self._find(viewer, provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            key = space.keys.get(provider_id)
+            kwargs = (
+                {} if self._make_provider is None else {"make_provider": self._make_provider}
+            )
+            result = generate_image(entry, key, prompt=field("prompt"),
+                                    model=field("model"), **kwargs)
+            who = str(viewer.get("email") or "")
+            if result.get("error"):
+                self._event("тест", who,
+                            f"{entry['name']}: картинка не получилась — "
+                            f"{str(result['error'])[:120]}")
+            else:
+                self._event("тест", who,
+                            f"{entry['name']}: картинка «{result['prompt'][:60]}» "
+                            f"моделью {result['model']} готова")
+            # Страница без чат-блока (пустой вопрос) — сразу с результатом.
+            self._send_html(
+                handler,
+                200,
+                test_page(
+                    entry["name"], entry.get("model", ""), "",
+                    can_edit=is_admin, provider_id=provider_id,
+                    image_models=image_models(entry, key, **kwargs),
+                    image_result=result,
                 ),
             )
             return

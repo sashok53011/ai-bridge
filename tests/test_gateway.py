@@ -3091,3 +3091,158 @@ class TestAutotestMedia:
         assert row["model"] == "my/pic"
 
 
+class TestImageTest:
+    """Дополнительный тест на странице «Тест»: генерация картинки одной строкой.
+
+    Операция чистая (сеть за моком), страница её вызывает формой:
+    промпт + модель → картинка в поле результата.
+    """
+
+    @staticmethod
+    def _factory(handler):
+        from providers.client import Provider
+
+        def make(url: str, **kwargs) -> Provider:
+            return Provider(url, transport=httpx.MockTransport(handler), **kwargs)
+
+        return make
+
+    def test_a_generated_url_comes_back_clean(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/images/generations"
+            body = json.loads(request.content)
+            assert body["prompt"] == "кот в космосе"
+            assert body["model"] == "flux.1-schnell"
+            assert body["response_format"] == "url"
+            return httpx.Response(200, json={"data": [
+                {"url": "https://media.test/pic.png"},
+            ]})
+
+        from service.gateway import generate_image
+
+        result = generate_image(
+            _entry(), "sk-1", prompt="кот в космосе", model="flux.1-schnell",
+            make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["url"] == "https://media.test/pic.png"
+        assert result["model"] == "flux.1-schnell"
+
+    def test_base64_is_kept_for_the_page_to_wrap(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": [{"b64_json": "QUJD"}]})
+
+        from service.gateway import generate_image
+
+        result = generate_image(
+            _entry(), "sk-1", prompt="кот", model="flux",
+            make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["b64"] == "QUJD"
+        assert result["url"] == ""
+
+    def test_an_empty_answer_is_an_honest_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": []})
+
+        from service.gateway import generate_image
+
+        result = generate_image(
+            _entry(), "sk-1", prompt="кот", model="flux",
+            make_provider=self._factory(handler),
+        )
+
+        assert "нет картинки" in result["error"]
+        assert result["url"] == "" and result["b64"] == ""
+
+    def test_an_http_error_reports_status_and_detail(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(402, json={"error": {"message": "нет кредитов"}})
+
+        from service.gateway import generate_image
+
+        result = generate_image(
+            _entry(), "sk-1", prompt="кот", model="flux",
+            make_provider=self._factory(handler),
+        )
+
+        assert result["error"].startswith("HTTP 402")
+        assert "нет кредитов" in result["error"]
+
+    def test_not_json_is_named_as_such(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content="<html>привет</html>".encode("utf-8"))
+
+        from service.gateway import generate_image
+
+        result = generate_image(
+            _entry(), "sk-1", prompt="кот", model="flux",
+            make_provider=self._factory(handler),
+        )
+
+        assert "не-JSON" in result["error"]
+
+    def test_without_prompt_model_or_key_nothing_is_sent(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запроса быть не должно")
+
+        from service.gateway import generate_image
+
+        factory = self._factory(handler)
+        assert "промпт" in generate_image(
+            _entry(), "sk", prompt="  ", model="m", make_provider=factory)["error"]
+        assert "модель" in generate_image(
+            _entry(), "sk", prompt="кот", model="", make_provider=factory)["error"]
+        assert "ключ" in generate_image(
+            _entry(), "", prompt="кот", model="m", make_provider=factory)["error"]
+
+    def test_image_models_list_only_image_models_with_a_paid_mark(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={})
+
+        from service.gateway import image_models
+
+        class _Meta:
+            @staticmethod
+            def fetch_model_meta(key: str = "") -> dict:
+                return {
+                    "flux-free": {"category": "image",
+                                  "endpoints": ["/v1/images/generations"],
+                                  "paid": False},
+                    "flux-pro": {"category": "image",
+                                 "endpoints": ["/v1/images/generations"],
+                                 "paid": True},
+                    "tts-1": {"category": "audio", "endpoints": ["/v1/audio/speech"],
+                              "paid": False},
+                    "veo": {"category": "video", "endpoints": [], "paid": True},
+                }
+
+        def make(url, **kwargs):
+            return _Meta()
+
+        models = image_models(_entry(), "sk", make_provider=make)
+
+        assert models == [
+            {"name": "flux-free", "paid": False},
+            {"name": "flux-pro", "paid": True},
+        ]
+
+    def test_a_provider_without_meta_offers_no_image_section(self) -> None:
+        """Нет метаданных — секции генерации нет (не у всех подряд)."""
+        from providers.client import ServerError
+        from service.gateway import image_models
+
+        def make(url, **kwargs):
+            class _Broken:
+                @staticmethod
+                def fetch_model_meta(key: str = "") -> dict:
+                    raise ServerError("каталог недоступен")
+
+            return _Broken()
+
+        assert image_models(_entry(), "sk", make_provider=make) == []
+
+
