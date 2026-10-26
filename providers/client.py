@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -388,14 +389,12 @@ class Provider:
                 raise ServerError(str(exc)) from exc
         return _auth_headers(api_key)
 
-    def fetch_models(self, api_key: str = "") -> list[dict[str, Any]]:
-        """Список моделей; для локальных серверов ключ не нужен.
+    def _models_payload(self, api_key: str) -> Any:
+        """GET /models с общими правилами ошибок.
 
         401/403 без ключа — NeedsKeyError (введите ключ, не поломка);
         тот же отказ с ключом — обычный ServerError.
         """
-        from core.models import extract_models
-
         try:
             response = self._http.get(
                 f"{self.openai_base}/models",
@@ -413,15 +412,51 @@ class Provider:
             raise ServerError(f"провайдер ответил HTTP {response.status_code}")
 
         try:
-            payload: Any = response.json()
+            return response.json()
         except ValueError as exc:
             raise ServerError("провайдер ответил не-JSON на список моделей") from exc
+
+    def fetch_models(self, api_key: str = "") -> list[dict[str, Any]]:
+        """Список моделей; для локальных серверов ключ не нужен."""
+        from core.models import extract_models
+
+        payload = self._models_payload(api_key)
 
         # У Copilot каталог /models шире тарифа: фильтр по utility-семействам
         # (sku уже известен — _headers_for выше обменял токен).
         if copilot.is_copilot_url(self.openai_base):
             return [{"name": name} for name in copilot.usable_models(payload)]
         return [{"name": name} for name in extract_models(payload)]
+
+    def fetch_model_meta(self, api_key: str = "") -> dict[str, dict[str, Any]]:
+        """Метаданные каталога: {имя: {category, endpoints, paid}}.
+
+        Нужны автотесту: генерация картинок и звука проверяется своими
+        моделями — тип читается из ``category``/``supported_endpoints``.
+        У провайдеров без такой информации (обычный OpenAI-список) —
+        пустой словарь; запасной выбор по именам живёт в гейтвее.
+        """
+        payload = self._models_payload(api_key)
+        out: dict[str, dict[str, Any]] = {}
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            return out
+        for item in payload["data"]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("id") or item.get("name") or "").strip()
+            category = str(item.get("category") or "").strip().lower()
+            raw_endpoints = item.get("supported_endpoints")
+            endpoints = (
+                [str(value) for value in raw_endpoints if isinstance(value, str)]
+                if isinstance(raw_endpoints, list) else []
+            )
+            if name and (category or endpoints):
+                out[name] = {
+                    "category": category,
+                    "endpoints": endpoints,
+                    "paid": bool(item.get("paid_only")),
+                }
+        return out
 
     def local_status(self) -> str:
         """Что происходит сейчас в локальном сервере — строка для каталога.
@@ -476,6 +511,31 @@ class Provider:
                     if event is not None:
                         yield event
 
+    def forward_path(
+        self,
+        path: str,
+        body: bytes,
+        *,
+        api_key: str = "",
+        timeout: float = 60.0,
+        stream: bool = True,
+    ) -> httpx.Response:
+        """POST <база><path> — чат, картинки, звук, векторы: тело как есть.
+
+        Тело не разбирается — любые поля уходят провайдеру нетронутыми.
+        Вызывающий обязан закрыть ответ.
+        """
+        request = self._http.build_request(
+            "POST",
+            f"{self.openai_base}{path}",
+            content=body,
+            headers={"Content-Type": "application/json", **self._headers_for(api_key)},
+        )
+        try:
+            return self._http.send(request, stream=stream)
+        except httpx.HTTPError as exc:
+            raise ServerError(f"провайдер недоступен: {exc}") from exc
+
     def forward_chat(
         self,
         body: bytes,
@@ -484,18 +544,59 @@ class Provider:
         timeout: float = 600.0,
         stream: bool = True,
     ) -> httpx.Response:
-        """Проксирует POST /chat/completions — тело и поток как есть.
+        """Проксирует POST /chat/completions — сердце приставки.
 
-        Это сердце приставки: приложение шлёт запрос сюда, а приставка
-        доставляет его провайдеру, подставив свой ключ. Тело не разбирается —
-        любые поля клиента (temperature, tools, …) уходят провайдеру
-        нетронутыми. Вызывающий обязан закрыть ответ.
+        Приложение шлёт запрос сюда, а приставка доставляет его провайдеру,
+        подставив свой ключ. Вызывающий обязан закрыть ответ.
         """
+        return self.forward_path(
+            "/chat/completions", body,
+            api_key=api_key, timeout=timeout, stream=stream,
+        )
+
+    def forward_form(
+        self,
+        path: str,
+        data: dict[str, str],
+        files: dict[str, tuple[str, bytes, str]],
+        *,
+        api_key: str = "",
+        stream: bool = False,
+    ) -> httpx.Response:
+        """Multipart-POST (распознавание звука): поля + файл, тело как есть."""
         request = self._http.build_request(
             "POST",
-            f"{self.openai_base}/chat/completions",
-            content=body,
-            headers={"Content-Type": "application/json", **self._headers_for(api_key)},
+            f"{self.openai_base}{path}",
+            data=data,
+            files=files,
+            headers=self._headers_for(api_key),
+        )
+        try:
+            return self._http.send(request, stream=stream)
+        except httpx.HTTPError as exc:
+            raise ServerError(f"провайдер недоступен: {exc}") from exc
+
+    def media_get(
+        self,
+        kind: str,
+        prompt: str,
+        model: str,
+        *,
+        api_key: str = "",
+        stream: bool = True,
+    ) -> httpx.Response:
+        """GET <корень>/<kind>/<промпт>?model=… — видео и 3D.
+
+        Медиа-файлы большие, поэтому ответ остаётся потоком: вызывающий
+        читает заголовки (в них публичная ссылка `Link: … rel="enclosure"`)
+        и, если ссылки нет, первый кусок — тело целиком не тянем.
+        """
+        url = f"{self.root}/{kind}/{quote(prompt, safe='')}"
+        request = self._http.build_request(
+            "GET",
+            url,
+            params={"model": model} if model else None,
+            headers=self._headers_for(api_key),
         )
         try:
             return self._http.send(request, stream=stream)

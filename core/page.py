@@ -2341,6 +2341,34 @@ def _answer_raw(row: dict) -> str:
     )
 
 
+def _media_html(row: dict) -> str:
+    """Медиа-результат: картинка или плеер по ссылке из ответа провайдера.
+
+    Ссылка чужая — только http/https (_safe_url), чтобы из ответа не
+    родился «javascript:». Base64-картинка сюда не попадает: в результате
+    остаётся лишь пометка о ней, мегабайты в журнал не пишутся.
+    """
+    test = str(row.get("test") or "")
+    if test not in ("image", "tts", "video", "3d"):
+        return ""
+    url = _safe_url(str(row.get("response") or ""))
+    if not url:
+        return ""
+    if test == "image":
+        return (
+            f'<div class="gen"><img src="{escape(url, quote=True)}" '
+            f'alt="сгенерировано" loading="lazy"></div>'
+        )
+    if test == "tts":
+        return f'<audio controls preload="none" src="{escape(url, quote=True)}"></audio>'
+    if test == "video":
+        return f'<video controls preload="none" src="{escape(url, quote=True)}"></video>'
+    return (
+        f'<p><a class="btn-ghost" href="{escape(url, quote=True)}" '
+        f'target="_blank" rel="noopener">открыть 3D-файл</a></p>'
+    )
+
+
 def autotest_results_html(
     results: list,
     *,
@@ -2388,7 +2416,7 @@ def autotest_results_html(
             f'<tr><td class="ts" data-ts="{escape(str(r.get("ts") or ""), quote=True)}">{escape(ts)}</td>'
             f'<td class="model">{model}</td><td>{test}</td>'
             f'<td class="status">{badge} HTTP {http} · {dur}s{tool_hint}</td>'
-            f'<td class="cell">{_answer_formatted(r)}</td>'
+            f'<td class="cell">{_media_html(r)}{_answer_formatted(r)}</td>'
             f'<td class="cell">{_answer_raw(r)}</td>'
             f'<td class="reaction">{reaction}</td></tr>'
         )
@@ -2416,9 +2444,11 @@ def autotest_page(
 ) -> str:
     """Автотесты моделей провайдера (только админ).
 
-    Форма: выбор провайдера, картинка (файл или URL), prompt, чекбоксы
-    тестов, галочка «записать результаты». Результаты последнего прогона
-    показываются таблицей ниже, с телами запроса/ответа по клику.
+    Форма: выбор провайдера, тип теста (текст/vision/tools/free плюс
+    генерация картинок, звук, видео, векторы и распознавание звука),
+    своя модель, голос, аудиофайл, prompt, галочка «записать».
+    Результаты последнего прогона — таблицей ниже: медиа-ответы
+    показываются картинкой/плеером, тела запросов — по клику.
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     progress = progress or {}
@@ -2631,6 +2661,10 @@ def autotest_page(
   .progress-block progress {{ width: 100%; height: 1.1rem; }}
   td.ts {{ white-space: nowrap; font-family: monospace; font-size: .78rem;
     color: var(--muted); }}
+  /* Медиа-результаты: картинка в столбце, звук и видео — плеером. */
+  .gen img {{ max-width: 18rem; border-radius: .6rem; display: block; margin: .2rem 0; }}
+  table.results audio {{ width: 17rem; }}
+  table.results video {{ max-width: 18rem; }}
 </style>
 </head>
 <body>
@@ -2661,7 +2695,22 @@ def autotest_page(
       <option value="vision">vision — с картинкой</option>
       <option value="tools">tools — с инструментом</option>
       <option value="free">free — проверка бесплатности</option>
+      <option value="image">image — сгенерировать картинку</option>
+      <option value="tts">tts — озвучить текст</option>
+      <option value="stt">stt — распознать звук</option>
+      <option value="video">video — сгенерировать видео</option>
+      <option value="3d">3d — модель</option>
+      <option value="embedding">embedding — вектор</option>
     </select>
+  </label>
+  <label>модель (необязательно — гоняет только её)
+    <input name="only_model" placeholder="пусто — все модели нужного типа">
+  </label>
+  <label>голос для tts (необязательно)
+    <input name="voice" placeholder="nova, alloy …">
+  </label>
+  <label>аудио для stt (файл; пусто — тестовый тон)
+    <input name="audio" type="file" accept="audio/*">
   </label>
   <label>prompt (обязательно — только ваш текст, подсказок нет)
     <textarea name="prompt" required placeholder="например: Ответь одним словом — привет"></textarea>

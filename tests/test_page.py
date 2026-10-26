@@ -7,6 +7,7 @@
 from core.page import (
     add_page,
     autotest_page,
+    autotest_results_html,
     bugs_page,
     catalogue_page,
     edit_page,
@@ -980,7 +981,6 @@ class TestNavLook:
 
     Шапка одна на все страницы, поэтому проверяется на каталоге.
     """
-
     @staticmethod
     def _page(**kwargs) -> str:
         return catalogue_page([_entry()], can_edit=True, **kwargs)
@@ -1203,3 +1203,64 @@ class TestGreyTimer:
             grey_rows=[{"id": "ollama", "minutes": 30, "reason": "x", "cycle": 1}],
         )
         assert "таймер пробуждения" not in page
+
+
+class TestAutotestMediaForm:
+    """Форма автотеста: типы генерации и поля под медиа."""
+
+    @staticmethod
+    def _page() -> str:
+        return autotest_page([_entry()])
+
+    def test_every_test_type_is_selectable(self) -> None:
+        page = self._page()
+        for value in ("text", "vision", "tools", "free",
+                      "image", "tts", "stt", "video", "3d", "embedding"):
+            assert f'<option value="{value}">' in page, value
+
+    def test_media_fields_are_present(self) -> None:
+        page = self._page()
+        assert 'name="only_model"' in page  # своя модель вместо всего каталога
+        assert 'name="voice"' in page  # голос для озвучки
+        assert 'name="audio"' in page  # файл для распознавания
+        assert 'accept="audio/*"' in page
+
+
+class TestAutotestMediaResults:
+    """Медиа в результатах: картинка — картинкой, звук — плеером."""
+
+    @staticmethod
+    def _html(test: str, response: str) -> str:
+        return autotest_results_html([
+            {
+                "model": "m-1", "test": test, "ts": "2026-10-26T10:00:00Z",
+                "status": "ok", "http_status": 200, "duration": 1.2,
+                "response": response, "req": "{}", "resp": response,
+                "reaction": "", "used_tool": None,
+            },
+        ])
+
+    def test_a_generated_picture_is_embedded(self) -> None:
+        html = self._html("image", "https://media.test/pic.png")
+        assert "<img" in html
+        assert "https://media.test/pic.png" in html
+
+    def test_a_speech_result_becomes_a_player(self) -> None:
+        html = self._html("tts", "https://media.test/voice.mp3")
+        assert "<audio" in html
+        assert "controls" in html
+
+    def test_a_video_result_gets_a_player(self) -> None:
+        html = self._html("video", "https://media.test/clip.mp4")
+        assert "<video" in html
+        assert "controls" in html
+
+    def test_plain_results_stay_plain(self) -> None:
+        html = self._html("stt", "распознано: привет")
+        assert "<img" not in html
+        assert "<audio" not in html
+
+    def test_a_foreign_scheme_never_becomes_markup(self) -> None:
+        """Ответ провайдера — чужие данные: javascript: не становится ссылкой."""
+        html = self._html("image", "javascript:alert(1)")
+        assert "<img" not in html

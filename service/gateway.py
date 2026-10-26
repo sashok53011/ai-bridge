@@ -22,7 +22,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Callable
+from typing import Any, Callable
 
 from core.models import union_models
 from core.routes import advertised_models, is_local_url, request_needs, route, should_fallback
@@ -53,6 +53,159 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+#: Типы автотестов, которым нужны «свои» модели из каталога.
+_MEDIA_TEST_TYPES = frozenset({"image", "tts", "stt", "video", "3d", "embedding"})
+
+#: Свой эндпоинт у каждого такого типа (Pollinations — OpenAI-совместимые
+#: картинки/звук/векторы; видео и 3D живут на корневых GET-путях).
+_MEDIA_ENDPOINTS = {
+    "image": "/v1/images/generations",
+    "tts": "/v1/audio/speech",
+    "stt": "/v1/audio/transcriptions",
+    "embedding": "/v1/embeddings",
+}
+
+#: Тип каталога для тестов, у которых нет своего OpenAI-эндпоинта.
+_MEDIA_CATEGORIES = {"image": "image", "video": "video", "3d": "3d",
+                     "embedding": "embedding"}
+
+#: Запасной выбор по именам — когда провайдер не отдаёт типы моделей
+#: (обычный OpenAI-список, где category и supported_endpoints нет).
+_MEDIA_NAME_HINTS = {
+    "image": ("dall-e", "gpt-image", "flux", "stable-diffusion", "sdxl", "sd3",
+              "imagen", "midjourney", "krea", "ideogram", "seedream",
+              "qwen-image", "z-image", "recraft", "lightning-image"),
+    "tts": ("tts", "speech", "eleven", "kokoro"),
+    "stt": ("whisper", "transcribe", "scribe"),
+    "video": ("sora", "veo", "seedance", "kling", "runway", "hailuo"),
+    "embedding": ("embedding",),
+    "3d": ("trellis", "rodin", "asset-harvester"),
+}
+
+
+def _meta_fits(meta: dict, test_type: str) -> bool:
+    """Подходит ли модель каталога под тип теста.
+
+    Тип каталога главнее эндпоинтов: video/3d-модели рекламируют и
+    image-эндпоинты, иначе их гоняло бы и по картинкам. Звук — наоборот:
+    tts и stt различаются только своим эндпоинтом.
+    """
+    category = str(meta.get("category") or "")
+    endpoints = meta.get("endpoints") or []
+    if category:
+        wanted = _MEDIA_CATEGORIES.get(test_type)
+        if wanted:
+            return category == wanted
+        endpoint = _MEDIA_ENDPOINTS.get(test_type, "")
+        return bool(endpoint) and endpoint in endpoints
+    endpoint = _MEDIA_ENDPOINTS.get(test_type, "")
+    return bool(endpoint) and endpoint in endpoints
+
+
+def _models_for_test(test_type: str, models: list[str], meta: dict) -> list[str]:
+    """Модели одного типа теста: метаданные каталога, иначе — имена."""
+    if test_type not in _MEDIA_TEST_TYPES:
+        return models
+    if meta:
+        return [m for m in models if _meta_fits(meta.get(m, {}), test_type)]
+    hints = tuple(hint.lower() for hint in _MEDIA_NAME_HINTS.get(test_type, ()))
+    return [m for m in models if any(hint in m.lower() for hint in hints)]
+
+
+def _enclosure(link_header: str) -> str:
+    """Публичная ссылка из заголовка ``Link: <…>; rel="enclosure"``.
+
+    Pollinations кладёт её на ответы генерации — по ней файл и показывается
+    (само тело — мегабайты, их мы в журнал не пишем).
+    """
+    for part in link_header.split(","):
+        piece = part.strip()
+        if piece.startswith("<") and 'rel="enclosure"' in piece:
+            end = piece.find(">")
+            if end > 1:
+                return piece[1:end]
+    return ""
+
+
+def _read_capped(response: Any, limit: int) -> bytes:
+    """Читает поток не больше limit байт — большие медиа не тянем в память."""
+    chunks: list[bytes] = []
+    size = 0
+    try:
+        for chunk in response.iter_bytes():
+            chunks.append(chunk)
+            size += len(chunk)
+            if size >= limit:
+                break
+    except Exception:  # noqa: BLE001 — оборванный поток: прочитанное есть
+        pass
+    return b"".join(chunks)
+
+
+def _media_outcome(test_type: str, raw: bytes, ctype: str, link: str,
+                   resp_text: str) -> tuple[str, str, str]:
+    """Успех медиа-ответа: (статус, что показать, что сохранить в журнал).
+
+    Картинки и звук провайдер отдаёт ссылкой (base64 — не храним): в
+    autotest.json должны остаться строки, а не мегабайты байтов.
+    """
+    def first_item() -> dict:
+        try:
+            data = json.loads(resp_text) if resp_text else {}
+        except ValueError:
+            data = {}
+        items = data.get("data") if isinstance(data, dict) else None
+        if isinstance(items, list) and items and isinstance(items[0], dict):
+            return items[0]
+        return {}
+
+    if test_type == "image":
+        item = first_item()
+        url = str(item.get("url") or "").strip()
+        if url:
+            return "ok", url, resp_text
+        b64 = str(item.get("b64_json") or "")
+        if b64:
+            note = f"b64_json — {len(b64)} знаков, тело не сохранено"
+            return "ok", note, note
+        return "fail", "в ответе нет картинки (data пусто)", resp_text[:400]
+
+    if test_type == "embedding":
+        vector = first_item().get("embedding")
+        if isinstance(vector, list) and vector:
+            return "ok", f"вектор из {len(vector)} чисел", resp_text
+        return "fail", "в ответе нет вектора", resp_text[:400]
+
+    if test_type == "tts":
+        public = _enclosure(link)
+        if public:
+            return "ok", public, public
+        if raw:
+            kilobytes = max(1, (len(raw) + 1023) // 1024)
+            note = f"{ctype or 'audio'}, {kilobytes} КБ"
+            return "ok", note, note
+        return "fail", "пустой звуковой ответ", ""
+
+    if test_type == "stt":
+        try:
+            data = json.loads(resp_text) if resp_text else {}
+        except ValueError:
+            data = {}
+        if isinstance(data, dict) and "text" in data:
+            text = str(data.get("text") or "").strip()
+            return "ok", text or "распознано: пусто", resp_text
+        return "fail", "в ответе нет текста (нет поля text)", resp_text[:400]
+
+    # video / 3d: тело большое — показываем публичную ссылку из заголовка,
+    # а если её нет, честно говорим, что показывать нечего.
+    public = _enclosure(link)
+    if public:
+        return "ok", public, public
+    if raw:
+        return "ok", f"{ctype or 'файл'} — ссылка не пришла, показать нечего", ""
+    return "fail", "пустой ответ генерации", ""
+
+
 def _reaction(status: int, test_type: str, record: bool,
               *, capability: str = "", used_tool: bool = False) -> str:
     """Что сделал бы (или сделал) роутер с таким ответом провайдера."""
@@ -74,6 +227,9 @@ def _reaction(status: int, test_type: str, record: bool,
                 return f"{prefix}: выучить «не умеет {word}»"
             return f"{prefix}: запрос отклонён провайдером, списки не тронуты"
         return f"{prefix}: списки не тронуты (ошибка запроса)"
+    if test_type in _MEDIA_TEST_TYPES:
+        # Генерация — не способность маршрутизации: списки не трогаем.
+        return f"{prefix}: списки не тронуты (генерация — не способность)"
     if test_type == "vision":
         base = "белый список + выучить «умеет картинки»"
     elif test_type == "tools":
@@ -1257,15 +1413,18 @@ class Gateway:
         tests: list[str],
         *,
         record: bool = False,
+        voice: str = "",
+        only_model: str = "",
+        audio: bytes | None = None,
+        audio_name: str = "sample.wav",
     ) -> dict:
         """Прогнать тесты по всем моделям провайдера.
 
-        Промпт — только пользовательский: своих подсказок нет. Один
-        прогон = один тип теста × все модели. Возвращает
+        Промпт — только пользовательский: своих подсказок нет. Обычные
+        типы гоняются по всем моделям, медиа-типы (картинки, звук, видео,
+        векторы) — только по своим из метаданных каталога. Возвращает
         {"provider", "results", "prompt"}; при ошибке — "error".
         """
-        import time
-
         prompt = (prompt or "").strip()
         if not prompt:
             return {"provider": provider_id, "error": "промпт не задан", "results": []}
@@ -1280,6 +1439,7 @@ class Gateway:
             self._autotest_store.tick("получение списка моделей…", "")
         # Список моделей — короткий таймаут: висеть на нём нельзя,
         # по неудаче просто идём настроенной моделью.
+        list_client: Any = None
         try:
             list_client = self._provider_factory(entry["url"], timeout=15.0)
             models = [m["name"] for m in list_client.fetch_models(key)]
@@ -1288,30 +1448,57 @@ class Gateway:
         if not models:
             return {"provider": provider_id, "error": "моделей не найдено", "results": []}
 
-        total = len(models) * len(tests)
+        # Метаданные каталога — чтобы медиа-типы гоняли только свои модели.
+        meta: dict = {}
+        if list_client is not None and not only_model and any(
+            test_type in _MEDIA_TEST_TYPES for test_type in tests
+        ):
+            try:
+                meta = list_client.fetch_model_meta(key)
+            except Exception:  # noqa: BLE001 — нет меты: запасной выбор по именам
+                meta = {}
+
+        # План прогона: тип теста решает, какими моделями его гонять;
+        # тип без моделей — честная строка ошибки, а не тихий пропуск.
+        results: list[dict] = []
+        plan: list[tuple[str, str]] = []
+        for test_type in tests:
+            chosen = [only_model] if only_model else _models_for_test(test_type, models, meta)
+            if not chosen:
+                results.append({
+                    "model": "—",
+                    "test": test_type,
+                    "ts": _now_iso(),
+                    "status": "fail",
+                    "http_status": 0,
+                    "response": f"у провайдера нет моделей типа {test_type} в каталоге",
+                    "used_tool": None,
+                    "duration": 0,
+                    "req": "",
+                    "resp": "",
+                })
+                continue
+            plan.extend((model, test_type) for model in chosen)
+
+        total = len(plan)
         if self._autotest_store is not None:
             self._autotest_store.plan(total)
 
-        results: list[dict] = []
         stopped = False
-        for model in models:
+        for model, test_type in plan:
             if self._autotest_store is not None and self._autotest_store.stop_requested():
                 stopped = True
                 break
-            for test_type in tests:
-                if self._autotest_store is not None and self._autotest_store.stop_requested():
-                    stopped = True
-                    break
-                if self._autotest_store is not None:
-                    self._autotest_store.tick(model, test_type)
-                result = self._run_one_autotest(entry, model, test_type, image_b64, prompt,
-                                               record=record)
-                results.append(result)
-                if self._autotest_store is not None:
-                    self._autotest_store.record(result)
-                    self._autotest_store.advance()
-            if stopped:
-                break
+            if self._autotest_store is not None:
+                self._autotest_store.tick(model, test_type)
+            result = self._run_one_autotest(
+                entry, model, test_type, image_b64, prompt,
+                record=record, voice=voice, audio=audio, audio_name=audio_name,
+            )
+            results.append(result)
+            if self._autotest_store is not None:
+                self._autotest_store.record(result)
+                self._autotest_store.advance()
 
         if self._autotest_store is not None:
             self._autotest_store.finish(provider_id, results, prompt=prompt)
@@ -1322,12 +1509,15 @@ class Gateway:
         return {"provider": provider_id, "results": results, "prompt": prompt}
 
     def _run_one_autotest(self, entry: dict, model: str, test_type: str,
-                          image_b64: str, prompt: str, *, record: bool) -> dict:
+                          image_b64: str, prompt: str, *, record: bool,
+                          voice: str = "", audio: bytes | None = None,
+                          audio_name: str = "sample.wav") -> dict:
         """Один тест одной модели. Возвращает словарь результата."""
         import json as _json
         import time
 
         body: dict = {"model": model}
+        json_body = True
         if test_type == "vision":
             body["messages"] = [{"role": "user", "content": [
                 {"type": "text", "text": prompt},
@@ -1341,27 +1531,84 @@ class Gateway:
                 "parameters": {"type": "object", "properties": {}},
             }}]
             body["tool_choice"] = "auto"
-        elif test_type == "free":
-            body["messages"] = [{"role": "user", "content": prompt}]
-        else:  # text
+        elif test_type == "image":
+            # Генерация: OpenAI-совместимый эндпоинт; ссылка вместо base64.
+            body = {"model": model, "prompt": prompt, "n": 1,
+                    "response_format": "url"}
+        elif test_type == "tts":
+            body = {"model": model, "input": prompt}
+            if voice.strip():
+                body["voice"] = voice.strip()
+        elif test_type == "embedding":
+            body = {"model": model, "input": prompt}
+        elif test_type == "stt":
+            body = {}  # multipart с файлом уходит отдельно
+            json_body = False
+        elif test_type in ("video", "3d"):
+            body = {}  # GET с промптом в пути
+            json_body = False
+        else:  # text, free
             body["messages"] = [{"role": "user", "content": prompt}]
 
-        body_bytes = _json.dumps(body, ensure_ascii=False).encode("utf-8")
-        req_text = body_bytes.decode("utf-8", errors="replace")
+        if json_body:
+            body_bytes = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+            req_text = body_bytes.decode("utf-8", errors="replace")
+        elif test_type == "stt":
+            req_text = f"POST /v1/audio/transcriptions — model={model}, файл={audio_name}"
+        else:
+            req_text = f"GET /{test_type}/{{промпт}} — model={model}"
         key = self._keys.get(entry["id"])
         client = self._provider_factory(entry["url"], timeout=60.0)
+
+        if test_type == "stt" and not audio:
+            # Без звука запрос заведомо не имеет смысла — честно и сразу.
+            return {
+                "model": model, "test": test_type, "ts": _now_iso(),
+                "status": "fail", "http_status": 0,
+                "response": "нет аудио для stt (загрузите файл или отметьте тестовый тон)",
+                "used_tool": None, "duration": 0.0,
+                "req": req_text, "resp": "",
+                "reaction": "сработала бы: нет аудио для stt",
+            }
 
         start = time.monotonic()
         reaction_status = 0
         reaction_used_tool = False
         reaction_cap = ""
         try:
-            response = client.forward_chat(body_bytes, api_key=key, timeout=60.0, stream=False)
+            if test_type in ("video", "3d"):
+                response = client.media_get(test_type, prompt, model, api_key=key)
+            elif test_type == "stt":
+                response = client.forward_form(
+                    "/audio/transcriptions", {"model": model},
+                    {"file": (audio_name, audio or b"", "application/octet-stream")},
+                    api_key=key,
+                )
+            else:
+                path = {"image": "/images/generations",
+                        "tts": "/audio/speech",
+                        "embedding": "/embeddings"}.get(test_type)
+                if path is not None:
+                    response = client.forward_path(path, body_bytes, api_key=key,
+                                                    timeout=60.0, stream=False)
+                else:
+                    response = client.forward_chat(body_bytes, api_key=key,
+                                                   timeout=60.0, stream=False)
             elapsed = round(time.monotonic() - start, 1)
-            raw = response.read() if hasattr(response, "read") else b""
-            resp_text = raw.decode("utf-8", errors="replace")
             status_code = getattr(response, "status_code", 0)
             reaction_status = status_code
+            ctype = (response.headers.get("content-type") or "").split(";")[0].strip()
+            link = str(response.headers.get("Link") or "")
+
+            # Текст и JSON — целиком; большие медиа (звук, видео) — куском:
+            # мегабайты в память и в журнал не тянем.
+            if test_type in ("video", "3d"):
+                raw = _read_capped(response, 64 * 1024)
+            elif test_type == "tts":
+                raw = _read_capped(response, 2 * 1024 * 1024)
+            else:
+                raw = response.read() if hasattr(response, "read") else b""
+            resp_text = raw.decode("utf-8", errors="replace")
 
             if status_code >= 400:
                 if status_code == 402:
@@ -1395,6 +1642,23 @@ class Gateway:
                         self._lists.refused_vision_add(f"{entry['id']}/{model}")
                     elif reaction_cap == "tools":
                         self._lists.refused_tools_add(f"{entry['id']}/{model}")
+            elif test_type in _MEDIA_TEST_TYPES:
+                # Генерация/распознавание: свой разбор ответа; запись в
+                # способности не участвует — маршрутизация их не использует.
+                status_word, shown, stored = _media_outcome(
+                    test_type, raw, ctype, link, resp_text)
+                result = {
+                    "model": model,
+                    "test": test_type,
+                    "ts": _now_iso(),
+                    "status": status_word,
+                    "http_status": status_code,
+                    "response": shown,
+                    "used_tool": None,
+                    "duration": elapsed,
+                    "req": req_text,
+                    "resp": stored,
+                }
             else:
                 try:
                     data = _json.loads(resp_text) if resp_text else {}

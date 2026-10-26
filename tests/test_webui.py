@@ -1931,8 +1931,10 @@ class TestAutotestRun:
     @staticmethod
     def _fake_gateway(runs: list) -> object:
         class _GW:
-            def run_autotest(self, provider_id, image_b64, prompt, tests, record=False):
-                runs.append({"provider": provider_id, "prompt": prompt, "tests": tests})
+            def run_autotest(self, provider_id, image_b64, prompt, tests,
+                             record=False, **kwargs):
+                runs.append({"provider": provider_id, "prompt": prompt,
+                             "tests": tests, "record": record, **kwargs})
                 return {"provider": provider_id, "results": [], "prompt": prompt}
 
         return _GW()
@@ -1964,6 +1966,16 @@ class TestAutotestRun:
             'Content-Disposition: form-data; name="provider"\r\n\r\nollama\r\n'
             "--B\r\n"
             'Content-Disposition: form-data; name="prompt"\r\n\r\nhi\r\n'
+            "--B\r\n"
+            'Content-Disposition: form-data; name="test"\r\n\r\nimage\r\n'
+            "--B\r\n"
+            'Content-Disposition: form-data; name="voice"\r\n\r\nnova\r\n'
+            "--B\r\n"
+            'Content-Disposition: form-data; name="only_model"\r\n\r\nmy/pic\r\n'
+            "--B\r\n"
+            'Content-Disposition: form-data; name="audio"; filename="t.wav"\r\n'
+            "Content-Type: audio/wav\r\n\r\n"
+            "RIFF....WAVE\r\n"
             "--B--\r\n"
         ).encode()
 
@@ -1983,6 +1995,31 @@ class TestAutotestRun:
             assert response.status_code == 303
             assert response.headers["location"].startswith("/autotest")
             assert self._wait_for(lambda: len(runs) == 1)  # тест запущен один раз
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_media_fields_reach_the_gateway(self, tmp_path) -> None:
+        """Тип теста, голос, своя модель и аудиофайл уходят в прогон."""
+        server, base = self._build(tmp_path)
+        try:
+            runs: list = []
+            server.gateway = self._fake_gateway(runs)
+            with _client(base) as client:
+                _as_admin(client)
+                client.post(
+                    "/autotest/run", content=self._multipart(),
+                    headers={"Content-Type": "multipart/form-data; boundary=B"},
+                    follow_redirects=False,
+                )
+
+            assert self._wait_for(lambda: len(runs) == 1)
+            run = runs[0]
+            assert run["tests"] == ["image"]
+            assert run["voice"] == "nova"
+            assert run["only_model"] == "my/pic"
+            assert run["audio"] == b"RIFF....WAVE"
+            assert run["audio_name"] == "t.wav"
         finally:
             server.shutdown()
             server.server_close()

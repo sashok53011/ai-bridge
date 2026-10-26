@@ -2781,3 +2781,313 @@ class TestRequestRules:
         assert _needs_of(body, None) == ()
 
 
+class TestAutotestMedia:
+    """Медиа-автотест: генерация картинок/звука/видео и векторы.
+
+    Каждый тип ходит своим эндпоинтом и проверяет успех по-своему;
+    список моделей берётся из метаданных каталога (category/endpoints),
+    а без них — по именам. Сеть замокана, ключи не нужны.
+    """
+
+    @staticmethod
+    def _build(tmp_path, handler) -> Gateway:
+        from providers.client import Provider
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs) -> Provider:
+            base = url.split("/v1")[0]
+            return Provider(url, transport=httpx.MockTransport(handler), **kwargs)
+
+        return Gateway(
+            lambda: [_entry()], KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), capabilities=CapabilityStore(tmp_path),
+        )
+
+    @staticmethod
+    def _models(monkeypatch, models, meta=None) -> None:
+        """Каталог: имена обязательны, метаданные — по желанию теста."""
+        from providers.client import Provider
+
+        monkeypatch.setattr(
+            Provider, "fetch_models",
+            lambda self, key: [{"name": name} for name in models],
+        )
+        monkeypatch.setattr(
+            Provider, "fetch_model_meta", lambda self, key: (meta or {})
+        )
+
+    @staticmethod
+    def _row(result: dict) -> dict:
+        assert result["results"], "результатов нет"
+        return result["results"][0]
+
+    # ------------------------------------------------------------ image
+
+    def test_image_generates_and_reports_the_url(self, tmp_path, monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/images/generations"
+            body = json.loads(request.content)
+            assert body["prompt"] == "кот в космосе"
+            assert body["response_format"] == "url"
+            return httpx.Response(200, json={"data": [
+                {"url": "https://media.test/pic.png"},
+            ]})
+
+        self._models(monkeypatch, ["img-1"], {
+            "img-1": {"category": "image",
+                      "endpoints": ["/v1/images/generations"], "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "кот в космосе", ["image"]))
+
+        assert row["status"] == "ok"
+        assert row["response"] == "https://media.test/pic.png"
+
+    def test_image_base64_is_never_stored(self, tmp_path, monkeypatch) -> None:
+        """Картинка в base64 — мегабайты: в журнал идёт только пометка."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": [{"b64_json": "A" * 50000}]})
+
+        self._models(monkeypatch, ["img-1"], {
+            "img-1": {"category": "image",
+                      "endpoints": ["/v1/images/generations"], "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "кот", ["image"]))
+
+        assert row["status"] == "ok"
+        assert "b64_json" in row["response"]
+        assert len(row["response"]) < 120
+        assert len(row["resp"]) < 200  # сырое тело не сохранено
+
+    def test_a_two_hundred_without_a_picture_is_a_failure(self, tmp_path,
+                                                          monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": []})
+
+        self._models(monkeypatch, ["img-1"], {
+            "img-1": {"category": "image",
+                      "endpoints": ["/v1/images/generations"], "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "кот", ["image"]))
+
+        assert row["status"] == "fail"
+        assert "нет картинки" in row["response"]
+
+    # ------------------------------------------------------------ tts
+
+    def test_tts_prefers_the_public_link(self, tmp_path, monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/audio/speech"
+            body = json.loads(request.content)
+            assert body["input"] == "привет"
+            assert body["voice"] == "nova"
+            return httpx.Response(
+                200, content=b"ID3" + b"\0" * 500,
+                headers={"content-type": "audio/mpeg",
+                         "Link": '<https://media.test/voice.mp3>; rel="enclosure"'},
+            )
+
+        self._models(monkeypatch, ["tts-1"], {
+            "tts-1": {"category": "audio", "endpoints": ["/v1/audio/speech"],
+                      "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "привет", ["tts"],
+                                             voice="nova"))
+
+        assert row["status"] == "ok"
+        assert row["response"] == "https://media.test/voice.mp3"
+
+    def test_tts_bytes_without_a_link_report_size(self, tmp_path, monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"ID3" * 400,
+                                  headers={"content-type": "audio/mpeg"})
+
+        self._models(monkeypatch, ["tts-1"], {
+            "tts-1": {"category": "audio", "endpoints": ["/v1/audio/speech"],
+                      "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "привет", ["tts"]))
+
+        assert row["status"] == "ok"
+        assert "КБ" in row["response"]
+        assert "ID3" not in row["resp"]  # звук в журнал не пишем
+
+    # ------------------------------------------------------------ stt
+
+    def test_stt_sends_multipart_and_shows_the_text(self, tmp_path, monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/audio/transcriptions"
+            assert "multipart/form-data" in request.headers.get("content-type", "")
+            assert b'name="model"' in request.content
+            assert b'name="file"' in request.content
+            return httpx.Response(200, json={"text": "привет"})
+
+        self._models(monkeypatch, ["whisper-1"], {
+            "whisper-1": {"category": "audio",
+                          "endpoints": ["/v1/audio/transcriptions"], "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "распознай", ["stt"],
+                                             audio=b"RIFF....WAVE", audio_name="t.wav"))
+
+        assert row["status"] == "ok"
+        assert row["response"] == "привет"
+
+    def test_stt_without_audio_says_what_is_missing(self, tmp_path, monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("без аудио запроса быть не должно")
+
+        self._models(monkeypatch, ["whisper-1"], {
+            "whisper-1": {"category": "audio",
+                          "endpoints": ["/v1/audio/transcriptions"], "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "распознай", ["stt"]))
+
+        assert row["status"] == "fail"
+        assert "нет аудио" in row["response"]
+
+    # ------------------------------------------------------------ video / 3d
+
+    def test_video_is_fetched_from_the_root_and_shows_its_link(self, tmp_path,
+                                                               monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.startswith("/video/")
+            assert request.url.params.get("model") == "veo-3"
+            return httpx.Response(
+                200, content=b"\x00\x00\x00\x18ftypmp42",
+                headers={"content-type": "video/mp4",
+                         "Link": '<https://media.test/clip.mp4>; rel="enclosure"'},
+            )
+
+        self._models(monkeypatch, ["veo-3"], {
+            "veo-3": {"category": "video", "endpoints": [], "paid": True},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "закат", ["video"]))
+
+        assert row["status"] == "ok"
+        assert row["response"] == "https://media.test/clip.mp4"
+
+    def test_video_without_a_link_is_still_a_clear_result(self, tmp_path,
+                                                          monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"MP4DATA",
+                                  headers={"content-type": "video/mp4"})
+
+        self._models(monkeypatch, ["veo-3"], {
+            "veo-3": {"category": "video", "endpoints": [], "paid": True},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "закат", ["video"]))
+
+        assert row["status"] == "ok"
+        assert "ссылка не пришла" in row["response"]
+
+    # ------------------------------------------------------------ embedding
+
+    def test_embedding_reports_the_vector_length(self, tmp_path, monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/embeddings"
+            assert json.loads(request.content)["input"] == "привет"
+            return httpx.Response(200, json={"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+
+        self._models(monkeypatch, ["emb-1"], {
+            "emb-1": {"category": "embedding", "endpoints": ["/v1/embeddings"],
+                      "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "привет", ["embedding"]))
+
+        assert row["status"] == "ok"
+        assert row["response"] == "вектор из 3 чисел"
+
+    # ------------------------------------------------------------ выбор моделей
+
+    def test_each_type_runs_only_models_of_its_kind(self, tmp_path, monkeypatch) -> None:
+        """Image-тест не трогает tts-модели и наоборот."""
+        asked: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            asked.append(body["model"])
+            return httpx.Response(200, json={"data": [
+                {"url": "https://media.test/p.png"},
+            ]})
+
+        self._models(monkeypatch, ["img-1", "tts-1", "veo-3"], {
+            "img-1": {"category": "image",
+                      "endpoints": ["/v1/images/generations"], "paid": False},
+            "tts-1": {"category": "audio", "endpoints": ["/v1/audio/speech"],
+                      "paid": False},
+            "veo-3": {"category": "video", "endpoints": [], "paid": True},
+        })
+        gateway = self._build(tmp_path, handler)
+        result = gateway.run_autotest("ollama", "", "кот", ["image"])
+
+        assert asked == ["img-1"]
+        assert len(result["results"]) == 1
+
+    def test_no_models_of_that_type_is_an_honest_failure(self, tmp_path,
+                                                         monkeypatch) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запросов быть не должно")
+
+        self._models(monkeypatch, ["txt-1"], {
+            "txt-1": {"category": "text", "endpoints": ["/v1/chat/completions"],
+                      "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "кот", ["image"]))
+
+        assert row["status"] == "fail"
+        assert "нет моделей типа image" in row["response"]
+        assert row["model"] == "—"
+
+    def test_without_metadata_models_are_picked_by_name(self, tmp_path,
+                                                        monkeypatch) -> None:
+        """Провайдер без типов в каталоге (OpenAI) — фильтр по именам."""
+        asked: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(json.loads(request.content)["model"])
+            return httpx.Response(200, json={"data": [
+                {"url": "https://media.test/p.png"},
+            ]})
+
+        self._models(monkeypatch, ["dall-e-3", "gpt-4o"], meta={})
+        gateway = self._build(tmp_path, handler)
+        gateway.run_autotest("ollama", "", "кот", ["image"])
+
+        assert asked == ["dall-e-3"]
+
+    def test_a_named_model_narrows_the_run(self, tmp_path, monkeypatch) -> None:
+        """Поле «модель» в форме: гоняем только указанную."""
+        asked: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            asked.append(json.loads(request.content)["model"])
+            return httpx.Response(200, json={"data": [
+                {"url": "https://media.test/p.png"},
+            ]})
+
+        self._models(monkeypatch, ["a", "b"], {
+            "a": {"category": "image",
+                  "endpoints": ["/v1/images/generations"], "paid": False},
+            "b": {"category": "image",
+                  "endpoints": ["/v1/images/generations"], "paid": False},
+        })
+        gateway = self._build(tmp_path, handler)
+        row = self._row(gateway.run_autotest("ollama", "", "кот", ["image"],
+                                             only_model="my/pic"))
+
+        assert asked == ["my/pic"]
+        assert row["model"] == "my/pic"
+
+

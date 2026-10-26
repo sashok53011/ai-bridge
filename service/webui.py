@@ -133,6 +133,31 @@ def _preview(text: str, limit: int = 150) -> str:
     return flat[:limit] + ("…" if len(flat) > limit else "")
 
 
+def _test_tone() -> bytes:
+    """Тестовый звук для stt: полусекунды тона 440 Гц (WAV, 16 kHz, mono).
+
+    Без своего аудиофайла под рукой тест распознавания заведомо не
+    пройдёт, поэтому при пустом поле форма подставляет этот тон: файл
+    собирается здесь же, без сети и без файловой системы.
+    """
+    import io
+    import math
+    import struct
+    import wave
+
+    rate = 16000
+    frames = int(rate * 0.5)
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        for index in range(frames):
+            value = int(12000 * math.sin(2 * math.pi * 440 * index / rate))
+            wav.writeframes(struct.pack("<h", value))
+    return buffer.getvalue()
+
+
 def _rule_at(store, where: str, index: int) -> str:
     """Описание правила по номеру — для журнала (правка/удаление).
 
@@ -1762,6 +1787,19 @@ class WebUi:
             use_test_image = field("use_test_image") == "1"
             record = field("record") == "1"
             tests = [field("test") or "text"]
+            voice = field("voice").strip()
+            only_model = field("only_model").strip()
+
+            # Аудио для stt: свой файл; пусто и нужен stt — подставляем
+            # тестовый тон (без звука тест распознавания бессмыслен).
+            audio: bytes | None = None
+            audio_name = "test-tone.wav"
+            uploaded_audio = file_field("audio")
+            if uploaded_audio is not None and uploaded_audio[1]:
+                audio_name = uploaded_audio[0] or "sample.wav"
+                audio = uploaded_audio[1]
+            elif tests[0] == "stt":
+                audio = _test_tone()
 
             # Картинка: загруженный файл → URL → тестовая 1×1 PNG.
             image_b64 = ""
@@ -1795,7 +1833,9 @@ class WebUi:
             def background() -> None:
                 try:
                     result = gateway.run_autotest(provider_id, image_b64, prompt, tests,
-                                                  record=record)
+                                                  record=record, voice=voice,
+                                                  only_model=only_model, audio=audio,
+                                                  audio_name=audio_name)
                     if store is not None and result.get("error"):
                         store.fail(str(result["error"]))
                 except Exception as exc:  # noqa: BLE001
