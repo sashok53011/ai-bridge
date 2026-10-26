@@ -458,6 +458,60 @@ class Provider:
                 }
         return out
 
+    def fetch_audio_catalogue(self, api_key: str = "") -> dict[str, list[str]]:
+        """Голоса аудиомоделей: ``{имя модели: [голоса]}`` из /audio/models.
+
+        У Pollinations ответ — JSON внутри строки; модели без voices в
+        результат не попадают. Нужно полю «голос» — как подсказка при
+        вводе (свободный ввод остаётся), поэтому любой отказ каталога —
+        просто пустой словарь: форма обязана работать и без подсказок.
+        """
+        try:
+            response = self._http.get(
+                f"{self.openai_base}/audio/models",
+                headers=self._headers_for(api_key),
+            )
+        except httpx.HTTPError:
+            return {}
+        if response.status_code >= 400:
+            return {}
+        try:
+            payload: Any = response.json()
+        except ValueError:
+            return {}
+        if isinstance(payload, str):  # Pollinations: JSON-строка в строке
+            import json as _json
+
+            try:
+                payload = _json.loads(payload)
+            except ValueError:
+                return {}
+        out: dict[str, list[str]] = {}
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name") or "").strip()
+                voices = item.get("voices")
+                if name and isinstance(voices, list):
+                    clean = [str(v).strip() for v in voices if str(v).strip()]
+                    if clean:
+                        out[name] = clean
+        return out
+
+    def fetch_json(self, path: str, *, api_key: str = "") -> tuple[int, Any]:
+        """GET <корень><path> → ``(статрос, JSON)`` — опрос заданий jobs."""
+        try:
+            response = self._http.get(
+                f"{self.root}{path}", headers=self._headers_for(api_key),
+            )
+        except httpx.HTTPError as exc:
+            raise ServerError(f"провайдер недоступен: {exc}") from exc
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            return response.status_code, {}
+
     def local_status(self) -> str:
         """Что происходит сейчас в локальном сервере — строка для каталога.
 
@@ -561,12 +615,18 @@ class Provider:
         files: dict[str, tuple[str, bytes, str]],
         *,
         api_key: str = "",
+        from_root: bool = False,
         stream: bool = False,
     ) -> httpx.Response:
-        """Multipart-POST (распознавание звука): поля + файл, тело как есть."""
+        """Multipart-POST (звук): поля + файл, тело как есть.
+
+        ``from_root`` — эндпоинт от корня сервера (``/alpha/…`` живёт не
+        под ``/v1``), без него путь считается от OpenAI-базы.
+        """
+        base = self.root if from_root else self.openai_base
         request = self._http.build_request(
             "POST",
-            f"{self.openai_base}{path}",
+            f"{base}{path}",
             data=data,
             files=files,
             headers=self._headers_for(api_key),
@@ -584,6 +644,7 @@ class Provider:
         *,
         api_key: str = "",
         params: dict[str, str] | None = None,
+        prefer_async: bool = False,
         stream: bool = True,
     ) -> httpx.Response:
         """GET <корень>/<kind>/<промпт>?… — видео, 3D, озвучка.
@@ -593,6 +654,9 @@ class Provider:
         и, если ссылки нет, первый кусок — тело целиком не тянем.
         ``params`` — доп. query-параметры (голос, картинка-источник,
         разрешение); пустые значения не мусорят в адресе.
+        ``prefer_async`` — не удерживать соединение: провайдер отвечает
+        202 с заданием (jobs); без jobs заголовок игнорируется, ответ
+        обычный.
         """
         url = f"{self.root}/{kind}/{quote(prompt, safe='')}"
         query: dict[str, str] = {}
@@ -601,11 +665,14 @@ class Provider:
         for name, value in (params or {}).items():
             if value:
                 query[str(name)] = str(value)
+        headers = self._headers_for(api_key)
+        if prefer_async:
+            headers = {**headers, "Prefer": "respond-async"}
         request = self._http.build_request(
             "GET",
             url,
             params=query or None,
-            headers=self._headers_for(api_key),
+            headers=headers,
         )
         try:
             return self._http.send(request, stream=stream)

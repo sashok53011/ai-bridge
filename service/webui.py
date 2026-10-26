@@ -63,6 +63,7 @@ from service.gateway import (
     generate_image,
     generate_transcript,
     media_models,
+    process_audio,
     test_chat,
 )
 from service.space import Spaces
@@ -264,11 +265,21 @@ class WebUi:
             {} if self._make_provider is None
             else {"make_provider": self._make_provider}
         )
+        media = media_models(entry, key, **kwargs)
+        voices: list[str] = []
+        if media.get("audio") or media.get("voice"):
+            # Голоса — отдельный каталог (у Pollinations /audio/models);
+            # подсказка для поля голоса, при отказе — пусто, форма работает.
+            try:
+                factory = self._make_provider or Provider
+                catalogue = factory(entry["url"], timeout=10.0).fetch_audio_catalogue(key)
+                voices = sorted({voice for list_ in catalogue.values() for voice in list_})
+            except Exception:  # noqa: BLE001
+                voices = []
         return test_page(
             entry["name"], entry.get("model", ""), question,
             answer=answer, error=error, can_edit=is_admin,
-            provider_id=str(entry["id"]),
-            media=media_models(entry, key, **kwargs),
+            provider_id=str(entry["id"]), media=media, voices=voices,
             **results,
         )
 
@@ -1152,8 +1163,8 @@ class WebUi:
             )
             return
 
-        # Озвучка, 3D, вектор и распознавание — по тому же шаблону,
-        # свой маршрут на тип.
+        # Озвучка, музыка, 3D, вектор, распознавание и обработка звука —
+        # по тому же шаблону, свой маршрут на тип.
         media_kind = ""
         tail = ""
         if clean.startswith("/audiotest/"):
@@ -1164,6 +1175,8 @@ class WebUi:
             media_kind, tail = "embedding", clean[len("/embedtest/") :]
         elif clean.startswith("/stttest/"):
             media_kind, tail = "stt", clean[len("/stttest/") :]
+        elif clean.startswith("/voicetest/"):
+            media_kind, tail = "voice", clean[len("/voicetest/") :]
         if media_kind:
             provider_id = urllib.parse.unquote(tail)
             entry = self._find(viewer, provider_id)
@@ -1180,7 +1193,11 @@ class WebUi:
                     entry, key, text=field("text"), model=field("model"),
                     voice=field("voice"), **kwargs,
                 )
-                result_key, what = "audio_result", "озвучка"
+                # Музыка — тот же маршрут, но свой результат и своя секция.
+                if field("kind") == "music":
+                    result_key, what = "music_result", "музыка"
+                else:
+                    result_key, what = "audio_result", "озвучка"
             elif media_kind == "3d":
                 result = generate_3d(
                     entry, key, image=field("image"), model=field("model"),
@@ -1207,6 +1224,30 @@ class WebUi:
                     audio_name=audio_name, mime=mime, **kwargs,
                 )
                 result_key, what = "transcript_result", "распознавание"
+            elif media_kind == "voice":
+                # Значение select — «действие|модель»; файл — свой или тон.
+                raw_model = field("model")
+                action, sep, model = raw_model.partition("|")
+                if not sep:
+                    action, model = "isolator", raw_model
+                audio = None
+                audio_name = "test-tone.wav"
+                mime = "audio/wav"
+                uploaded = file_field("audio")
+                if uploaded is not None and uploaded[1]:
+                    import mimetypes as _mt
+
+                    audio_name = uploaded[0] or "sample.wav"
+                    audio = uploaded[1]
+                    mime = _mt.guess_type(audio_name)[0] or "application/octet-stream"
+                else:
+                    audio = _test_tone()
+                result = process_audio(
+                    entry, key, action=action, model=model, audio=audio,
+                    audio_name=audio_name, mime=mime, voice=field("voice"),
+                    **kwargs,
+                )
+                result_key, what = "voice_result", "обработка звука"
             else:
                 result = embed_text(
                     entry, key, text=field("text"), model=field("model"), **kwargs,

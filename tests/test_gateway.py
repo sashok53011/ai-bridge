@@ -3238,8 +3238,47 @@ class TestImageTest:
         # stt-модель к озвучке не идёт — у каждой секции свой эндпоинт.
         assert [m["name"] for m in media["audio"]] == ["tts-1"]
         assert [m["name"] for m in media["stt"]] == ["whisper-1"]
-        assert media["three"] == [{"name": "trellis-2", "paid": False}]
-        assert media["embedding"] == [{"name": "emb-1", "paid": False}]
+        assert [m["name"] for m in media["three"]] == ["trellis-2"]
+        assert [m["name"] for m in media["embedding"]] == ["emb-1"]
+
+    def test_music_and_voice_processing_split_out(self) -> None:
+        """Музыка — по именам (ее endpoints не отличимы от TTS);
+        обработка звука — по своим эндпоинтам, с пометкой действия."""
+        from service.gateway import media_models
+
+        class _Meta:
+            @staticmethod
+            def fetch_model_meta(key: str = "") -> dict:
+                return {
+                    "tts-1": {"category": "audio",
+                              "endpoints": ["/v1/audio/speech"], "paid": False},
+                    "google/lyria-3.5": {"category": "audio",
+                                         "endpoints": ["/v1/audio/speech"],
+                                         "paid": True},
+                    "elevenlabs/stem-separation": {
+                        "category": "audio",
+                        "endpoints": ["/alpha/audio/stem-separation"], "paid": True},
+                    "elevenlabs/voice-isolator": {
+                        "category": "audio",
+                        "endpoints": ["/v1/audio/voice-isolator"], "paid": True},
+                    "elevenlabs/eleven-multilingual-sts-v2": {
+                        "category": "audio",
+                        "endpoints": ["/v1/audio/voice-changer"], "paid": True},
+                }
+
+        def make(url, **kwargs):
+            return _Meta()
+
+        media = media_models(_entry(), "sk", make_provider=make)
+
+        assert [m["name"] for m in media["audio"]] == ["tts-1"]
+        assert [m["name"] for m in media["music"]] == ["google/lyria-3.5"]
+        assert media["voice"] == [
+            {"name": "elevenlabs/eleven-multilingual-sts-v2", "paid": True,
+             "action": "changer"},
+            {"name": "elevenlabs/stem-separation", "paid": True, "action": "stem"},
+            {"name": "elevenlabs/voice-isolator", "paid": True, "action": "isolator"},
+        ]
 
     def test_a_provider_without_meta_offers_no_sections(self) -> None:
         """Нет метаданных — секций генерации нет (не у всех подряд)."""
@@ -3257,7 +3296,7 @@ class TestImageTest:
         media = media_models(_entry(), "sk", make_provider=make)
 
         assert media == {"image": [], "audio": [], "three": [],
-                         "embedding": [], "stt": []}
+                         "embedding": [], "stt": [], "music": [], "voice": []}
 
     # ------------------------------------------------- озвучка, 3D, вектор
 
@@ -3444,5 +3483,126 @@ class TestImageTest:
             _entry(), "sk", text="x", model="", make_provider=factory)["error"]
         assert "ключ" in embed_text(
             _entry(), "", text="x", model="m", make_provider=factory)["error"]
+
+    # --------------------------------------------------------- jobs (async)
+
+    def test_async_audio_waits_for_the_job_and_returns_its_url(self) -> None:
+        """Prefer: respond-async →202 → опрос /v1/jobs → ссылка результата."""
+        seen: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/audio/hello":
+                assert request.headers.get("Prefer") == "respond-async"
+                return httpx.Response(202, json={"id": "job-9"})
+            if request.url.path == "/v1/jobs/job-9":
+                seen.append("poll")
+                return httpx.Response(200, json={"status": "succeeded",
+                                                 "result_url": "https://media.test/j.mp3"})
+            raise AssertionError(f"неожиданный путь: {request.url.path}")
+
+        from service.gateway import generate_audio
+
+        result = generate_audio(
+            _entry(), "sk", text="hello", model="tts-1",
+            make_provider=self._factory(handler), job_wait=0.0,
+        )
+
+        assert result["error"] == ""
+        assert result["url"] == "https://media.test/j.mp3"
+        assert seen == ["poll"]
+
+    def test_a_failed_job_is_an_honest_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/audio/hello":
+                return httpx.Response(202, json={"id": "job-bad"})
+            return httpx.Response(200, json={"status": "failed",
+                                             "error": "модель упала"})
+
+        from service.gateway import generate_audio
+
+        result = generate_audio(
+            _entry(), "sk", text="hello", model="tts-1",
+            make_provider=self._factory(handler), job_wait=0.0,
+        )
+
+        assert "модель упала" in result["error"]
+
+    def test_a_sync_answer_still_works_when_the_provider_ignores_prefer(self) -> None:
+        """Провайдер без jobs отдаёт ответ сразу — путь не меняется."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"ID3mp3",
+                                  headers={"content-type": "audio/mpeg",
+                                           "Link": '<https://media.test/s.mp3>; rel="enclosure"'})
+
+        from service.gateway import generate_audio
+
+        result = generate_audio(
+            _entry(), "sk", text="hello", model="tts-1",
+            make_provider=self._factory(handler), job_wait=0.0,
+        )
+
+        assert result["url"] == "https://media.test/s.mp3"
+
+    # -------------------------------------------------- обработка звука
+
+    def test_voice_processing_posts_the_file_to_its_endpoint(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/audio/voice-changer"
+            ctype = request.headers.get("content-type", "")
+            assert "multipart/form-data" in ctype
+            assert b'name="model"' in request.content
+            assert b'name="voice"' in request.content
+            assert b'name="file"' in request.content
+            return httpx.Response(
+                200, content=b"ID3mp3",
+                headers={"content-type": "audio/mpeg",
+                         "Link": '<https://media.test/changed.mp3>; rel="enclosure"'},
+            )
+
+        from service.gateway import process_audio
+
+        result = process_audio(
+            _entry(), "sk", action="changer", model="sts-v2", voice="nova",
+            audio=b"RIFF....", audio_name="talk.wav",
+            make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["url"] == "https://media.test/changed.mp3"
+
+    def test_voice_processing_needs_file_model_and_known_action(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запроса быть не должно")
+
+        from service.gateway import process_audio
+
+        factory = self._factory(handler)
+        assert "аудио" in process_audio(
+            _entry(), "sk", action="isolator", model="m",
+            make_provider=factory)["error"]
+        assert "модель" in process_audio(
+            _entry(), "sk", action="isolator", model="", audio=b"x",
+            make_provider=factory)["error"]
+        assert "действие" in process_audio(
+            _entry(), "sk", action="нет", model="m", audio=b"x",
+            make_provider=factory)["error"]
+        assert "ключ" in process_audio(
+            _entry(), "", action="stem", model="m", audio=b"x",
+            make_provider=factory)["error"]
+
+    def test_voice_processing_without_a_link_reports_size(self) -> None:
+        """Ссылки нет — честно говорим, что показывать нечего (тело не храним)."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"ID3mp3",
+                                  headers={"content-type": "audio/mpeg"})
+
+        from service.gateway import process_audio
+
+        result = process_audio(
+            _entry(), "sk", action="isolator", model="m", audio=b"RIFF",
+            make_provider=self._factory(handler),
+        )
+
+        assert "ссылка не пришла" in result["error"]
 
 

@@ -82,6 +82,16 @@ _MEDIA_NAME_HINTS = {
     "3d": ("trellis", "rodin", "asset-harvester"),
 }
 
+#: Музыка: её эндпоинты не отличимы от TTS — только по именам моделей.
+_MUSIC_HINTS = ("lyria", "music", "stable-audio", "sonilo", "sfx", "text-to-sound")
+
+#: Обработка звука: эндпоинт → действие в форме (value = «действие|модель»).
+_VOICE_ACTIONS = {
+    "/v1/audio/voice-changer": "changer",
+    "/v1/audio/voice-isolator": "isolator",
+    "/alpha/audio/stem-separation": "stem",
+}
+
 
 def _meta_fits(meta: dict, test_type: str) -> bool:
     """Подходит ли модель каталога под тип теста.
@@ -204,6 +214,54 @@ def _media_outcome(test_type: str, raw: bytes, ctype: str, link: str,
     if raw:
         return "ok", f"{ctype or 'файл'} — ссылка не пришла, показать нечего", ""
     return "fail", "пустой ответ генерации", ""
+
+
+def _wait_for_job(client: Any, key: str, job_id: str, *, budget: float = 240.0) -> str:
+    """Опрос ``/v1/jobs/{id}`` до результата; возвращает публичную ссылку.
+
+    Jobs не удерживают соединение (202 → опрос), поэтому здесь честное
+    ожидание с нарастающим интервалом; не дождались или задание упало —
+    ServerError с человеческой причиной.
+    """
+    import time
+    from urllib.parse import quote
+
+    deadline = time.monotonic() + budget
+    delay = 2.0
+    while True:
+        status, payload = client.fetch_json(
+            f"/v1/jobs/{quote(job_id, safe='')}", api_key=key)
+        data = payload if isinstance(payload, dict) else {}
+        state = str(data.get("status") or "")
+        if state == "succeeded":
+            url = str(data.get("result_url") or "")
+            if url:
+                return url
+            raise ServerError("задание завершилось без ссылки на результат")
+        if state == "failed":
+            raise ServerError(str(data.get("error") or data.get("message")
+                                  or "задание не удалось"))
+        if status >= 400:
+            raise ServerError(f"задание недоступно: HTTP {status}")
+        if time.monotonic() >= deadline:
+            raise ServerError("ждали дольше 4 минут — задание ещё идёт, попробуйте позже")
+        time.sleep(delay)
+        delay = min(delay * 1.5, 10.0)
+
+
+def _job_or_none(response: Any) -> str:
+    """202 от jobs → идентификатор задания; не jobs → пусто (sync-путь)."""
+    if getattr(response, "status_code", 0) != 202:
+        return ""
+    try:
+        data = json.loads(response.read().decode("utf-8", errors="replace"))
+    except ValueError:
+        return ""
+    job_id = str((data or {}).get("id") or "").strip() if isinstance(data, dict) else ""
+    if not job_id:
+        location = str(getattr(response, "headers", {}).get("Location") or "")
+        job_id = location.rsplit("/", 1)[-1].strip() if location else ""
+    return job_id
 
 
 def _reaction(status: int, test_type: str, record: bool,
@@ -431,34 +489,50 @@ def _capability_refusal(payload: bytes, needs: tuple[str, ...] = ()) -> tuple[st
     return "", ""
 
 
+_BUCKETS = ("image", "audio", "three", "embedding", "stt", "music", "voice")
+
+
 def media_models(
     entry: dict,
     key: str,
     *,
     make_provider: Callable[..., Provider] = Provider,
 ) -> dict[str, list[dict]]:
-    """Модели для секций генерации: {"image", "audio", "three", "embedding"}.
+    """Модели для секций теста: {image, audio, music, three, embedding, stt, voice}.
 
-    Один поход в каталог — все четыре списка сразу: тип читается из
-    метаданных (Pollinations), секция появляется только там, где
-    провайдер честно заявил модели такого типа, а не у всех подряд.
+    Один поход в каталог — все списки сразу: тип читается из метаданных
+    (Pollinations), секция появляется только там, где провайдер честно
+    заявил модели такого типа. Музыка — по именам (её эндпоинты неотличимы
+    от TTS), обработка звука — по своим эндпоинтам (в списке — действие).
     Метаданных нет или каталог не отвечает — все списки пусты.
     """
-    empty = {"image": [], "audio": [], "three": [], "embedding": [], "stt": []}
+    empty: dict[str, list[dict]] = {bucket: [] for bucket in _BUCKETS}
     try:
         meta = make_provider(entry["url"], timeout=15.0).fetch_model_meta(key)
     except Exception:  # noqa: BLE001 — секции лучше исчезнут, чем задержат тест
         return empty
-    out: dict[str, list[dict]] = {
-        "image": [], "audio": [], "three": [], "embedding": [], "stt": [],
-    }
-    kinds = {"image": "image", "audio": "tts", "three": "3d",
-             "embedding": "embedding", "stt": "stt"}
+    out: dict[str, list[dict]] = {bucket: [] for bucket in _BUCKETS}
     for name, meta_dict in sorted(meta.items()):
-        entry_meta = {"name": name, "paid": bool(meta_dict.get("paid"))}
-        for bucket, test_type in kinds.items():
+        paid = bool(meta_dict.get("paid"))
+        endpoints = meta_dict.get("endpoints") or []
+
+        # Обработка звука — по своим эндпоинтам (модель несут действие).
+        action = next((act for path, act in _VOICE_ACTIONS.items()
+                       if path in endpoints), "")
+        if action:
+            out["voice"].append({"name": name, "paid": paid, "action": action})
+            continue
+
+        if _meta_fits(meta_dict, "tts"):
+            lowered = name.lower()
+            bucket = "music" if any(hint in lowered for hint in _MUSIC_HINTS) else "audio"
+            out[bucket].append({"name": name, "paid": paid})
+            continue
+
+        for bucket, test_type in (("image", "image"), ("three", "3d"),
+                                  ("embedding", "embedding"), ("stt", "stt")):
             if _meta_fits(meta_dict, test_type):
-                out[bucket].append(entry_meta)
+                out[bucket].append({"name": name, "paid": paid})
                 break
     return out
 
@@ -534,12 +608,14 @@ def generate_audio(
     voice: str = "",
     make_provider: Callable[..., Provider] = Provider,
     timeout: float = 120.0,
+    job_wait: float = 240.0,
 ) -> dict:
     """Озвучка через ``GET /audio/{text}`` — как в доках Pollinations.
 
     Возвращает ``{"text", "model", "voice", "url", "error"}``: mp3 не
     храним — страница ставит плеер по публичной ссылке из заголовка
-    ``Link``; звук без ссылки показать нечего, это честная ошибка.
+    ``Link``. Долгие генерации (музыка) идут заданием jobs: Prefer →
+    202 → опрос; провайдер без jobs отвечает сразу — путь не меняется.
     """
     text = (text or "").strip()
 
@@ -551,10 +627,12 @@ def generate_audio(
     if not key:
         return fail("нужен ключ — введите его кнопкой «ключ»")
 
+    client = make_provider(entry["url"], timeout=timeout)
     try:
-        response = make_provider(entry["url"], timeout=timeout).media_get(
+        response = client.media_get(
             "audio", text, model, api_key=key,
             params={"voice": voice} if voice else None,
+            prefer_async=True,
         )
     except NeedsKeyError:
         return fail("нужен ключ — введите его кнопкой «ключ»")
@@ -562,6 +640,14 @@ def generate_audio(
         return fail(str(exc))
 
     try:
+        job_id = _job_or_none(response)
+        if job_id:
+            try:
+                url = _wait_for_job(client, key, job_id, budget=job_wait)
+            except ServerError as exc:
+                return fail(str(exc))
+            return {"text": text, "model": model, "voice": voice,
+                    "url": url, "error": ""}
         if response.status_code >= 400:
             detail = _read_capped(response, 64 * 1024).decode("utf-8", errors="replace")
             return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
@@ -586,12 +672,15 @@ def generate_3d(
     prompt: str = "",
     make_provider: Callable[..., Provider] = Provider,
     timeout: float = 180.0,
+    job_wait: float = 240.0,
 ) -> dict:
     """3D из картинки: ``GET /3d/{prompt}?image=…&model=…&resolution=…``.
 
     Возвращает ``{"model", "image", "url", "error"}`` — glb не храним,
     страница даёт ссылку «скачать». Картинка обязана быть http(s)-ссылкой
-    (так в доках): чужие схемы не пропускаем.
+    (так в доках): чужие схемы не пропускаем. Долгая генерация идёт
+    заданием jobs (Prefer → 202 → опрос), без jobs — обычный синхронный
+    ответ.
     """
     image = (image or "").strip()
     model = (model or "").strip()
@@ -609,10 +698,12 @@ def generate_3d(
     if not key:
         return fail("нужен ключ — введите его кнопкой «ключ»")
 
+    client = make_provider(entry["url"], timeout=timeout)
     try:
-        response = make_provider(entry["url"], timeout=timeout).media_get(
+        response = client.media_get(
             "3d", prompt or "trellis", model, api_key=key,
             params={"image": image, "resolution": resolution},
+            prefer_async=True,
         )
     except NeedsKeyError:
         return fail("нужен ключ — введите его кнопкой «ключ»")
@@ -620,6 +711,13 @@ def generate_3d(
         return fail(str(exc))
 
     try:
+        job_id = _job_or_none(response)
+        if job_id:
+            try:
+                url = _wait_for_job(client, key, job_id, budget=job_wait)
+            except ServerError as exc:
+                return fail(str(exc))
+            return {"model": model, "image": image, "url": url, "error": ""}
         if response.status_code >= 400:
             detail = _read_capped(response, 64 * 1024).decode("utf-8", errors="replace")
             return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
@@ -698,6 +796,88 @@ def embed_text(
         "sample": ", ".join(piece(value) for value in vector[:12]),
         "error": "",
     }
+
+
+def process_audio(
+    entry: dict,
+    key: str,
+    *,
+    action: str,
+    model: str,
+    audio: bytes | None = None,
+    audio_name: str = "sample.wav",
+    mime: str = "application/octet-stream",
+    voice: str = "",
+    make_provider: Callable[..., Provider] = Provider,
+    timeout: float = 120.0,
+) -> dict:
+    """Обработка звука: смена голоса, очистка от шума, разделение дорожек.
+
+    ``action`` — ``changer``/``isolator``/``stem`` → свой эндпоинт; вход —
+    multipart с файлом. Возвращает ``{"action", "model", "audio_name",
+    "url", "error"}``: результат показывается плеером по публичной ссылке
+    (``Link``), байты не храним.
+    """
+    model = (model or "").strip()
+    voice = voice.strip()
+    paths = {
+        "changer": "/audio/voice-changer",
+        "isolator": "/audio/voice-isolator",
+        "stem": "/alpha/audio/stem-separation",
+    }
+
+    def fail(note: str) -> dict:
+        return {"action": action, "model": model, "audio_name": audio_name,
+                "url": "", "error": note}
+
+    if action not in paths:
+        return fail("неизвестное действие — действие не выбрано")
+    if not audio:
+        return fail("нет аудио для обработки")
+    if not model:
+        return fail("модель не выбрана")
+    if not key:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    data = {"model": model}
+    if voice:
+        data["voice"] = voice
+    try:
+        # stem-эндпоинт живёт в корне (/alpha/…), остальные — под /v1.
+        response = make_provider(entry["url"], timeout=timeout).forward_form(
+            paths[action], data, {"file": (audio_name, audio, mime)},
+            api_key=key, from_root=(action == "stem"),
+        )
+    except NeedsKeyError:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+    except ServerError as exc:
+        return fail(str(exc))
+
+    if response.status_code >= 400:
+        detail = response.read().decode("utf-8", errors="replace")
+        return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
+
+    link = _enclosure(str(response.headers.get("Link") or ""))
+    if link:
+        return {"action": action, "model": model, "audio_name": audio_name,
+                "url": link, "error": ""}
+    # Запасной формат: JSON с прямой ссылкой (если провайдер вернул её так).
+    raw = _read_capped(response, 1024 * 1024)
+    try:
+        parsed = json.loads(raw.decode("utf-8", errors="replace"))
+        items = parsed.get("data") if isinstance(parsed, dict) else None
+        item = items[0] if isinstance(items, list) and items else {}
+        url = str((item or {}).get("url")
+                  or (parsed.get("url") if isinstance(parsed, dict) else "")
+                  or "").strip()
+    except (ValueError, AttributeError):
+        url = ""
+    if url.startswith(("http://", "https://")):
+        return {"action": action, "model": model, "audio_name": audio_name,
+                "url": url, "error": ""}
+    if not raw:
+        return fail("пустой ответ обработки")
+    return fail("звук обработан, но ссылка не пришла — показать нечего")
 
 
 def generate_transcript(

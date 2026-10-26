@@ -2839,14 +2839,13 @@ def _audio_box(result: dict | None) -> str:
                 f'<div class="audiobox"><p class="notice bad">'
                 f'ссылки на звук нет — показать нечего</p></div>'
             )
-        caption = (
-            f'{escape(str(result.get("model") or ""))} · '
-            f'«{escape(str(result.get("text") or ""))}»'
-        )
+        caption = escape(str(result.get("model") or ""))
+        spoken = escape(str(result.get("text") or ""))
+        caption_line = f"{caption} · «{spoken}»" if spoken else caption
         return (
             f'<div class="audiobox"><audio controls preload="none" '
             f'src="{escape(url, quote=True)}"></audio>'
-            f'<p class="role">{caption}</p></div>'
+            f'<p class="role">{caption_line}</p></div>'
         )
     note = _result_note(result, "audiobox", "озвучка появится здесь")
     return note
@@ -2906,6 +2905,14 @@ def _model_options(items: list[dict]) -> str:
     )
 
 
+#: Действия обработки звука — подписи для формы (значения: changer/isolator/stem).
+_VOICE_LABELS = {
+    "changer": "смена голоса",
+    "isolator": "очистка от шума",
+    "stem": "разделение дорожек",
+}
+
+
 def test_page(
     provider_name: str,
     model: str,
@@ -2918,16 +2925,20 @@ def test_page(
     media: dict[str, list[dict]] | None = None,
     image_result: dict | None = None,
     audio_result: dict | None = None,
+    music_result: dict | None = None,
     three_result: dict | None = None,
     embed_result: dict | None = None,
     transcript_result: dict | None = None,
+    voice_result: dict | None = None,
+    voices: list[str] | None = None,
 ) -> str:
     """Страница теста: чат, свой промпт и секции генерации по типам моделей.
 
     ``question`` пуст — чат-блок скрыт (страница открыта после
     генерации); ``media`` — списки моделей по секциям (пустая секция не
     рисуется вовсе); каждый ``*_result`` — что показать в её поле
-    результата: ссылку, data-URI, текст, число или честную ошибку.
+    результата: ссылку, data-URI, текст, число или честную ошибку;
+    ``voices`` — голоса каталога для подсказок в поле голоса.
     """
     chat_html = ""
     if question:
@@ -2989,7 +3000,7 @@ def test_page(
       <select name="model">{_model_options(media["audio"])}</select>
     </label>
     <label>голос (необязательно)
-      <input name="voice" placeholder="nova, alloy …">
+      <input name="voice" list="voices" placeholder="nova, alloy …">
     </label>
     <label>текст
       <textarea name="text" rows="2" required
@@ -2998,6 +3009,27 @@ def test_page(
     <button type="submit" class="primary">озвучить</button>
   </form>
   {_audio_box(audio_result)}
+</div>"""
+
+    music_html = ""
+    if media.get("music"):
+        music_html = f"""
+<div class="card">
+  <h2>Музыка</h2>
+  <p class="role">Описание мелодии текстом; платные модели помечены
+  (цена — за генерацию).</p>
+  <form method="post" action="/audiotest/{escape(provider_id, quote=True)}">
+    <input type="hidden" name="kind" value="music">
+    <label>модель
+      <select name="model">{_model_options(media["music"])}</select>
+    </label>
+    <label>описание музыки
+      <textarea name="text" rows="3" required
+                placeholder="например: спокойная фортепианная мелодия, 30 секунд"></textarea>
+    </label>
+    <button type="submit" class="primary">создать музыку</button>
+  </form>
+  {_audio_box(music_result)}
 </div>"""
 
     three_html = ""
@@ -3071,6 +3103,45 @@ def test_page(
   {_stt_box(transcript_result)}
 </div>"""
 
+    voice_html = ""
+    if media.get("voice"):
+        options = "".join(
+            f'<option value="{escape(str(item.get("action") or ""), quote=True)}'
+            f'|{escape(str(item.get("name") or ""), quote=True)}">'
+            f'{escape(str(item.get("name") or ""))} · '
+            f'{escape(_VOICE_LABELS.get(str(item.get("action") or ""),
+                                       str(item.get("action") or "")))}'
+            f'{" · платная" if item.get("paid") else ""}</option>'
+            for item in media["voice"]
+        )
+        voice_html = f"""
+<div class="card">
+  <h2>Обработка звука</h2>
+  <p class="role">Смена голоса, очистка от шума или разделение дорожек:
+  вход — свой аудиофайл (пусто — тестовый тон), результат — плеер.</p>
+  <form method="post" action="/voicetest/{escape(provider_id, quote=True)}"
+        enctype="multipart/form-data">
+    <label>действие и модель
+      <select name="model">{options}</select>
+    </label>
+    <label>голос для смены (необязательно)
+      <input name="voice" list="voices" placeholder="nova, alloy …">
+    </label>
+    <label>аудиофайл (пусто — тестовый тон)
+      <input name="audio" type="file" accept="audio/*">
+    </label>
+    <button type="submit" class="primary">обработать</button>
+  </form>
+  {_audio_box(voice_result)}
+</div>"""
+
+    voices_datalist = ""
+    if voices:
+        options = "".join(
+            f'<option value="{escape(str(voice), quote=True)}">' for voice in voices
+        )
+        voices_datalist = f'<datalist id="voices">{options}</datalist>'
+
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -3097,10 +3168,13 @@ def test_page(
 {chat_html}
 {prompt_form}
 {image_html}
+{voices_datalist}
 {audio_html}
+{music_html}
 {three_html}
 {embed_html}
 {stt_html}
+{voice_html}
 </body>
 </html>"""
 

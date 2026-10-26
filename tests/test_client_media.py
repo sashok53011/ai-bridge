@@ -8,6 +8,8 @@ URL, заголовки, multipart; сеть замокана.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -164,3 +166,63 @@ class TestMediaGet:
         assert "hello" in seen["path"] or "%20" in seen["path"]
         assert seen["voice"] == "nova"
         assert seen["model"] == ""  # пустая модель не мусорит в query
+
+    def test_prefer_async_sets_the_header(self) -> None:
+        """Асинхронная генерация (jobs): Prefer: respond-async уходит заголовком."""
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["prefer"] = request.headers.get("Prefer", "")
+            return httpx.Response(202, json={"id": "job-1"})
+
+        client = _provider(handler)
+        response = client.media_get("audio", "hello", "", api_key="k",
+                                    prefer_async=True)
+
+        assert seen["prefer"] == "respond-async"
+        assert response.status_code == 202
+
+
+class TestAudioCatalogueAndJobs:
+    def test_voices_come_from_the_audio_catalogue(self) -> None:
+        """Голоса живут в /audio/models, и ответ — JSON внутри строки."""
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/audio/models"
+            payload = [
+                {"name": "openai/tts-1", "voices": ["alloy", "nova"]},
+                {"name": "microsoft/mai-transcribe-2"},  # без голосов — не мусорим
+            ]
+            return httpx.Response(200, json=json.dumps(payload))
+
+        from providers.client import Provider
+
+        client = Provider("https://gen.test/v1",
+                          transport=httpx.MockTransport(handler))
+        voices = client.fetch_audio_catalogue("")
+
+        assert voices == {"openai/tts-1": ["alloy", "nova"]}
+
+    def test_a_broken_catalogue_is_an_empty_dict(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, json={})
+
+        from providers.client import Provider
+
+        client = Provider("https://gen.test/v1",
+                          transport=httpx.MockTransport(handler))
+        assert client.fetch_audio_catalogue("") == {}
+
+    def test_job_status_is_read_as_json(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/jobs/job-1"
+            return httpx.Response(200, json={"status": "succeeded",
+                                             "result_url": "https://media.test/x.mp3"})
+
+        from providers.client import Provider
+
+        client = Provider("https://gen.test/v1",
+                          transport=httpx.MockTransport(handler))
+        status, payload = client.fetch_json("/v1/jobs/job-1", api_key="k")
+
+        assert status == 200
+        assert payload["result_url"] == "https://media.test/x.mp3"

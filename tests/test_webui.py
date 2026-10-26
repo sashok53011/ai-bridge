@@ -1752,6 +1752,12 @@ class TestMediaTestRoutes:
                 return {
                     "tts-1": {"category": "audio",
                               "endpoints": ["/v1/audio/speech"], "paid": False},
+                    "google/lyria-3.5": {"category": "audio",
+                                         "endpoints": ["/v1/audio/speech"],
+                                         "paid": True},
+                    "elevenlabs/voice-isolator": {
+                        "category": "audio",
+                        "endpoints": ["/v1/audio/voice-isolator"], "paid": True},
                     "trellis-2": {"category": "3d", "endpoints": [], "paid": False},
                     "emb-1": {"category": "embedding",
                               "endpoints": ["/v1/embeddings"], "paid": False},
@@ -1763,9 +1769,14 @@ class TestMediaTestRoutes:
                 }
 
             @staticmethod
-            def media_get(kind, prompt, model, *, api_key, params=None, stream=True):
+            def fetch_audio_catalogue(key: str = "") -> dict:
+                return {"openai/tts-1": ["alloy", "nova"]}
+
+            @staticmethod
+            def media_get(kind, prompt, model, *, api_key, params=None,
+                          prefer_async=False, stream=True):
                 if kind == "audio":
-                    assert (params or {}).get("voice") == "alloy"
+                    assert (params or {}).get("voice") == "alloy" or not params
                     return _Link("https://media.test/voice.mp3")
                 assert kind == "3d"
                 assert (params or {}).get("image") == "https://x/p.png"
@@ -1779,7 +1790,28 @@ class TestMediaTestRoutes:
                 return _Json({"data": [{"url": "https://media.test/pic.png"}]})
 
             @staticmethod
-            def forward_form(path, data, files, *, api_key, stream=False):
+            def forward_form(path, data, files, *, api_key, from_root=False,
+                             stream=False):
+                if path == "/audio/voice-isolator":
+                    assert data["model"] == "elevenlabs/voice-isolator"
+                    name, content, ctype = files["file"]
+                    assert content  # файл (свой или подставленный тон)
+
+                    class _L:
+                        status_code = 200
+                        headers = {"Link": '<https://media.test/clean.mp3>; '
+                                           'rel="enclosure"'}
+
+                        @staticmethod
+                        def read() -> bytes:
+                            return b"ID3mp3"
+
+                        @staticmethod
+                        def close() -> None:
+                            pass
+
+                    return _L()
+
                 assert path == "/audio/transcriptions"
                 assert data["model"] == "whisper-1"
                 name, content, ctype = files["file"]
@@ -1818,6 +1850,35 @@ class TestMediaTestRoutes:
         assert response.status_code == 200
         assert "<audio" in response.text
         assert "https://media.test/voice.mp3" in response.text
+        assert 'list="voices"' in response.text  # голоса каталога — подсказки
+
+    def test_music_runs_through_the_audio_route(self, harness) -> None:
+        """Музыка — тот же маршрут озвучки, но результат в своей секции."""
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post("/audiotest/ollama", data={
+                "text": "спокойная фортепианная мелодия",
+                "model": "google/lyria-3.5", "kind": "music",
+            })
+
+        assert response.status_code == 200
+        assert "<h2>Музыка</h2>" in response.text
+        assert "<audio" in response.text  # плеер в секции музыки
+
+    def test_voice_route_returns_the_link(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post("/voicetest/ollama", data={
+                "model": "isolator|elevenlabs/voice-isolator",
+            })
+
+        assert response.status_code == 200
+        assert "https://media.test/clean.mp3" in response.text
+        assert "<h2>Обработка звука</h2>" in response.text
 
     def test_three_d_route_offers_the_download(self, harness) -> None:
         _, base = harness([_entry()], make_provider=self._provider)

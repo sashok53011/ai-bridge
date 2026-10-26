@@ -6,7 +6,7 @@
 ## Команды
 
 - `uv sync` — зависимости (httpx, cryptography; dev: pytest). Python >= 3.11.
-- `uv run pytest` — все тесты: ≈940 шт., ~80 с, **полностью офлайн**
+- `uv run pytest` — все тесты: ≈955 шт., ~80 с, **полностью офлайн**
   (сеть замокана через `httpx.MockTransport`).
 - `uv run pytest tests/test_catalogue.py` — один файл;
   `uv run pytest -k reconcile` — по имени.

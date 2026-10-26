@@ -1416,3 +1416,52 @@ class TestTestPageExtras:
         )
         assert "распознано: привет от приставки" in page
         assert "openai/whisper-large-v3" in page
+
+    # --------------------------------------------------- музыка и обработка
+
+    def test_music_section_sings_with_its_own_models(self) -> None:
+        page = self._page(media={"music": [{"name": "google/lyria-3.5",
+                                            "paid": True}]})
+        assert "<h2>Музыка</h2>" in page
+        assert 'action="/audiotest/pollinations"' in page  # тот же маршрут озвучки
+        assert "google/lyria-3.5 · платная" in page
+        # секции без моделей не появляются
+        plain = self._page(media={"music": []})
+        assert "<h2>Музыка</h2>" not in plain
+
+    def test_music_result_is_a_player_too(self) -> None:
+        page = self._page(
+            media={"music": [{"name": "google/lyria-3.5", "paid": True}]},
+            music_result={"model": "google/lyria-3.5", "text": "песня про кота",
+                          "url": "https://media.test/song.mp3", "error": ""},
+        )
+        assert "<audio" in page
+        assert "https://media.test/song.mp3" in page
+
+    def test_voice_section_labels_each_action(self) -> None:
+        page = self._page(media={"voice": [
+            {"name": "elevenlabs/voice-isolator", "paid": True, "action": "isolator"},
+        ]})
+        assert "<h2>Обработка звука</h2>" in page
+        assert 'action="/voicetest/pollinations"' in page
+        assert 'value="isolator|elevenlabs/voice-isolator"' in page
+        assert "очистка от шума" in page  # действие подписано по-русски
+
+    def test_voice_result_becomes_a_player(self) -> None:
+        page = self._page(
+            media={"voice": [{"name": "elevenlabs/voice-isolator", "paid": True,
+                              "action": "isolator"}]},
+            voice_result={"model": "elevenlabs/voice-isolator", "action": "isolator",
+                          "url": "https://media.test/clean.mp3", "b64": "",
+                          "error": ""},
+        )
+        assert "<audio" in page
+        assert "https://media.test/clean.mp3" in page
+
+    def test_voices_are_offered_as_suggestions(self) -> None:
+        """Голоса каталога — подсказки в поле голоса (свободный ввод остаётся)."""
+        page = self._page(voices=["nova", "alloy"])
+        assert 'list="voices"' in page
+        assert '<datalist id="voices">' in page
+        assert 'value="nova"' in page
+        assert 'value="alloy"' in page
