@@ -444,13 +444,16 @@ def media_models(
     провайдер честно заявил модели такого типа, а не у всех подряд.
     Метаданных нет или каталог не отвечает — все списки пусты.
     """
-    empty = {"image": [], "audio": [], "three": [], "embedding": []}
+    empty = {"image": [], "audio": [], "three": [], "embedding": [], "stt": []}
     try:
         meta = make_provider(entry["url"], timeout=15.0).fetch_model_meta(key)
     except Exception:  # noqa: BLE001 — секции лучше исчезнут, чем задержат тест
         return empty
-    out: dict[str, list[dict]] = {"image": [], "audio": [], "three": [], "embedding": []}
-    kinds = {"image": "image", "audio": "tts", "three": "3d", "embedding": "embedding"}
+    out: dict[str, list[dict]] = {
+        "image": [], "audio": [], "three": [], "embedding": [], "stt": [],
+    }
+    kinds = {"image": "image", "audio": "tts", "three": "3d",
+             "embedding": "embedding", "stt": "stt"}
     for name, meta_dict in sorted(meta.items()):
         entry_meta = {"name": name, "paid": bool(meta_dict.get("paid"))}
         for bucket, test_type in kinds.items():
@@ -695,6 +698,62 @@ def embed_text(
         "sample": ", ".join(piece(value) for value in vector[:12]),
         "error": "",
     }
+
+
+def generate_transcript(
+    entry: dict,
+    key: str,
+    *,
+    model: str,
+    audio: bytes | None = None,
+    audio_name: str = "sample.wav",
+    mime: str = "application/octet-stream",
+    make_provider: Callable[..., Provider] = Provider,
+    timeout: float = 120.0,
+) -> dict:
+    """Распознавание звука: multipart ``POST /v1/audio/transcriptions``.
+
+    Возвращает ``{"model", "audio_name", "text", "error"}``: файл обязателен
+    (страница подставляет тестовый тон, когда своего нет — иначе тест
+    бессмысленен).
+    """
+    model = (model or "").strip()
+
+    def fail(note: str) -> dict:
+        return {"model": model, "audio_name": audio_name, "text": "",
+                "error": note}
+
+    if not audio:
+        return fail("нет аудио для распознавания")
+    if not model:
+        return fail("модель не выбрана")
+    if not key:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    try:
+        response = make_provider(entry["url"], timeout=timeout).forward_form(
+            "/audio/transcriptions", {"model": model},
+            {"file": (audio_name, audio, mime)},
+            api_key=key,
+        )
+    except NeedsKeyError:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+    except ServerError as exc:
+        return fail(str(exc))
+
+    if response.status_code >= 400:
+        detail = response.read().decode("utf-8", errors="replace")
+        return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
+
+    try:
+        data = json.loads(response.read().decode("utf-8", errors="replace"))
+    except ValueError:
+        return fail("провайдер ответил не-JSON на распознавание")
+    if isinstance(data, dict) and "text" in data:
+        text = str(data.get("text") or "").strip()
+        return {"model": model, "audio_name": audio_name,
+                "text": text or "(пусто)", "error": ""}
+    return fail("в ответе нет текста (нет поля text)")
 
 
 def test_chat(

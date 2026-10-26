@@ -1755,6 +1755,9 @@ class TestMediaTestRoutes:
                     "trellis-2": {"category": "3d", "endpoints": [], "paid": False},
                     "emb-1": {"category": "embedding",
                               "endpoints": ["/v1/embeddings"], "paid": False},
+                    "whisper-1": {"category": "audio",
+                                  "endpoints": ["/v1/audio/transcriptions"],
+                                  "paid": False},
                     "flux": {"category": "image",
                              "endpoints": ["/v1/images/generations"], "paid": False},
                 }
@@ -1774,6 +1777,27 @@ class TestMediaTestRoutes:
                     return _Json({"data": [{"embedding": [0.5, -0.25]}]})
                 assert path == "/images/generations"
                 return _Json({"data": [{"url": "https://media.test/pic.png"}]})
+
+            @staticmethod
+            def forward_form(path, data, files, *, api_key, stream=False):
+                assert path == "/audio/transcriptions"
+                assert data["model"] == "whisper-1"
+                name, content, ctype = files["file"]
+                assert content  # файл не пустой: свой или подставленный тон
+
+                class _T:
+                    status_code = 200
+                    headers: dict = {}
+
+                    @staticmethod
+                    def read() -> bytes:
+                        return json.dumps({"text": "тихий голос"}).encode("utf-8")
+
+                    @staticmethod
+                    def close() -> None:
+                        pass
+
+                return _T()
 
         return _Provider()
 
@@ -1821,6 +1845,30 @@ class TestMediaTestRoutes:
         assert response.status_code == 200
         assert "вектор из 2 чисел" in response.text
         assert "0.5" in response.text
+
+    def test_transcriber_without_a_file_gets_the_test_tone(self, harness) -> None:
+        """Пустое поле аудио — веб сам подставляет тестовый тон, текст приходит."""
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post("/stttest/ollama", data={"model": "whisper-1"})
+
+        assert response.status_code == 200
+        assert "тихий голос" in response.text
+
+    def test_transcriber_accepts_an_uploaded_file(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post(
+                "/stttest/ollama", data={"model": "whisper-1"},
+                files={"audio": ("note.wav", b"RIFFDATA", "audio/wav")},
+            )
+
+        assert response.status_code == 200
+        assert "тихий голос" in response.text
 
 
 class TestStats:

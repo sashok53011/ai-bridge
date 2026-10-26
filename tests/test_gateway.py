@@ -3235,8 +3235,9 @@ class TestImageTest:
             {"name": "flux-free", "paid": False},
             {"name": "flux-pro", "paid": True},
         ]
-        # stt-модель к озвучке не идёт — только свои эндпоинты.
+        # stt-модель к озвучке не идёт — у каждой секции свой эндпоинт.
         assert [m["name"] for m in media["audio"]] == ["tts-1"]
+        assert [m["name"] for m in media["stt"]] == ["whisper-1"]
         assert media["three"] == [{"name": "trellis-2", "paid": False}]
         assert media["embedding"] == [{"name": "emb-1", "paid": False}]
 
@@ -3255,7 +3256,56 @@ class TestImageTest:
 
         media = media_models(_entry(), "sk", make_provider=make)
 
-        assert media == {"image": [], "audio": [], "three": [], "embedding": []}
+        assert media == {"image": [], "audio": [], "three": [],
+                         "embedding": [], "stt": []}
+
+    # ------------------------------------------------- озвучка, 3D, вектор
+
+    def test_transcript_turns_speech_into_text(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/audio/transcriptions"
+            assert "multipart/form-data" in request.headers.get("content-type", "")
+            assert b'name="model"' in request.content
+            assert b'name="file"' in request.content
+            return httpx.Response(200, json={"text": "привет от приставки"})
+
+        from service.gateway import generate_transcript
+
+        result = generate_transcript(
+            _entry(), "sk", model="whisper-1", audio=b"RIFF....WAVE",
+            audio_name="note.wav", make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["text"] == "привет от приставки"
+
+    def test_transcript_without_audio_says_what_is_missing(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("без аудио запроса быть не должно")
+
+        from service.gateway import generate_transcript
+
+        factory = self._factory(handler)
+        result = generate_transcript(_entry(), "sk", model="whisper-1",
+                                     make_provider=factory)
+        assert "нет аудио" in result["error"]
+
+        result = generate_transcript(_entry(), "", model="whisper-1",
+                                     audio=b"RIFF", make_provider=factory)
+        assert "ключ" in result["error"]
+
+    def test_transcript_without_text_is_an_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={})
+
+        from service.gateway import generate_transcript
+
+        result = generate_transcript(
+            _entry(), "sk", model="whisper-1", audio=b"RIFF",
+            make_provider=self._factory(handler),
+        )
+
+        assert "нет текста" in result["error"]
 
     # ------------------------------------------------- озвучка, 3D, вектор
 

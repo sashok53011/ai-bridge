@@ -1276,6 +1276,7 @@ class TestTestPageExtras:
             "audio": [{"name": "openai/tts-1", "paid": False}],
             "three": [{"name": "microsoft/trellis-2", "paid": False}],
             "embedding": [{"name": "openai/text-embedding-3-small", "paid": False}],
+            "stt": [{"name": "openai/whisper-large-v3", "paid": False}],
         }
         return chat_test_page("Pollinations.ai", "flux.1-schnell", "привет",
                               answer="Да", provider_id="pollinations",
@@ -1393,6 +1394,25 @@ class TestTestPageExtras:
         page = chat_test_page("Ollama", "qwen3", "привет", answer="ок",
                               provider_id="ollama",
                               media={"image": [], "audio": [], "three": [],
-                                     "embedding": []})
-        for marker in ("/imgtest/", "/audiotest/", "/3dtest/", "/embedtest/"):
+                                     "embedding": [], "stt": []})
+        for marker in ("/imgtest/", "/audiotest/", "/3dtest/", "/embedtest/",
+                       "/stttest/"):
             assert marker not in page
+
+    def test_transcriber_section_takes_an_audio_file(self) -> None:
+        page = self._page(media={"stt": [
+            {"name": "openai/whisper-large-v3", "paid": False},
+        ]})
+        assert 'action="/stttest/pollinations"' in page
+        assert 'name="audio"' in page
+        assert 'accept="audio/*"' in page
+        assert "тестовый тон" in page  # пустое поле — тон подставится сам
+
+    def test_a_transcript_is_shown_as_plain_text(self) -> None:
+        page = self._page(
+            transcript_result={"model": "openai/whisper-large-v3",
+                               "text": "распознано: привет от приставки",
+                               "error": ""},
+        )
+        assert "распознано: привет от приставки" in page
+        assert "openai/whisper-large-v3" in page

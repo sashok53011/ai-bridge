@@ -61,6 +61,7 @@ from service.gateway import (
     generate_3d,
     generate_audio,
     generate_image,
+    generate_transcript,
     media_models,
     test_chat,
 )
@@ -1151,7 +1152,8 @@ class WebUi:
             )
             return
 
-        # Озвучка, 3D и вектор — по тому же шаблону, свой маршрут на тип.
+        # Озвучка, 3D, вектор и распознавание — по тому же шаблону,
+        # свой маршрут на тип.
         media_kind = ""
         tail = ""
         if clean.startswith("/audiotest/"):
@@ -1160,6 +1162,8 @@ class WebUi:
             media_kind, tail = "3d", clean[len("/3dtest/") :]
         elif clean.startswith("/embedtest/"):
             media_kind, tail = "embedding", clean[len("/embedtest/") :]
+        elif clean.startswith("/stttest/"):
+            media_kind, tail = "stt", clean[len("/stttest/") :]
         if media_kind:
             provider_id = urllib.parse.unquote(tail)
             entry = self._find(viewer, provider_id)
@@ -1184,6 +1188,25 @@ class WebUi:
                     prompt=field("prompt"), **kwargs,
                 )
                 result_key, what = "three_result", "3D"
+            elif media_kind == "stt":
+                # Свой файл; пусто — тестовый тон (без звука тест бессмыслен).
+                audio = None
+                audio_name = "test-tone.wav"
+                mime = "audio/wav"
+                uploaded = file_field("audio")
+                if uploaded is not None and uploaded[1]:
+                    import mimetypes as _mt
+
+                    audio_name = uploaded[0] or "sample.wav"
+                    audio = uploaded[1]
+                    mime = _mt.guess_type(audio_name)[0] or "application/octet-stream"
+                else:
+                    audio = _test_tone()
+                result = generate_transcript(
+                    entry, key, model=field("model"), audio=audio,
+                    audio_name=audio_name, mime=mime, **kwargs,
+                )
+                result_key, what = "transcript_result", "распознавание"
             else:
                 result = embed_text(
                     entry, key, text=field("text"), model=field("model"), **kwargs,

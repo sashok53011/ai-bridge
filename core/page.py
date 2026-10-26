@@ -2884,6 +2884,18 @@ def _embed_box(result: dict | None) -> str:
     return _result_note(result, "embbox", "вектор появится здесь")
 
 
+def _stt_box(result: dict | None) -> str:
+    """Распознавание: текст и модель либо честная ошибка."""
+    if result and not str(result.get("error") or ""):
+        caption = escape(str(result.get("model") or ""))
+        text = escape(str(result.get("text") or ""))
+        return (
+            f'<div class="sttbox"><p class="role">{caption}</p>'
+            f"<p>{text}</p></div>"
+        )
+    return _result_note(result, "sttbox", "распознанный текст появится здесь")
+
+
 def _model_options(items: list[dict]) -> str:
     """Опции для select: имя модели и пометка «платная»."""
     return "".join(
@@ -2908,13 +2920,14 @@ def test_page(
     audio_result: dict | None = None,
     three_result: dict | None = None,
     embed_result: dict | None = None,
+    transcript_result: dict | None = None,
 ) -> str:
     """Страница теста: чат, свой промпт и секции генерации по типам моделей.
 
     ``question`` пуст — чат-блок скрыт (страница открыта после
     генерации); ``media`` — списки моделей по секциям (пустая секция не
     рисуется вовсе); каждый ``*_result`` — что показать в её поле
-    результата: ссылку, data-URI, число или честную ошибку.
+    результата: ссылку, data-URI, текст, число или честную ошибку.
     """
     chat_html = ""
     if question:
@@ -3038,6 +3051,26 @@ def test_page(
   {_embed_box(embed_result)}
 </div>"""
 
+    stt_html = ""
+    if media.get("stt"):
+        stt_html = f"""
+<div class="card">
+  <h2>Распознавание звука</h2>
+  <p class="role">Свой аудиофайл превращается в текст; пустое поле —
+  приставка сама подставит свой тестовый тон (полсекунды).</p>
+  <form method="post" action="/stttest/{escape(provider_id, quote=True)}"
+        enctype="multipart/form-data">
+    <label>модель
+      <select name="model">{_model_options(media["stt"])}</select>
+    </label>
+    <label>аудиофайл (пусто — тестовый тон)
+      <input name="audio" type="file" accept="audio/*">
+    </label>
+    <button type="submit" class="primary">распознать</button>
+  </form>
+  {_stt_box(transcript_result)}
+</div>"""
+
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -3047,9 +3080,11 @@ def test_page(
 <style>
 {_style()}
   .q {{ opacity: .6; }}
-  .genbox, .audiobox, .threebox, .embbox {{ margin-top: .7rem; }}
+  .genbox, .audiobox, .threebox, .embbox, .sttbox {{ margin-top: .7rem; }}
   .genbox img {{ max-width: 24rem; border-radius: .6rem; display: block; }}
-  .genbox .role, .audiobox .role, .threebox .role {{ margin-top: .3rem; }}
+  .genbox .role, .audiobox .role, .threebox .role, .sttbox .role {{
+    margin-top: .3rem;
+  }}
   .audiobox audio {{ width: 20rem; max-width: 100%; }}
   .embbox code {{ display: block; margin-top: .3rem; padding: .4rem .6rem;
     background: var(--bg); border: 1px solid var(--line); border-radius: .6rem;
@@ -3065,6 +3100,7 @@ def test_page(
 {audio_html}
 {three_html}
 {embed_html}
+{stt_html}
 </body>
 </html>"""
 
