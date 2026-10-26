@@ -185,9 +185,9 @@ class TestMediaGet:
 
 class TestAudioCatalogueAndJobs:
     def test_voices_come_from_the_audio_catalogue(self) -> None:
-        """Голоса живут в /audio/models, и ответ — JSON внутри строки."""
+        """Голоса живут в корневом /audio/models, и ответ — JSON внутри строки."""
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/v1/audio/models"
+            assert request.url.path == "/audio/models"
             payload = [
                 {"name": "openai/tts-1", "voices": ["alloy", "nova"]},
                 {"name": "microsoft/mai-transcribe-2"},  # без голосов — не мусорим

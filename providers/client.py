@@ -468,7 +468,7 @@ class Provider:
         """
         try:
             response = self._http.get(
-                f"{self.openai_base}/audio/models",
+                f"{self.root}/audio/models",
                 headers=self._headers_for(api_key),
             )
         except httpx.HTTPError:
