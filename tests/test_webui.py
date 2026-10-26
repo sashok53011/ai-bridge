@@ -1676,6 +1676,21 @@ class TestImageTestPage:
         assert "<img" in response.text
         assert "https://media.test/pic.png" in response.text
 
+    def test_a_custom_question_keeps_the_image_section(self, harness) -> None:
+        """Регрессия: свой промпт не должен ронять секцию генерации (502).
+
+        `question` — для чат-теста; в `image_models` он уходить не должен.
+        """
+        _, base = harness([_entry()], make_provider=self._image_provider)
+
+        with _client(base) as client:
+            _as_guest(client, "anna@mail")
+            response = client.post("/test/ollama", data={"question": "привет"})
+
+        assert response.status_code == 200
+        assert 'action="/imgtest/ollama"' in response.text
+        assert "привет" in response.text
+
     def test_a_provider_without_meta_has_no_section(self, harness) -> None:
         """Без метаданных каталога секции генерации нет — не у всех подряд."""
         class _Bare:

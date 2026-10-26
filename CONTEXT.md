@@ -262,7 +262,7 @@ service/archive.py     ежесуточные снимки events.jsonl и usage
 service/gateway.py    OpenAI-совместимый шлюз: токен, кэш live-моделей,
                       фолбэк, SSE; test_chat — настоящий тест-чат
 service/webui.py      маршруты страницы: Host/Origin + cookie-вход на LAN
-tests/                912 тестов чистых функций, клиента и страниц; офлайн, ~80 с
+tests/                913 тестов чистых функций, клиента и страниц; офлайн, ~80 с
 ```
 
 Фоновая автопроверка (`--check-interval`, внутри `--serve`) проверяет

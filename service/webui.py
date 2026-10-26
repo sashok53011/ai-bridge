@@ -1062,11 +1062,13 @@ class WebUi:
                 {} if self._make_provider is None else {"make_provider": self._make_provider}
             )
             # Свой промпт приходит из формы на странице; пустой — как всегда,
-            # крошечный вопрос по умолчанию.
+            # крошечный вопрос по умолчанию. В image_models уходят только
+            # аргументы image_models (иначе TypeError роняет страницу).
             question = field("question").strip()
+            chat_kwargs = dict(kwargs)
             if question:
-                kwargs = {**kwargs, "question": question}
-            outcome = test_chat(entry, key, **kwargs)
+                chat_kwargs["question"] = question
+            outcome = test_chat(entry, key, **chat_kwargs)
             # Тест — главная проверка провайдера: настоящий ответ модели
             # засчитывается в статистику сообщества под именем человека.
             ops.report_chat(self._server, entry, outcome, report_for=str(viewer["id"]))
