@@ -3199,11 +3199,11 @@ class TestImageTest:
         assert "ключ" in generate_image(
             _entry(), "", prompt="кот", model="m", make_provider=factory)["error"]
 
-    def test_image_models_list_only_image_models_with_a_paid_mark(self) -> None:
+    def test_media_models_split_the_catalogue_by_type(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={})
 
-        from service.gateway import image_models
+        from service.gateway import media_models
 
         class _Meta:
             @staticmethod
@@ -3215,25 +3215,35 @@ class TestImageTest:
                     "flux-pro": {"category": "image",
                                  "endpoints": ["/v1/images/generations"],
                                  "paid": True},
-                    "tts-1": {"category": "audio", "endpoints": ["/v1/audio/speech"],
-                              "paid": False},
+                    "tts-1": {"category": "audio",
+                              "endpoints": ["/v1/audio/speech"], "paid": False},
+                    "whisper-1": {"category": "audio",
+                                  "endpoints": ["/v1/audio/transcriptions"],
+                                  "paid": False},
+                    "trellis-2": {"category": "3d", "endpoints": [], "paid": False},
+                    "emb-1": {"category": "embedding",
+                              "endpoints": ["/v1/embeddings"], "paid": False},
                     "veo": {"category": "video", "endpoints": [], "paid": True},
                 }
 
         def make(url, **kwargs):
             return _Meta()
 
-        models = image_models(_entry(), "sk", make_provider=make)
+        media = media_models(_entry(), "sk", make_provider=make)
 
-        assert models == [
+        assert media["image"] == [
             {"name": "flux-free", "paid": False},
             {"name": "flux-pro", "paid": True},
         ]
+        # stt-модель к озвучке не идёт — только свои эндпоинты.
+        assert [m["name"] for m in media["audio"]] == ["tts-1"]
+        assert media["three"] == [{"name": "trellis-2", "paid": False}]
+        assert media["embedding"] == [{"name": "emb-1", "paid": False}]
 
-    def test_a_provider_without_meta_offers_no_image_section(self) -> None:
-        """Нет метаданных — секции генерации нет (не у всех подряд)."""
+    def test_a_provider_without_meta_offers_no_sections(self) -> None:
+        """Нет метаданных — секций генерации нет (не у всех подряд)."""
         from providers.client import ServerError
-        from service.gateway import image_models
+        from service.gateway import media_models
 
         def make(url, **kwargs):
             class _Broken:
@@ -3243,6 +3253,146 @@ class TestImageTest:
 
             return _Broken()
 
-        assert image_models(_entry(), "sk", make_provider=make) == []
+        media = media_models(_entry(), "sk", make_provider=make)
+
+        assert media == {"image": [], "audio": [], "three": [], "embedding": []}
+
+    # ------------------------------------------------- озвучка, 3D, вектор
+
+    def test_audio_comes_back_as_a_public_link(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.startswith("/audio/")
+            assert "привет" in request.url.path or "%20" in str(request.url)
+            assert request.url.params.get("voice") == "nova"
+            assert request.url.params.get("model") == "tts-1"
+            return httpx.Response(
+                200, content=b"ID3mp3",
+                headers={"content-type": "audio/mpeg",
+                         "Link": '<https://media.test/voice.mp3>; rel="enclosure"'},
+            )
+
+        from service.gateway import generate_audio
+
+        result = generate_audio(
+            _entry(), "sk", text="привет мир", model="tts-1", voice="nova",
+            make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["url"] == "https://media.test/voice.mp3"
+
+    def test_audio_without_a_link_cannot_be_shown(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"ID3mp3",
+                                  headers={"content-type": "audio/mpeg"})
+
+        from service.gateway import generate_audio
+
+        result = generate_audio(
+            _entry(), "sk", text="привет", model="tts-1",
+            make_provider=self._factory(handler),
+        )
+
+        assert "ссылка не пришла" in result["error"]
+
+    def test_audio_needs_text_and_key(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запроса быть не должно")
+
+        from service.gateway import generate_audio
+
+        factory = self._factory(handler)
+        assert "текст" in generate_audio(
+            _entry(), "sk", text="  ", model="m", make_provider=factory)["error"]
+        assert "ключ" in generate_audio(
+            _entry(), "", text="привет", model="m", make_provider=factory)["error"]
+
+    def test_3d_needs_an_http_image_and_a_model(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запроса быть не должно")
+
+        from service.gateway import generate_3d
+
+        factory = self._factory(handler)
+        assert "картинку" in generate_3d(
+            _entry(), "sk", image="", model="m", make_provider=factory)["error"]
+        assert "http" in generate_3d(
+            _entry(), "sk", image="javascript:alert(1)", model="m",
+            make_provider=factory)["error"]
+        assert "модель" in generate_3d(
+            _entry(), "sk", image="https://x/p.png", model="",
+            make_provider=factory)["error"]
+        assert "ключ" in generate_3d(
+            _entry(), "", image="https://x/p.png", model="m",
+            make_provider=factory)["error"]
+
+    def test_3d_sends_its_parameters_and_returns_the_link(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.startswith("/3d/")
+            assert request.url.params.get("image") == "https://x/p.png"
+            assert request.url.params.get("model") == "trellis-2"
+            assert request.url.params.get("resolution") == "low"
+            return httpx.Response(
+                200, content=b"glTF",
+                headers={"content-type": "model/gltf-binary",
+                         "Link": '<https://media.test/model.glb>; rel="enclosure"'},
+            )
+
+        from service.gateway import generate_3d
+
+        result = generate_3d(
+            _entry(), "sk", image="https://x/p.png", model="trellis-2",
+            resolution="low", make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["url"] == "https://media.test/model.glb"
+
+    def test_embedding_counts_the_vector_and_shows_a_sample(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/embeddings"
+            body = json.loads(request.content)
+            assert body["input"] == "привет" and body["model"] == "emb-1"
+            return httpx.Response(200, json={"data": [
+                {"embedding": [0.25, -0.5, 0.125]},
+            ]})
+
+        from service.gateway import embed_text
+
+        result = embed_text(
+            _entry(), "sk", text="привет", model="emb-1",
+            make_provider=self._factory(handler),
+        )
+
+        assert result["error"] == ""
+        assert result["count"] == 3
+        assert "0.25" in result["sample"]
+
+    def test_embedding_without_a_vector_is_an_error(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": []})
+
+        from service.gateway import embed_text
+
+        result = embed_text(
+            _entry(), "sk", text="привет", model="emb-1",
+            make_provider=self._factory(handler),
+        )
+
+        assert "нет вектора" in result["error"]
+
+    def test_embedding_needs_text_model_and_key(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("запроса быть не должно")
+
+        from service.gateway import embed_text
+
+        factory = self._factory(handler)
+        assert "текст" in embed_text(
+            _entry(), "sk", text=" ", model="m", make_provider=factory)["error"]
+        assert "модель" in embed_text(
+            _entry(), "sk", text="x", model="", make_provider=factory)["error"]
+        assert "ключ" in embed_text(
+            _entry(), "", text="x", model="m", make_provider=factory)["error"]
 
 

@@ -55,7 +55,15 @@ from core.page import (
 from providers import copilot
 from providers.client import NeedsKeyError, PocketBase, Provider, ServerError
 from service import ops
-from service.gateway import _merge_capabilities, generate_image, image_models, test_chat
+from service.gateway import (
+    _merge_capabilities,
+    embed_text,
+    generate_3d,
+    generate_audio,
+    generate_image,
+    media_models,
+    test_chat,
+)
 from service.space import Spaces
 from storage.notify import NotifyStore
 from storage.sessions import SessionStore
@@ -241,6 +249,39 @@ class WebUi:
         self._notify = notify if notify is not None else NotifyStore()
         # Ждущие device-flow входа GitHub: (user_id, provider_id) → состояние.
         self._oauth_pending: dict[tuple[str, str], dict] = {}
+
+    def _test_page_html(self, entry: dict, key: str, is_admin: bool, *,
+                        question: str = "", answer: str = "", error: str = "",
+                        **results) -> str:
+        """Страница теста со всеми секциями: списки моделей — одним походом.
+
+        ``results`` — результаты секций (image_result, audio_result,
+        three_result, embed_result); чат-блок есть только с вопросом —
+        иначе страница открыта после генерации и чужой ответ не к месту.
+        """
+        kwargs = (
+            {} if self._make_provider is None
+            else {"make_provider": self._make_provider}
+        )
+        return test_page(
+            entry["name"], entry.get("model", ""), question,
+            answer=answer, error=error, can_edit=is_admin,
+            provider_id=str(entry["id"]),
+            media=media_models(entry, key, **kwargs),
+            **results,
+        )
+
+    def _note_media(self, viewer: dict, entry: dict, what: str, *,
+                    prompt: str, model: str, error: str) -> None:
+        """Событие в журнал о результате генерации (строки — обрезанные)."""
+        who = str(viewer.get("email") or "")
+        if error:
+            self._event("тест", who,
+                        f"{entry['name']}: {what} не получился — {error[:120]}")
+            return
+        detail = f" «{prompt[:60]}»" if prompt else ""
+        tail = f" ({model})" if model else ""
+        self._event("тест", who, f"{entry['name']}: {what}{detail} — готово{tail}")
 
     def _refresh_now(self) -> None:
         """Обновить кэш каталога сразу после админ-правки (если передан)."""
@@ -1059,11 +1100,11 @@ class WebUi:
                 return
             key = space.keys.get(provider_id)
             kwargs = (
-                {} if self._make_provider is None else {"make_provider": self._make_provider}
+                {} if self._make_provider is None
+                else {"make_provider": self._make_provider}
             )
             # Свой промпт приходит из формы на странице; пустой — как всегда,
-            # крошечный вопрос по умолчанию. В image_models уходят только
-            # аргументы image_models (иначе TypeError роняет страницу).
+            # крошечный вопрос по умолчанию.
             question = field("question").strip()
             chat_kwargs = dict(kwargs)
             if question:
@@ -1079,13 +1120,10 @@ class WebUi:
                 + (f"ответ от {entry.get('model', '')}" if not outcome["error"] else outcome["error"]),
             )
             self._send_html(
-                handler,
-                200,
-                test_page(
-                    entry["name"], entry.get("model", ""),
-                    outcome["question"], answer=outcome["answer"], error=outcome["error"],
-                    can_edit=is_admin, provider_id=provider_id,
-                    image_models=image_models(entry, key, **kwargs),
+                handler, 200,
+                self._test_page_html(
+                    entry, key, is_admin, question=outcome["question"],
+                    answer=outcome["answer"], error=outcome["error"],
                 ),
             )
             return
@@ -1098,29 +1136,67 @@ class WebUi:
                 return
             key = space.keys.get(provider_id)
             kwargs = (
-                {} if self._make_provider is None else {"make_provider": self._make_provider}
+                {} if self._make_provider is None
+                else {"make_provider": self._make_provider}
             )
             result = generate_image(entry, key, prompt=field("prompt"),
                                     model=field("model"), **kwargs)
-            who = str(viewer.get("email") or "")
-            if result.get("error"):
-                self._event("тест", who,
-                            f"{entry['name']}: картинка не получилась — "
-                            f"{str(result['error'])[:120]}")
-            else:
-                self._event("тест", who,
-                            f"{entry['name']}: картинка «{result['prompt'][:60]}» "
-                            f"моделью {result['model']} готова")
-            # Страница без чат-блока (пустой вопрос) — сразу с результатом.
+            self._note_media(viewer, entry, "картинка",
+                             prompt=str(result.get("prompt") or ""),
+                             model=str(result.get("model") or ""),
+                             error=str(result.get("error") or ""))
             self._send_html(
-                handler,
-                200,
-                test_page(
-                    entry["name"], entry.get("model", ""), "",
-                    can_edit=is_admin, provider_id=provider_id,
-                    image_models=image_models(entry, key, **kwargs),
-                    image_result=result,
-                ),
+                handler, 200,
+                self._test_page_html(entry, key, is_admin, image_result=result),
+            )
+            return
+
+        # Озвучка, 3D и вектор — по тому же шаблону, свой маршрут на тип.
+        media_kind = ""
+        tail = ""
+        if clean.startswith("/audiotest/"):
+            media_kind, tail = "audio", clean[len("/audiotest/") :]
+        elif clean.startswith("/3dtest/"):
+            media_kind, tail = "3d", clean[len("/3dtest/") :]
+        elif clean.startswith("/embedtest/"):
+            media_kind, tail = "embedding", clean[len("/embedtest/") :]
+        if media_kind:
+            provider_id = urllib.parse.unquote(tail)
+            entry = self._find(viewer, provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            key = space.keys.get(provider_id)
+            kwargs = (
+                {} if self._make_provider is None
+                else {"make_provider": self._make_provider}
+            )
+            if media_kind == "audio":
+                result = generate_audio(
+                    entry, key, text=field("text"), model=field("model"),
+                    voice=field("voice"), **kwargs,
+                )
+                result_key, what = "audio_result", "озвучка"
+            elif media_kind == "3d":
+                result = generate_3d(
+                    entry, key, image=field("image"), model=field("model"),
+                    resolution=field("resolution") or "low",
+                    prompt=field("prompt"), **kwargs,
+                )
+                result_key, what = "three_result", "3D"
+            else:
+                result = embed_text(
+                    entry, key, text=field("text"), model=field("model"), **kwargs,
+                )
+                result_key, what = "embed_result", "вектор"
+            self._note_media(viewer, entry, what,
+                             prompt=str(result.get("text")
+                                        or result.get("image") or ""),
+                             model=str(result.get("model") or ""),
+                             error=str(result.get("error") or ""))
+            self._send_html(
+                handler, 200,
+                self._test_page_html(entry, key, is_admin, **{result_key: result}),
             )
             return
 

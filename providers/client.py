@@ -583,19 +583,28 @@ class Provider:
         model: str,
         *,
         api_key: str = "",
+        params: dict[str, str] | None = None,
         stream: bool = True,
     ) -> httpx.Response:
-        """GET <корень>/<kind>/<промпт>?model=… — видео и 3D.
+        """GET <корень>/<kind>/<промпт>?… — видео, 3D, озвучка.
 
         Медиа-файлы большие, поэтому ответ остаётся потоком: вызывающий
         читает заголовки (в них публичная ссылка `Link: … rel="enclosure"`)
         и, если ссылки нет, первый кусок — тело целиком не тянем.
+        ``params`` — доп. query-параметры (голос, картинка-источник,
+        разрешение); пустые значения не мусорят в адресе.
         """
         url = f"{self.root}/{kind}/{quote(prompt, safe='')}"
+        query: dict[str, str] = {}
+        if model:
+            query["model"] = model
+        for name, value in (params or {}).items():
+            if value:
+                query[str(name)] = str(value)
         request = self._http.build_request(
             "GET",
             url,
-            params={"model": model} if model else None,
+            params=query or None,
             headers=self._headers_for(api_key),
         )
         try:

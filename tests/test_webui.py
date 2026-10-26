@@ -1717,6 +1717,112 @@ class TestImageTestPage:
         assert "/imgtest/" not in response.text
 
 
+class TestMediaTestRoutes:
+    """Страница теста: озвучка, 3D и вектор — свои маршруты и результаты."""
+
+    @staticmethod
+    def _provider(url, **kwargs):
+        class _Link:
+            def __init__(self, link: str, content: bytes = b"data"):
+                self.status_code = 200
+                self.headers = {"Link": f"<{link}>; rel=\"enclosure\""}
+                self._content = content
+
+            def read(self) -> bytes:
+                return self._content
+
+            def close(self) -> None:
+                pass
+
+        class _Json:
+            def __init__(self, payload: dict):
+                self.status_code = 200
+                self.headers: dict = {}
+                self._payload = payload
+
+            def read(self) -> bytes:
+                return json.dumps(self._payload).encode("utf-8")
+
+            def close(self) -> None:
+                pass
+
+        class _Provider:
+            @staticmethod
+            def fetch_model_meta(key: str = "") -> dict:
+                return {
+                    "tts-1": {"category": "audio",
+                              "endpoints": ["/v1/audio/speech"], "paid": False},
+                    "trellis-2": {"category": "3d", "endpoints": [], "paid": False},
+                    "emb-1": {"category": "embedding",
+                              "endpoints": ["/v1/embeddings"], "paid": False},
+                    "flux": {"category": "image",
+                             "endpoints": ["/v1/images/generations"], "paid": False},
+                }
+
+            @staticmethod
+            def media_get(kind, prompt, model, *, api_key, params=None, stream=True):
+                if kind == "audio":
+                    assert (params or {}).get("voice") == "alloy"
+                    return _Link("https://media.test/voice.mp3")
+                assert kind == "3d"
+                assert (params or {}).get("image") == "https://x/p.png"
+                return _Link("https://media.test/model.glb")
+
+            @staticmethod
+            def forward_path(path, body, *, api_key, timeout, stream):
+                if path == "/embeddings":
+                    return _Json({"data": [{"embedding": [0.5, -0.25]}]})
+                assert path == "/images/generations"
+                return _Json({"data": [{"url": "https://media.test/pic.png"}]})
+
+        return _Provider()
+
+    @staticmethod
+    def _ready(client) -> None:
+        _as_guest(client, "anna@mail")
+        client.post("/key", data={"id": "ollama", "api_key": "sk-test"})
+
+    def test_audio_route_renders_a_player(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post("/audiotest/ollama", data={
+                "text": "привет мир", "voice": "alloy", "model": "tts-1",
+            })
+
+        assert response.status_code == 200
+        assert "<audio" in response.text
+        assert "https://media.test/voice.mp3" in response.text
+
+    def test_three_d_route_offers_the_download(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post("/3dtest/ollama", data={
+                "image": "https://x/p.png", "resolution": "low",
+                "model": "trellis-2", "prompt": "",
+            })
+
+        assert response.status_code == 200
+        assert "https://media.test/model.glb" in response.text
+        assert "скачать" in response.text
+
+    def test_embedding_route_shows_the_vector(self, harness) -> None:
+        _, base = harness([_entry()], make_provider=self._provider)
+
+        with _client(base) as client:
+            self._ready(client)
+            response = client.post("/embedtest/ollama", data={
+                "text": "привет", "model": "emb-1",
+            })
+
+        assert response.status_code == 200
+        assert "вектор из 2 чисел" in response.text
+        assert "0.5" in response.text
+
+
 class TestStats:
     """Страница «Статистика»: расходы по моделям, доступна всем вошедшим."""
 

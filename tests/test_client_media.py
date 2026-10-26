@@ -144,3 +144,23 @@ class TestMediaGet:
         assert seen["auth"] == "Bearer sk-1"
         assert 'https://media.test/' in response.headers["Link"]
         assert response.status_code == 200
+
+    def test_extra_query_parameters_ride_along(self) -> None:
+        """Голос для озвучки, картинка и разрешение для 3D — query-параметры."""
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            seen["voice"] = request.url.params.get("voice", "")
+            seen["model"] = request.url.params.get("model", "")
+            return httpx.Response(200, content=b"ID3mp3",
+                                  headers={"content-type": "audio/mpeg"})
+
+        client = _provider(handler)
+        client.media_get("audio", "hello world", "", api_key="sk-1",
+                         params={"voice": "nova"})
+
+        assert seen["path"].startswith("/audio/")
+        assert "hello" in seen["path"] or "%20" in seen["path"]
+        assert seen["voice"] == "nova"
+        assert seen["model"] == ""  # пустая модель не мусорит в query

@@ -1267,12 +1267,19 @@ class TestAutotestMediaResults:
 
 
 class TestTestPageExtras:
-    """Страница «Тест»: свой промпт и секция генерации картинок."""
+    """Страница «Тест»: свой промпт и секции генерации по типам моделей."""
 
     @staticmethod
     def _page(**kwargs) -> str:
+        media = kwargs.pop("media", None) or {
+            "image": [{"name": "flux.1-schnell", "paid": False}],
+            "audio": [{"name": "openai/tts-1", "paid": False}],
+            "three": [{"name": "microsoft/trellis-2", "paid": False}],
+            "embedding": [{"name": "openai/text-embedding-3-small", "paid": False}],
+        }
         return chat_test_page("Pollinations.ai", "flux.1-schnell", "привет",
-                              answer="Да", provider_id="pollinations", **kwargs)
+                              answer="Да", provider_id="pollinations",
+                              media=media, **kwargs)
 
     def test_your_own_prompt_form_is_always_here(self) -> None:
         page = self._page()
@@ -1280,8 +1287,10 @@ class TestTestPageExtras:
         assert 'name="question"' in page
 
     def test_image_section_appears_only_with_models(self) -> None:
-        page = self._page(image_models=[{"name": "flux.1-schnell", "paid": False},
-                                        {"name": "flux-2-pro", "paid": True}])
+        page = self._page(media={"image": [
+            {"name": "flux.1-schnell", "paid": False},
+            {"name": "flux-2-pro", "paid": True},
+        ]})
         assert 'action="/imgtest/pollinations"' in page
         assert 'name="prompt"' in page
         assert 'value="flux.1-schnell"' in page
@@ -1292,13 +1301,12 @@ class TestTestPageExtras:
         assert "/imgtest/" not in plain  # у провайдера без меты секции нет
 
     def test_the_result_box_waits_for_a_picture(self) -> None:
-        page = self._page(image_models=[{"name": "flux.1-schnell", "paid": False}])
+        page = self._page()
         assert "genbox" in page
         assert "<img" not in page
 
     def test_a_generated_picture_is_shown_in_the_box(self) -> None:
         page = self._page(
-            image_models=[{"name": "flux.1-schnell", "paid": False}],
             image_result={"model": "flux.1-schnell", "prompt": "кот",
                           "url": "https://media.test/pic.png", "b64": "", "error": ""},
         )
@@ -1308,7 +1316,6 @@ class TestTestPageExtras:
 
     def test_base64_becomes_a_data_uri(self) -> None:
         page = self._page(
-            image_models=[{"name": "flux.1-schnell", "paid": False}],
             image_result={"model": "flux.1-schnell", "prompt": "кот",
                           "url": "", "b64": "QUJD", "error": ""},
         )
@@ -1316,7 +1323,6 @@ class TestTestPageExtras:
 
     def test_an_image_error_is_a_notice(self) -> None:
         page = self._page(
-            image_models=[{"name": "flux.1-schnell", "paid": False}],
             image_result={"model": "", "prompt": "", "url": "", "b64": "",
                           "error": "HTTP 400: нет кредитов"},
         )
@@ -1325,7 +1331,6 @@ class TestTestPageExtras:
 
     def test_a_foreign_scheme_never_becomes_an_image(self) -> None:
         page = self._page(
-            image_models=[{"name": "flux.1-schnell", "paid": False}],
             image_result={"model": "m", "prompt": "x",
                           "url": "javascript:alert(1)", "b64": "", "error": ""},
         )
@@ -1335,3 +1340,59 @@ class TestTestPageExtras:
         """После генерации страница не показывает чужой чат-вопрос."""
         page = chat_test_page("Pollinations.ai", "", "", provider_id="pollinations")
         assert "крошечный запрос" not in page
+
+    # ------------------------------------------------------- новые секции
+
+    def test_audio_section_offers_models_voice_and_text(self) -> None:
+        page = self._page(media={"audio": [
+            {"name": "openai/tts-1", "paid": False},
+            {"name": "elevenlabs/eleven-v4", "paid": True},
+        ]})
+        assert 'action="/audiotest/pollinations"' in page
+        assert 'name="voice"' in page
+        assert 'name="text"' in page
+        assert "elevenlabs/eleven-v4 · платная" in page
+
+    def test_audio_result_becomes_a_player(self) -> None:
+        page = self._page(
+            audio_result={"model": "openai/tts-1", "text": "привет",
+                          "url": "https://media.test/voice.mp3", "error": ""},
+        )
+        assert "<audio" in page
+        assert "https://media.test/voice.mp3" in page
+
+    def test_three_d_section_and_its_download_link(self) -> None:
+        page = self._page(media={"three": [{"name": "microsoft/trellis-2",
+                                            "paid": False}]})
+        assert 'action="/3dtest/pollinations"' in page
+        assert 'name="image"' in page  # картинка-источник обязана быть ссылкой
+        assert 'name="resolution"' in page
+
+        ready = self._page(
+            three_result={"model": "microsoft/trellis-2",
+                          "url": "https://media.test/model.glb", "error": ""},
+        )
+        assert "https://media.test/model.glb" in ready
+        assert "скачать" in ready
+
+    def test_embedding_section_and_its_vector(self) -> None:
+        page = self._page(media={"embedding": [{"name": "openai/text-embedding-3-small",
+                                                "paid": False}]})
+        assert 'action="/embedtest/pollinations"' in page
+        assert 'name="text"' in page
+
+        ready = self._page(
+            embed_result={"model": "openai/text-embedding-3-small", "text": "привет",
+                          "count": 3, "sample": "0.25, -0.5, 0.125", "error": ""},
+        )
+        assert "вектор из 3 чисел" in ready
+        assert "0.25" in ready
+
+    def test_no_models_no_sections(self) -> None:
+        """Без метаданных — ни секции, ни лишних полей."""
+        page = chat_test_page("Ollama", "qwen3", "привет", answer="ок",
+                              provider_id="ollama",
+                              media={"image": [], "audio": [], "three": [],
+                                     "embedding": []})
+        for marker in ("/imgtest/", "/audiotest/", "/3dtest/", "/embedtest/"):
+            assert marker not in page

@@ -2815,6 +2815,85 @@ def _image_box(result: dict | None) -> str:
     )
 
 
+def _result_note(result: dict | None, box: str, empty: str, caption: str = "") -> str:
+    """Общий бокс результата: ошибка — notice, ссылка — по-своему, пусто — заглушка.
+
+    ``caption`` — готовая подпись (экранированная вызывающим).
+    """
+    if not result:
+        return f'<div class="{box}"><p class="role">{empty}</p></div>'
+    if str(result.get("error") or ""):
+        return (
+            f'<div class="{box}"><p class="notice bad">'
+            f'{escape(str(result["error"]))}</p></div>'
+        )
+    return ""  # успешный случай дорисовывает вызывающий — у каждого свой
+
+
+def _audio_box(result: dict | None) -> str:
+    """Озвучка: плеер по публичной ссылке либо честная ошибка."""
+    if result and not str(result.get("error") or ""):
+        url = _safe_url(str(result.get("url") or ""))
+        if not url:
+            return (
+                f'<div class="audiobox"><p class="notice bad">'
+                f'ссылки на звук нет — показать нечего</p></div>'
+            )
+        caption = (
+            f'{escape(str(result.get("model") or ""))} · '
+            f'«{escape(str(result.get("text") or ""))}»'
+        )
+        return (
+            f'<div class="audiobox"><audio controls preload="none" '
+            f'src="{escape(url, quote=True)}"></audio>'
+            f'<p class="role">{caption}</p></div>'
+        )
+    note = _result_note(result, "audiobox", "озвучка появится здесь")
+    return note
+
+
+def _three_box(result: dict | None) -> str:
+    """3D: ссылка на glb («скачать») либо честная ошибка."""
+    if result and not str(result.get("error") or ""):
+        url = _safe_url(str(result.get("url") or ""))
+        if not url:
+            return (
+                f'<div class="threebox"><p class="notice bad">'
+                f'ссылки на файл нет — скачать нечего</p></div>'
+            )
+        caption = escape(str(result.get("model") or ""))
+        return (
+            f'<div class="threebox"><a class="btn-ghost" href="{escape(url, quote=True)}" '
+            f'target="_blank" rel="noopener">скачать .glb</a>'
+            f'<p class="role">{caption}</p></div>'
+        )
+    return _result_note(result, "threebox", "3D-модель появится здесь")
+
+
+def _embed_box(result: dict | None) -> str:
+    """Вектор: длина и первые числа либо честная ошибка."""
+    if result and not str(result.get("error") or ""):
+        count = int(result.get("count") or 0)
+        sample = escape(str(result.get("sample") or ""))
+        caption = escape(str(result.get("model") or ""))
+        return (
+            f'<div class="embbox"><p><b>вектор из {count} чисел</b> · '
+            f'{caption}</p><code>{sample}'
+            f'{" …" if count > 12 else ""}</code></div>'
+        )
+    return _result_note(result, "embbox", "вектор появится здесь")
+
+
+def _model_options(items: list[dict]) -> str:
+    """Опции для select: имя модели и пометка «платная»."""
+    return "".join(
+        f'<option value="{escape(str(item.get("name") or ""), quote=True)}">'
+        f'{escape(str(item.get("name") or ""))}'
+        f'{" · платная" if item.get("paid") else ""}</option>'
+        for item in items
+    )
+
+
 def test_page(
     provider_name: str,
     model: str,
@@ -2824,15 +2903,18 @@ def test_page(
     error: str = "",
     can_edit: bool = False,
     provider_id: str = "",
-    image_models: list[dict] | None = None,
+    media: dict[str, list[dict]] | None = None,
     image_result: dict | None = None,
+    audio_result: dict | None = None,
+    three_result: dict | None = None,
+    embed_result: dict | None = None,
 ) -> str:
-    """Страница теста: чат-ответ, свой промпт и генерация картинки.
+    """Страница теста: чат, свой промпт и секции генерации по типам моделей.
 
     ``question`` пуст — чат-блок скрыт (страница открыта после
-    генерации); ``image_models`` непусто — секция «Картинка» с выбором
-    модели (платные помечены); ``image_result`` — что показать в поле
-    картинки: ссылку, data-URI или честную ошибку.
+    генерации); ``media`` — списки моделей по секциям (пустая секция не
+    рисуется вовсе); каждый ``*_result`` — что показать в её поле
+    результата: ссылку, data-URI, число или честную ошибку.
     """
     chat_html = ""
     if question:
@@ -2860,15 +2942,10 @@ def test_page(
   </form>
 </div>"""
 
+    media = media or {}
+
     image_html = ""
-    models = image_models or []
-    if models:
-        options = "".join(
-            f'<option value="{escape(str(item.get("name") or ""), quote=True)}">'
-            f'{escape(str(item.get("name") or ""))}'
-            f'{" · платная" if item.get("paid") else ""}</option>'
-            for item in models
-        )
+    if media.get("image"):
         image_html = f"""
 <div class="card">
   <h2>Картинка</h2>
@@ -2876,7 +2953,7 @@ def test_page(
   платной — доли цента.</p>
   <form method="post" action="/imgtest/{escape(provider_id, quote=True)}">
     <label>модель
-      <select name="model">{options}</select>
+      <select name="model">{_model_options(media["image"])}</select>
     </label>
     <label>промпт
       <textarea name="prompt" rows="3" required
@@ -2885,6 +2962,80 @@ def test_page(
     <button type="submit" class="primary">сгенерировать</button>
   </form>
   {_image_box(image_result)}
+</div>"""
+
+    audio_html = ""
+    if media.get("audio"):
+        audio_html = f"""
+<div class="card">
+  <h2>Озвучка</h2>
+  <p class="role">Голосом из списка провайдера; готовый mp3 показывается
+  плеером по ссылке.</p>
+  <form method="post" action="/audiotest/{escape(provider_id, quote=True)}">
+    <label>модель
+      <select name="model">{_model_options(media["audio"])}</select>
+    </label>
+    <label>голос (необязательно)
+      <input name="voice" placeholder="nova, alloy …">
+    </label>
+    <label>текст
+      <textarea name="text" rows="2" required
+                placeholder="например: Привет от AI-приставки"></textarea>
+    </label>
+    <button type="submit" class="primary">озвучить</button>
+  </form>
+  {_audio_box(audio_result)}
+</div>"""
+
+    three_html = ""
+    if media.get("three"):
+        resolutions = "".join(
+            f'<option value="{value}"{" selected" if value == "low" else ""}>{label}'
+            f"</option>"
+            for value, label in (("low", "низкое"), ("medium", "среднее"),
+                                 ("high", "высокое"))
+        )
+        three_html = f"""
+<div class="card">
+  <h2>3D-модель</h2>
+  <p class="role">Из картинки-ссылки (так в доках): строится не мгновенно,
+  результат — файл .glb на скачивание.</p>
+  <form method="post" action="/3dtest/{escape(provider_id, quote=True)}">
+    <label>картинка-источник (http-ссылка)
+      <input name="image" required placeholder="https://…/picture.png">
+    </label>
+    <label>модель
+      <select name="model">{_model_options(media["three"])}</select>
+    </label>
+    <label>разрешение
+      <select name="resolution">{resolutions}</select>
+    </label>
+    <label>промпт (необязательно — trellis его игнорирует)
+      <textarea name="prompt" rows="2" placeholder="например: a lighthouse"></textarea>
+    </label>
+    <button type="submit" class="primary">построить</button>
+  </form>
+  {_three_box(three_result)}
+</div>"""
+
+    embed_html = ""
+    if media.get("embedding"):
+        embed_html = f"""
+<div class="card">
+  <h2>Вектор</h2>
+  <p class="role">OpenAI-совместимые embeddings: текст становится числом —
+  покажем длину и первые значения.</p>
+  <form method="post" action="/embedtest/{escape(provider_id, quote=True)}">
+    <label>модель
+      <select name="model">{_model_options(media["embedding"])}</select>
+    </label>
+    <label>текст
+      <textarea name="text" rows="2" required
+                placeholder="например: Привет от AI-приставки"></textarea>
+    </label>
+    <button type="submit" class="primary">получить вектор</button>
+  </form>
+  {_embed_box(embed_result)}
 </div>"""
 
     return f"""<!doctype html>
@@ -2896,9 +3047,13 @@ def test_page(
 <style>
 {_style()}
   .q {{ opacity: .6; }}
-  .genbox {{ margin-top: .7rem; }}
+  .genbox, .audiobox, .threebox, .embbox {{ margin-top: .7rem; }}
   .genbox img {{ max-width: 24rem; border-radius: .6rem; display: block; }}
-  .genbox .role {{ margin-top: .3rem; }}
+  .genbox .role, .audiobox .role, .threebox .role {{ margin-top: .3rem; }}
+  .audiobox audio {{ width: 20rem; max-width: 100%; }}
+  .embbox code {{ display: block; margin-top: .3rem; padding: .4rem .6rem;
+    background: var(--bg); border: 1px solid var(--line); border-radius: .6rem;
+    overflow-wrap: anywhere; }}
 </style>
 </head>
 <body>
@@ -2907,6 +3062,9 @@ def test_page(
 {chat_html}
 {prompt_form}
 {image_html}
+{audio_html}
+{three_html}
+{embed_html}
 </body>
 </html>"""
 

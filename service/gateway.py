@@ -431,27 +431,33 @@ def _capability_refusal(payload: bytes, needs: tuple[str, ...] = ()) -> tuple[st
     return "", ""
 
 
-def image_models(
+def media_models(
     entry: dict,
     key: str,
     *,
     make_provider: Callable[..., Provider] = Provider,
-) -> list[dict]:
-    """Image-модели провайдера для формы генерации: ``[{"name", "paid"}]``.
+) -> dict[str, list[dict]]:
+    """Модели для секций генерации: {"image", "audio", "three", "embedding"}.
 
-    Только метаданные каталога: секция «Картинка» появляется там, где
-    провайдер честно заявил image-модели (Pollinations), а не у всех
-    подряд; метаданных нет или каталог не отвечает — пусто, секции нет.
+    Один поход в каталог — все четыре списка сразу: тип читается из
+    метаданных (Pollinations), секция появляется только там, где
+    провайдер честно заявил модели такого типа, а не у всех подряд.
+    Метаданных нет или каталог не отвечает — все списки пусты.
     """
+    empty = {"image": [], "audio": [], "three": [], "embedding": []}
     try:
         meta = make_provider(entry["url"], timeout=15.0).fetch_model_meta(key)
-    except Exception:  # noqa: BLE001 — секция лучше исчезнет, чем задержит тест
-        return []
-    return [
-        {"name": name, "paid": bool(meta_dict.get("paid"))}
-        for name, meta_dict in sorted(meta.items())
-        if _meta_fits(meta_dict, "image")
-    ]
+    except Exception:  # noqa: BLE001 — секции лучше исчезнут, чем задержат тест
+        return empty
+    out: dict[str, list[dict]] = {"image": [], "audio": [], "three": [], "embedding": []}
+    kinds = {"image": "image", "audio": "tts", "three": "3d", "embedding": "embedding"}
+    for name, meta_dict in sorted(meta.items()):
+        entry_meta = {"name": name, "paid": bool(meta_dict.get("paid"))}
+        for bucket, test_type in kinds.items():
+            if _meta_fits(meta_dict, test_type):
+                out[bucket].append(entry_meta)
+                break
+    return out
 
 
 def generate_image(
@@ -514,6 +520,181 @@ def generate_image(
     if b64:
         return {"model": model, "prompt": prompt, "url": "", "b64": b64, "error": ""}
     return fail("в ответе нет картинки (data пусто)")
+
+
+def generate_audio(
+    entry: dict,
+    key: str,
+    *,
+    text: str,
+    model: str = "",
+    voice: str = "",
+    make_provider: Callable[..., Provider] = Provider,
+    timeout: float = 120.0,
+) -> dict:
+    """Озвучка через ``GET /audio/{text}`` — как в доках Pollinations.
+
+    Возвращает ``{"text", "model", "voice", "url", "error"}``: mp3 не
+    храним — страница ставит плеер по публичной ссылке из заголовка
+    ``Link``; звук без ссылки показать нечего, это честная ошибка.
+    """
+    text = (text or "").strip()
+
+    def fail(note: str) -> dict:
+        return {"text": text, "model": model, "voice": voice, "url": "", "error": note}
+
+    if not text:
+        return fail("текст не задан")
+    if not key:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    try:
+        response = make_provider(entry["url"], timeout=timeout).media_get(
+            "audio", text, model, api_key=key,
+            params={"voice": voice} if voice else None,
+        )
+    except NeedsKeyError:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+    except ServerError as exc:
+        return fail(str(exc))
+
+    try:
+        if response.status_code >= 400:
+            detail = _read_capped(response, 64 * 1024).decode("utf-8", errors="replace")
+            return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
+        link = _enclosure(str(response.headers.get("Link") or ""))
+        if link:
+            return {"text": text, "model": model, "voice": voice,
+                    "url": link, "error": ""}
+        if not _read_capped(response, 64 * 1024):
+            return fail("пустой ответ озвучки")
+        return fail("звук пошёл, но ссылка не пришла — показать нечего")
+    finally:
+        response.close()
+
+
+def generate_3d(
+    entry: dict,
+    key: str,
+    *,
+    image: str,
+    model: str,
+    resolution: str = "low",
+    prompt: str = "",
+    make_provider: Callable[..., Provider] = Provider,
+    timeout: float = 180.0,
+) -> dict:
+    """3D из картинки: ``GET /3d/{prompt}?image=…&model=…&resolution=…``.
+
+    Возвращает ``{"model", "image", "url", "error"}`` — glb не храним,
+    страница даёт ссылку «скачать». Картинка обязана быть http(s)-ссылкой
+    (так в доках): чужие схемы не пропускаем.
+    """
+    image = (image or "").strip()
+    model = (model or "").strip()
+    resolution = (resolution or "low").strip()
+
+    def fail(note: str) -> dict:
+        return {"model": model, "image": image, "url": "", "error": note}
+
+    if not image:
+        return fail("нужна ссылка на картинку (image) — так в доках")
+    if not image.startswith(("http://", "https://")):
+        return fail("картинкой может быть только http(s)-ссылка")
+    if not model:
+        return fail("модель не выбрана")
+    if not key:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    try:
+        response = make_provider(entry["url"], timeout=timeout).media_get(
+            "3d", prompt or "trellis", model, api_key=key,
+            params={"image": image, "resolution": resolution},
+        )
+    except NeedsKeyError:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+    except ServerError as exc:
+        return fail(str(exc))
+
+    try:
+        if response.status_code >= 400:
+            detail = _read_capped(response, 64 * 1024).decode("utf-8", errors="replace")
+            return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
+        link = _enclosure(str(response.headers.get("Link") or ""))
+        if link:
+            return {"model": model, "image": image, "url": link, "error": ""}
+        if not _read_capped(response, 64 * 1024):
+            return fail("пустой ответ генерации")
+        return fail("модель построена, но ссылка не пришла — скачать нечего")
+    finally:
+        response.close()
+
+
+def embed_text(
+    entry: dict,
+    key: str,
+    *,
+    text: str,
+    model: str,
+    make_provider: Callable[..., Provider] = Provider,
+    timeout: float = 60.0,
+) -> dict:
+    """Вектор текста: ``POST /v1/embeddings`` (OpenAI-совместимый).
+
+    Возвращает ``{"text", "model", "count", "sample", "error"}``:
+    в целях страницы достаточно длины и первых чисел — сам вектор
+    (тысячи чисел) в ответ не тащим.
+    """
+    text = (text or "").strip()
+    model = (model or "").strip()
+
+    def fail(note: str) -> dict:
+        return {"text": text, "model": model, "count": 0, "sample": "",
+                "error": note}
+
+    if not text:
+        return fail("текст не задан")
+    if not model:
+        return fail("модель не выбрана")
+    if not key:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+
+    payload = json.dumps({"model": model, "input": text},
+                         ensure_ascii=False).encode("utf-8")
+    try:
+        response = make_provider(entry["url"], timeout=timeout).forward_path(
+            "/embeddings", payload, api_key=key, timeout=timeout, stream=False,
+        )
+    except NeedsKeyError:
+        return fail("нужен ключ — введите его кнопкой «ключ»")
+    except ServerError as exc:
+        return fail(str(exc))
+
+    if response.status_code >= 400:
+        detail = response.read().decode("utf-8", errors="replace")
+        return fail(f"HTTP {response.status_code}: {detail[:300]}".strip())
+
+    try:
+        data = json.loads(response.read().decode("utf-8", errors="replace"))
+    except ValueError:
+        return fail("провайдер ответил не-JSON на вектор")
+    items = data.get("data") if isinstance(data, dict) else None
+    item = items[0] if isinstance(items, list) and items and isinstance(items[0], dict) else {}
+    vector = item.get("embedding")
+    if not isinstance(vector, list) or not vector:
+        return fail("в ответе нет вектора")
+
+    def piece(value: object) -> str:
+        try:
+            return f"{float(value):.4g}"  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return str(value)[:12]
+
+    return {
+        "text": text, "model": model, "count": len(vector),
+        "sample": ", ".join(piece(value) for value in vector[:12]),
+        "error": "",
+    }
 
 
 def test_chat(
