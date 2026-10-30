@@ -181,6 +181,34 @@ function cp(el, id) {
 }
 </script>"""
 
+
+ANSWER_SCRIPT = """<script>
+(function(){
+  document.querySelectorAll(".answer").forEach(function(box){
+    var copy = box.querySelector(".copy-all");
+    var pre = box.querySelector("pre, .answer-md");
+    if (copy && pre && navigator.clipboard) {
+      copy.addEventListener("click", function(){
+        navigator.clipboard.writeText(pre.textContent).then(function(){
+          copy.textContent = "скопировано";
+          setTimeout(function(){ copy.textContent = "копировать"; }, 1200);
+        });
+      });
+    }
+    box.querySelectorAll(".copy-code").forEach(function(btn){
+      var code = btn.parentElement.querySelector("code");
+      if (!code || !navigator.clipboard) return;
+      btn.addEventListener("click", function(){
+        navigator.clipboard.writeText(code.textContent).then(function(){
+          btn.textContent = "скопировано";
+          setTimeout(function(){ btn.textContent = "копировать"; }, 1200);
+        });
+      });
+    });
+  });
+})();
+</script>"""
+
 #: Метки времени: сервер хранит UTC, страница показывает время зрителя.
 #: Функция переписывает все [data-ts] в локальное время браузера.
 LOCAL_TIME_SCRIPT = """<script>
@@ -2883,6 +2911,7 @@ def verify_page(
 <p class="role"><a class="btn-ghost" href="/verify/export" download>сохранить как markdown</a>
   <span class="role">— копия всего прогона (картинки встроены)</span></p>
 {poll_script}
+{ANSWER_SCRIPT}
 {LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
@@ -2991,13 +3020,14 @@ def verify_results_html(
         http = r.get("http_status", 0)
         dur = r.get("duration", 0)
         ts = str(r.get("ts") or "").replace("T", " ").replace("Z", "")
-        answer = escape(str(r.get("response") or ""))
+        answer = str(r.get("response") or "")
         rows.append(
             f'<tr><td class="ts" data-ts="{escape(str(r.get("ts") or ""), quote=True)}">{escape(ts)}</td>'
             f'<td>{prov}</td><td class="model">{mdl}</td>'
             f'<td>{thumb}</td>'
             f'<td class="status">{badge} HTTP {http} · {dur}s</td>'
-            f'<td class="cell"><div class="answer-md">{escape(answer)}</div></td></tr>'
+            f'<td class="cell"><div class="answer"><button type="button" class="copy-all">копировать</button>'
+            f'<div class="answer-md">{render_markdown(answer)}</div></div></td></tr>'
         )
     return (
         f'<h2>{heading}</h2>'
