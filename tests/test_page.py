@@ -1556,6 +1556,58 @@ class TestVerifyPage:
         assert "кот на картинке" in html
         assert "прошли: 1/1" in html
 
+class TestVerifyPage:
+    """Страница «Проверка»: провайдеры, форма, результаты с картинками."""
+
+    @staticmethod
+    def _providers() -> list[dict]:
+        return [
+            {"id": "ollama", "name": "Ollama", "model": "llama3.2",
+             "models": ["llama3.2", "qwen3"], "has_key": True, "enabled": True},
+            {"id": "gemini", "name": "Google Gemini", "model": "gemini-2.5-flash",
+             "models": ["gemini-2.5-flash"], "has_key": False, "enabled": True},
+        ]
+
+    def test_the_page_lists_providers_with_a_checkbox_and_a_model(self) -> None:
+        from core.page import verify_page
+
+        page = verify_page(self._providers())
+
+        assert 'name="providers"' in page
+        assert 'value="ollama"' in page
+        assert 'name="model_ollama"' in page
+        assert 'name="model_gemini"' in page
+        assert "ключ задан" in page
+        assert "без ключа" in page
+
+    def test_the_form_has_prompts_and_images(self) -> None:
+        from core.page import verify_page
+
+        page = verify_page(self._providers())
+
+        assert 'name="system_prompt"' in page
+        assert 'name="user_prompt"' in page
+        assert 'name="images"' in page
+        assert 'accept="image/*,.pdf"' in page
+        assert 'action="/verify/run"' in page
+
+    def test_results_show_a_thumbnail_and_the_answer(self) -> None:
+        from core.page import verify_results_html
+
+        images = ["data:image/png;base64,AAAA"]
+        results = [
+            {"provider": "ollama", "model": "llama3.2", "image_index": 0,
+             "ts": "2026-10-30T10:00:00Z", "status": "ok", "http_status": 200,
+             "duration": 1.0, "response": "кот на картинке"},
+        ]
+        html = verify_results_html(results, images=images,
+                                   timestamp="2026-10-30T10:00:00Z",
+                                   system_prompt="коротко", user_prompt="что на картинке?")
+
+        assert "data:image/png;base64,AAAA" in html  # миниатюра встроена
+        assert "кот на картинке" in html
+        assert "прошли: 1/1" in html
+
     def test_a_foreign_scheme_never_becomes_an_image(self) -> None:
         from core.page import verify_results_html
 
@@ -1565,3 +1617,34 @@ class TestVerifyPage:
             images=["javascript:alert(1)"],
         )
         assert "<img" not in html
+
+    def test_export_markdown_contains_everything(self) -> None:
+        from core.page import verify_export_markdown
+
+        images = ["data:image/png;base64,AAAA"]
+        results = [
+            {"provider": "ollama", "model": "llama3.2", "image_index": 0,
+             "ts": "2026-10-30T10:00:00Z", "status": "ok", "http_status": 200,
+             "duration": 1.0, "response": "кот на картинке"},
+        ]
+        md = verify_export_markdown(results, images=images,
+                                     timestamp="2026-10-30T10:00:00Z",
+                                     system_prompt="коротко", user_prompt="что на картинке?")
+
+        assert "# Проверка провайдеров" in md
+        assert "Системный промпт: коротко" in md
+        assert "Пользовательский промпт: что на картинке?" in md
+        assert "ollama" in md and "llama3.2" in md
+        assert "кот на картинке" in md
+        assert "data:image/png;base64,AAAA" in md  # картинка встроена
+        assert "✅" in md
+
+    def test_export_markdown_skips_unsafe_images(self) -> None:
+        from core.page import verify_export_markdown
+
+        md = verify_export_markdown(
+            [{"provider": "p", "model": "m", "image_index": 0, "ts": "2026-10-30T10:00:00Z",
+              "status": "ok", "http_status": 200, "duration": 1.0, "response": "ок"}],
+            images=["javascript:alert(1)"],
+        )
+        assert "javascript:" not in md

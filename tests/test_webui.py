@@ -2546,15 +2546,30 @@ class TestVerifyPageAccess:
         _, server, base = _harness([_entry()], verify_store=VerifyStore(tmp_path))
         return server, base
 
-    def test_a_guest_can_open_the_page(self, tmp_path) -> None:
-        server, base = self._build(tmp_path)
+    def test_export_returns_markdown_attachment(self, harness, tmp_path) -> None:
+        from storage.verify import VerifyStore
+
+        store = VerifyStore(tmp_path)
+        store.begin("ollama", "что на картинке?",
+                    system_prompt="коротко", images=["data:image/png;base64,AAAA"])
+        store.finish("ollama", [
+            {"provider": "ollama", "model": "llama3.2", "image_index": 0,
+             "ts": "2026-10-30T10:00:00Z", "status": "ok", "http_status": 200,
+             "duration": 1.0, "response": "кот на картинке"},
+        ], prompt="что на картинке?", system_prompt="коротко",
+           images=["data:image/png;base64,AAAA"])
+
+        _, server, base = _harness([_entry()], verify_store=store)
         try:
             with _client(base) as client:
                 _as_guest(client, "anna@mail")
-                response = client.get("/verify")
-                assert response.status_code == 200
-                assert 'name="providers"' in response.text
-                assert 'name="images"' in response.text
+                response = client.get("/verify/export")
+            assert response.status_code == 200
+            assert "attachment" in response.headers.get("content-disposition", "")
+            assert "# Проверка" in response.text
+            assert "коротко" in response.text
+            assert "кот на картинке" in response.text
+            assert "data:image/png;base64,AAAA" in response.text
         finally:
             server.shutdown()
             server.server_close()

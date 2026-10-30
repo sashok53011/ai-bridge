@@ -51,6 +51,7 @@ from core.page import (
     token_created_page,
     tokens_page,
     users_page,
+    verify_export_markdown,
     verify_page,
     verify_results_html,
 )
@@ -1040,6 +1041,29 @@ class WebUi:
                 self._send_json(handler, 200, {"running": False})
                 return
             self._send_json(handler, 200, self._verify_store.status())
+            return
+
+        if clean == "/verify/export":
+            if self._verify_store is None:
+                self._send_html(handler, 404, "нет хранилища")
+                return
+            last_run = self._verify_store.load()
+            md = verify_export_markdown(
+                last_run.get("results", []),
+                system_prompt=last_run.get("system_prompt", ""),
+                user_prompt=last_run.get("prompt", ""),
+                images=last_run.get("images", []),
+                timestamp=last_run.get("timestamp", ""),
+                provider=last_run.get("provider", ""),
+            )
+            body = md.encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/markdown; charset=utf-8")
+            handler.send_header("Content-Disposition",
+                                'attachment; filename="verify.md"')
+            handler.send_header("Content-Length", str(len(body)))
+            handler.end_headers()
+            handler.wfile.write(body)
             return
 
         if clean == "/users":

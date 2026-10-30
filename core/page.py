@@ -2880,11 +2880,76 @@ def verify_page(
 </form>
 {progress_html}
 <div id="verify-results">{results_html}</div>
+<p class="role"><a class="btn-ghost" href="/verify/export" download>сохранить как markdown</a>
+  <span class="role">— копия всего прогона (картинки встроены)</span></p>
 {poll_script}
 {LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
 
+
+def verify_export_markdown(
+    results: list,
+    *,
+    system_prompt: str = "",
+    user_prompt: str = "",
+    images: list[str] | None = None,
+    timestamp: str = "",
+    provider: str = "",
+) -> str:
+    """Результаты «Проверки» в markdown — для сохранения и пересылки.
+
+    Картинки встраиваются data-URI (как просил пользователь), чтобы файл
+    был самодостаточным. Чужие схемы (javascript:) не попадают.
+    """
+    images = images or []
+    lines: list[str] = []
+    lines.append("# Проверка провайдеров")
+    lines.append("")
+    if timestamp:
+        lines.append(f"Запуск: {timestamp}")
+    if provider:
+        lines.append(f"Провайдеры: {provider}")
+    if system_prompt:
+        lines.append(f"Системный промпт: {system_prompt}")
+    if user_prompt:
+        lines.append(f"Пользовательский промпт: {user_prompt}")
+    lines.append(f"Всего запросов: {len(results)}, прошли: {sum(1 for r in results if r.get('status') == 'ok')}")
+    lines.append("")
+
+    # Группируем по провайдеру, чтобы читалось.
+    by_provider: dict[str, list] = {}
+    for r in results:
+        by_provider.setdefault(str(r.get("provider") or "—"), []).append(r)
+
+    for prov, rows in by_provider.items():
+        lines.append(f"## {prov}")
+        lines.append("")
+        for r in rows:
+            idx = int(r.get("image_index") or 0)
+            status = "✅" if r.get("status") == "ok" else "❌"
+            http = r.get("http_status", 0)
+            dur = r.get("duration", 0)
+            model = str(r.get("model") or "—")
+            answer = str(r.get("response") or "")
+            lines.append(f"### Картинка {idx + 1} — {model}")
+            lines.append("")
+            if 0 <= idx < len(images):
+                src = images[idx].strip()
+                if src.startswith(("http://", "https://", "data:image/")):
+                    lines.append(f"![картинка {idx + 1}]({src})")
+                    lines.append("")
+            lines.append(f"**Статус**: {status} HTTP {http} · {dur}s")
+            lines.append("")
+            lines.append("**Ответ**:")
+            lines.append("")
+            lines.append(answer)
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+    if not results:
+        lines.append("_результатов пока нет_")
+    return "\n".join(lines)
 
 def verify_results_html(
     results: list,
