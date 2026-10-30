@@ -320,6 +320,10 @@ def _serve(
     from storage.autotest import AutotestStore
     autotest_store = AutotestStore(root)
 
+    # Последний прогон «Проверки» (страница /verify, любой вошедший).
+    from storage.verify import VerifyStore
+    verify_store = VerifyStore(root)
+
     # Миграция старого плоского whitelist.txt: раскладка по группам по
     # выученной подписи модели. Один раз при старте, повтор безопасен.
     def _group_of_legacy(name: str) -> str:
@@ -452,6 +456,7 @@ def _serve(
         refresh=refresh_catalogue,
         rules=rules,
         autotest_store=autotest_store,
+        verify_store=verify_store,
         board=board,
         mail=mail,
         notify=notify,
@@ -487,6 +492,7 @@ def _serve(
         user_dir_for=user_dir_for,
         rules=rules,
         autotest_store=autotest_store,
+        verify_store=verify_store,
     )
 
 
