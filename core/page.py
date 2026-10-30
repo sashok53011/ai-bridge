@@ -3258,8 +3258,12 @@ def test_page(
             f'<p class="notice bad">{escape(error)}</p>' if error else ""
         )
         # Ответ — markdown (ссылки и ![картинки] оживают; чужой HTML
-        # рендерер экранирует, как и в автотестах).
-        answer_html = f"<div class=\"answer-md\">{render_markdown(answer)}</div>" if answer else ""
+        # рендерер экранирует, как и в автотестах). Кнопка «копировать»
+        # кладёт всё тело (включая codeblocks) в буфер.
+        answer_html = (
+            f'<div class="answer"><button type="button" class="copy-all">копировать</button>'
+            f'<div class="answer-md">{render_markdown(answer)}</div></div>'
+        ) if answer else ""
         chat_html = (
             f'<p class="role">Тест — настоящий, но крошечный запрос: на платной модели он\n'
             f'стоит доли цента.</p>\n'
@@ -3508,6 +3512,8 @@ def test_page(
 {embed_html}
 {stt_html}
 {voice_html}
+{ANSWER_SCRIPT}
+{LOCAL_TIME_SCRIPT}
 </body>
 </html>"""
 
