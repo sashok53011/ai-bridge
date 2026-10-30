@@ -51,6 +51,8 @@ from core.page import (
     token_created_page,
     tokens_page,
     users_page,
+    verify_page,
+    verify_results_html,
 )
 from providers import copilot
 from providers.client import NeedsKeyError, PocketBase, Provider, ServerError
@@ -220,6 +222,7 @@ class WebUi:
         refresh=None,  # Callable[[], None] — обновить кэш каталога после правок
         rules=None,  # storage.rules.RuleStore | None
         autotest_store=None,  # storage.autotest.AutotestStore | None
+        verify_store=None,  # storage.verify.VerifyStore | None — «Проверка» (любой вошедший)
         board=None,  # storage.board.BoardStore | None — доска «Нашёл bug»
         mail=None,  # storage.mail.MailStore | None — личная почта участников
         notify=None,  # storage.notify.NotifyStore | None — токен Telegram-бота
@@ -244,6 +247,7 @@ class WebUi:
         self._refresh = refresh
         self._rules = rules
         self._autotest_store = autotest_store
+        self._verify_store = verify_store
         self._board = board
         self._mail = mail
         # Токен Telegram-бота: стор есть всегда (AI_BRIDGE_HOME),
@@ -302,6 +306,43 @@ class WebUi:
         detail = f" «{prompt[:60]}»" if prompt else ""
         tail = f" ({model})" if model else ""
         self._event("тест", who, f"{entry['name']}: {what}{detail} — готово{tail}")
+
+    def _verify_page_html(self, viewer: dict, last_run: dict | None,
+                          progress: dict | None, notice: str, system_prompt: str,
+                          user_prompt: str) -> str:
+        entries = self._entries_for(viewer)
+        providers = []
+        for entry in entries:
+            pid = str(entry.get("id") or "")
+            key = ""
+            try:
+                key = self._space_of(viewer).keys.get(pid) if hasattr(self, "_space_of") else ""
+            except Exception:  # noqa: BLE001
+                key = ""
+            # Ключи per-user: берём из личного пространства.
+            try:
+                space = self._spaces.for_user(str(viewer["id"]))
+                key = space.keys.get(pid)
+            except Exception:  # noqa: BLE001
+                key = ""
+            models = self._models_of(entry, key)
+            providers.append({
+                "id": pid,
+                "name": str(entry.get("name") or pid),
+                "model": str(entry.get("model") or ""),
+                "models": models,
+                "has_key": bool(key),
+                "enabled": bool(entry.get("enabled")),
+            })
+        return verify_page(
+            providers,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            notice=notice,
+            can_edit=str(viewer.get("role") or "") == ROLE_ADMIN,
+            last_run=last_run,
+            progress=progress,
+        )
 
     def _refresh_now(self) -> None:
         """Обновить кэш каталога сразу после админ-правки (если передан)."""
@@ -891,6 +932,114 @@ class WebUi:
                 self._send_json(handler, 200, {"running": False})
                 return
             self._send_json(handler, 200, self._autotest_store.status())
+            return
+
+        if clean == "/verify/results":
+            if self._verify_store is None:
+                self._send_html(handler, 200, "")
+                return
+            status = self._verify_store.status()
+            html = verify_results_html(
+                self._verify_store.partial(),
+                provider=status.get("provider", ""),
+                timestamp=status.get("started_at", ""),
+                system_prompt=status.get("system_prompt", ""),
+                user_prompt=status.get("prompt", ""),
+                images=self._verify_store.partial_images() if hasattr(self._verify_store, "partial_images") else [],
+                running=bool(status.get("running")),
+            )
+            self._send_html(handler, 200, html)
+            return
+
+        if clean == "/verify/status":
+            if self._verify_store is None:
+                self._send_json(handler, 200, {"running": False})
+                return
+            self._send_json(handler, 200, self._verify_store.status())
+            return
+
+        if clean == "/verify":
+            last_run = None
+            progress = None
+            system_prompt = ""
+            user_prompt = ""
+            if self._verify_store is not None:
+                status = self._verify_store.status()
+                if status.get("running"):
+                    progress = status
+                    last_run = {
+                        "provider": status.get("provider", ""),
+                        "timestamp": status.get("started_at", ""),
+                        "system_prompt": status.get("system_prompt", ""),
+                        "prompt": status.get("prompt", ""),
+                        "images": self._verify_store.partial_images(),
+                        "results": self._verify_store.partial(),
+                    }
+                else:
+                    last_run = self._verify_store.load()
+                system_prompt = (last_run or {}).get("system_prompt", "")
+                user_prompt = (last_run or {}).get("prompt", "")
+            self._send_html(
+                handler,
+                200,
+                self._verify_page_html(
+                    viewer, last_run, progress, notice, system_prompt, user_prompt,
+                ),
+            )
+            return
+
+        if clean == "/verify":
+            last_run = None
+            progress = None
+            system_prompt = ""
+            user_prompt = ""
+            if self._verify_store is not None:
+                status = self._verify_store.status()
+                if status.get("running"):
+                    progress = status
+                    last_run = {
+                        "provider": status.get("provider", ""),
+                        "timestamp": status.get("started_at", ""),
+                        "system_prompt": status.get("system_prompt", ""),
+                        "prompt": status.get("prompt", ""),
+                        "images": self._verify_store.partial_images(),
+                        "results": self._verify_store.partial(),
+                    }
+                else:
+                    last_run = self._verify_store.load()
+                system_prompt = (last_run or {}).get("system_prompt", "")
+                user_prompt = (last_run or {}).get("prompt", "")
+            self._send_html(
+                handler,
+                200,
+                self._verify_page_html(
+                    viewer, last_run, progress, notice, system_prompt, user_prompt,
+                ),
+            )
+            return
+
+        if clean == "/verify/results":
+            if self._verify_store is None:
+                self._send_html(handler, 200, "")
+                return
+            status = self._verify_store.status()
+            html = verify_results_html(
+                self._verify_store.partial(),
+                provider=status.get("provider", ""),
+                timestamp=status.get("started_at", ""),
+                system_prompt=status.get("system_prompt", ""),
+                user_prompt=status.get("prompt", ""),
+                images=self._verify_store.partial_images(),
+                running=bool(status.get("running")),
+            )
+            self._send_html(handler, 200, html)
+            return
+
+        if clean == "/verify/status":
+            if self._verify_store is None:
+                self._send_json(handler, 200, {"running": False})
+                return
+            self._send_json(handler, 200, self._verify_store.status())
             return
 
         if clean == "/users":
@@ -2049,6 +2198,119 @@ class WebUi:
             # автообновление по окончании) повторно отправила бы форму —
             # и тест стартовал бы снова и снова.
             self._redirect(handler, "Тест пошёл — прогресс ниже.", to="/autotest")
+            return
+
+        if clean == "/verify/run":
+            if self._verify_store is None:
+                self._redirect(handler, "хранилище не подключено", bad=True, to="/verify")
+                return
+
+            system_prompt = field("system_prompt")
+            user_prompt = field("user_prompt")
+            if not user_prompt:
+                self._redirect(handler, "нужен user prompt", bad=True, to="/verify")
+                return
+
+            # Провайдеры: чекбокс «providers» + «model_<id>» на каждого.
+            chosen_ids = form.get("providers", [])
+            entries = self._entries_for(viewer)
+            by_id = {str(e.get("id") or ""): e for e in entries}
+            specs = []
+            for pid in chosen_ids:
+                entry = by_id.get(pid)
+                if entry is None:
+                    continue
+                model = field(f"model_{pid}")
+                if not model:
+                    model = str(entry.get("model") or "")
+                specs.append({"id": pid, "model": model})
+            if not specs:
+                self._redirect(handler, "выберите хотя бы одного провайдера", bad=True,
+                               to="/verify")
+                return
+
+            # Картинки: JPG/PNG/WEBP → data-URI; PDF → страницы через PyMuPDF.
+            images: list[str] = []
+            raw_files = files.get("images", [])
+            if not isinstance(raw_files, list):
+                raw_files = [raw_files] if raw_files else []
+            uploaded = file_field("images")
+            if not raw_files and uploaded is not None:
+                raw_files = [uploaded]
+            for item in raw_files:
+                if not item:
+                    continue
+                filename, content = item if isinstance(item, tuple) else (item[0], item[1])
+                if not content:
+                    continue
+                import base64 as _b64
+                import mimetypes as _mt
+
+                mime = _mt.guess_type(filename)[0] or "image/jpeg"
+                if filename.lower().endswith(".pdf") or mime == "application/pdf":
+                    try:
+                        from core.pdf import render_pdf
+
+                        for page_bytes in render_pdf(content):
+                            images.append("data:image/png;base64,"
+                                          + _b64.b64encode(page_bytes).decode("ascii"))
+                    except Exception as exc:  # noqa: BLE001
+                        self._redirect(
+                            handler, f"PDF не разобрался: {exc}", bad=True, to="/verify"
+                        )
+                        return
+                else:
+                    images.append("data:" + mime + ";base64,"
+                                  + _b64.b64encode(content).decode("ascii"))
+
+            if not images:
+                self._redirect(handler, "загрузите хотя бы одну картинку или PDF",
+                               bad=True, to="/verify")
+                return
+
+            store = self._verify_store
+            if store is not None and store.status().get("running"):
+                self._redirect(handler, "проверка уже идёт — дождитесь окончания",
+                               bad=True, to="/verify")
+                return
+            if store is not None:
+                store.begin(", ".join(s["id"] for s in specs), user_prompt,
+                            system_prompt=system_prompt, images=images)
+
+            gateway = handler.server.gateway
+            if gateway is None:
+                self._redirect(handler, "гейтвей не подключён", bad=True, to="/verify")
+                return
+
+            def background() -> None:
+                try:
+                    result = gateway.run_verify(specs, system_prompt, user_prompt, images,
+                                                record=False)
+                    if store is not None and result.get("error"):
+                        store.fail(str(result["error"]))
+                except Exception as exc:  # noqa: BLE001
+                    if store is not None:
+                        store.fail(str(exc))
+
+            threading.Thread(target=background, daemon=True).start()
+
+            self._event(
+                "проверка", str(viewer.get("email") or ""),
+                f"запущена: {len(specs)} провайдеров × {len(images)} картинок",
+            )
+            self._redirect(handler, "проверка запущена", to="/verify")
+            return
+
+        if clean == "/verify/stop":
+            if self._verify_store is None:
+                self._redirect(handler, "хранилище не подключено", bad=True, to="/verify")
+                return
+            status = self._verify_store.request_stop()
+            if status.get("running"):
+                self._event("проверка", str(viewer.get("email") or ""), "остановка запрошена")
+                self._redirect(handler, "останавливаю после текущего запроса…", to="/verify")
+            else:
+                self._redirect(handler, "проверка сейчас не идёт", bad=True, to="/verify")
             return
 
         if clean == "/users/block":

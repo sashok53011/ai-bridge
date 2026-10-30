@@ -2823,6 +2823,124 @@ class TestRequestRules:
         assert _needs_of(body, None) == ()
 
 
+class TestVerify:
+    """Кросс-провайдерная проверка на картинках: прогон и честный отчёт."""
+
+    @staticmethod
+    def _build(tmp_path, handler):
+        from storage.capabilities import CapabilityStore
+        from storage.lists import ModelLists
+
+        def factory(url: str, **kwargs):
+            base = url.split("/v1")[0]
+            return Provider(url, transport=httpx.MockTransport(handler), **kwargs)
+
+        return Gateway(
+            lambda: [_entry(), _entry(id="b", name="B", url="http://b.test/v1")],
+            KeyStore(tmp_path), provider_factory=factory,
+            lists=ModelLists(tmp_path), capabilities=CapabilityStore(tmp_path),
+        )
+
+    def test_two_providers_times_two_images(self, tmp_path) -> None:
+        seen: list = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            seen.append((body["model"], body["messages"][1]["content"][1]["image_url"]["url"][:6]))
+            return httpx.Response(200, json={"choices": [
+                {"message": {"content": "ок"}},
+            ]})
+
+        gateway = self._build(tmp_path, handler)
+        gateway._keys.set("ollama", "sk-1")
+        gateway._keys.set("b", "sk-2")
+
+        images = ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"]
+        result = gateway.run_verify(
+            [{"id": "ollama", "model": "m-1"}, {"id": "b", "model": "m-2"}],
+            "system prompt", "что на картинке?", images,
+        )
+
+        assert result.get('error') is None
+        assert len(result["results"]) == 4
+        assert all(r["status"] == "ok" for r in result["results"])
+        assert [r["provider"] for r in result["results"]] == [
+            "ollama", "ollama", "b", "b",
+        ]
+        assert [r["image_index"] for r in result["results"]] == [0, 1, 0, 1]
+        assert seen == [("m-1", "data:i"), ("m-1", "data:i"),
+                        ("m-2", "data:i"), ("m-2", "data:i")]
+
+    def test_a_missing_key_is_an_honest_row(self, tmp_path) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+        gateway = self._build(tmp_path, handler)
+        # ключ только у первого
+        gateway._keys.set("ollama", "sk-1")
+
+        result = gateway.run_verify(
+            [{"id": "ollama", "model": "m-1"}, {"id": "b", "model": "m-2"}],
+            "", "что на картинке?",
+            ["data:image/png;base64,AAAA"],
+        )
+
+        rows = result["results"]
+        assert len(rows) == 2
+        assert rows[0]["status"] == "ok"
+        assert rows[1]["status"] == "fail"
+        assert "ключ" in rows[1]["response"]
+
+    def test_missing_provider_gets_a_row_per_image(self, tmp_path) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+        gateway = self._build(tmp_path, handler)
+        gateway._keys.set("ollama", "sk-1")
+
+        result = gateway.run_verify(
+            [{"id": "nope", "model": "m-x"}, {"id": "ollama", "model": "m-1"}],
+            "", "q", ["data:image/png;base64,AAAA", "data:image/png;base64,BBBB"],
+        )
+
+        assert len(result["results"]) == 4
+        assert result["results"][0]["provider"] == "nope"
+        assert result["results"][0]["status"] == "fail"
+        assert "не найден" in result["results"][0]["response"]
+        assert result["results"][2]["provider"] == "ollama"
+        assert result["results"][2]["status"] == "ok"
+
+    def test_empty_inputs_are_honest_errors(self, tmp_path) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
+
+        gateway = self._build(tmp_path, handler)
+
+        assert gateway.run_verify([], "", "q", ["x"])["error"] == "не выбрано ни одного провайдера"
+        assert gateway.run_verify([{"id": "ollama", "model": "m"}], "", "q", [])["error"] == "нет картинок"
+        assert gateway.run_verify([{"id": "ollama", "model": "m"}], "", "  ", ["x"])["error"] == "промпт пользователя не задан"
+
+    def test_a_vision_refusal_is_a_fail_not_a_crash(self, tmp_path) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(400, json={"error": {"message": "does not support image"}})
+
+        gateway = self._build(tmp_path, handler)
+        gateway._keys.set("ollama", "sk-1")
+
+        result = gateway.run_verify(
+            [{"id": "ollama", "model": "m-1"}], "", "q",
+            ["data:image/png;base64,AAAA"],
+        )
+
+        row = result["results"][0]
+        assert row["status"] == "fail"
+        assert "картинки" in row["response"] or "image" in row["response"].lower()
+
+
 class TestAutotestMedia:
     """Медиа-автотест: генерация картинок/звука/видео и векторы.
 
@@ -3229,7 +3347,9 @@ class TestImageTest:
 
     def test_without_prompt_model_or_key_nothing_is_sent(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise AssertionError("запроса быть не должно")
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
 
         from service.gateway import generate_image
 
@@ -3428,7 +3548,9 @@ class TestImageTest:
 
     def test_audio_needs_text_and_key(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise AssertionError("запроса быть не должно")
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
 
         from service.gateway import generate_audio
 
@@ -3440,7 +3562,9 @@ class TestImageTest:
 
     def test_3d_needs_an_http_image_and_a_model(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise AssertionError("запроса быть не должно")
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
 
         from service.gateway import generate_3d
 
@@ -3514,7 +3638,9 @@ class TestImageTest:
 
     def test_embedding_needs_text_model_and_key(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise AssertionError("запроса быть не должно")
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
 
         from service.gateway import embed_text
 
@@ -3614,7 +3740,9 @@ class TestImageTest:
 
     def test_voice_processing_needs_file_model_and_known_action(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            raise AssertionError("запроса быть не должно")
+            if "b.test" in str(request.url):
+                raise AssertionError("запроса к b быть не должно")
+            return httpx.Response(200, json={"choices": [{"message": {"content": "ок"}}]})
 
         from service.gateway import process_audio
 

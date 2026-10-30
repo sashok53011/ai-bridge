@@ -169,6 +169,8 @@ def harness(tmp_path):
         # как в жизни: написал один, увидел другой.
         kwargs.setdefault("board", BoardStore(tmp_path))
         kwargs.setdefault("mail", MailStore(tmp_path))
+        from storage.verify import VerifyStore
+        kwargs.setdefault("verify_store", VerifyStore(tmp_path))
         item = _harness(entries, **kwargs)
         holders.append(item)
         return item[0], item[2]  # (каталог-мок, base)
@@ -2454,6 +2456,105 @@ class TestAutotestRun:
 
                 assert client.post("/autotest/run", data={"provider": "x"}).status_code == 403
                 assert client.post("/autotest/stop").status_code == 403
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestVerifyPage:
+    """Страница «Проверка»: доступна всем вошедшим, прогон идёт в фоне."""
+
+    @staticmethod
+    def _fake_gateway(runs: list) -> object:
+        class _GW:
+            def run_verify(self, provider_specs, system_prompt, user_prompt,
+                           images, record=False):
+                runs.append({"specs": provider_specs, "system": system_prompt,
+                             "user": user_prompt, "n_images": len(images)})
+                return {"provider": ",".join(s["id"] for s in provider_specs),
+                        "results": [], "prompt": user_prompt,
+                        "system_prompt": system_prompt, "images": images}
+
+        return _GW()
+
+    @staticmethod
+    def _wait_for(predicate, timeout: float = 3.0) -> bool:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.05)
+        return False
+
+    @staticmethod
+    def _build(tmp_path):
+        from storage.verify import VerifyStore
+
+        _, server, base = _harness([_entry()], verify_store=VerifyStore(tmp_path))
+        return server, base
+
+    def test_a_run_goes_through_for_an_admin(self, tmp_path) -> None:
+        server, base = self._build(tmp_path)
+        try:
+            runs: list = []
+            server.gateway = self._fake_gateway(runs)
+            with _client(base) as client:
+                _as_admin(client)
+                response = client.get("/verify")
+                assert response.status_code == 200
+                assert 'name="providers"' in response.text
+                assert 'name="images"' in response.text
+
+                # Один провайдер + одна маленькая картинка.
+                body = (
+                    "--B\r\n"
+                    'Content-Disposition: form-data; name="providers"\r\n\r\nollama\r\n'
+                    "--B\r\n"
+                    'Content-Disposition: form-data; name="model_ollama"\r\n\r\nllama3.2\r\n'
+                    "--B\r\n"
+                    'Content-Disposition: form-data; name="user_prompt"\r\n\r\nчто на картинке?\r\n'
+                    "--B\r\n"
+                    'Content-Disposition: form-data; name="images"; filename="t.png"\r\n'
+                    "Content-Type: image/png\r\n\r\n"
+                    "PNGDATA\r\n"
+                    "--B--\r\n"
+                ).encode()
+                response = client.post(
+                    "/verify/run", content=body,
+                    headers={"Content-Type": "multipart/form-data; boundary=B"},
+                    follow_redirects=False,
+                )
+                assert response.status_code == 303
+                assert response.headers["location"].startswith("/verify")
+                assert self._wait_for(lambda: len(runs) == 1)
+                assert runs[0]["n_images"] == 1
+                assert runs[0]["specs"][0]["id"] == "ollama"
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class TestVerifyPageAccess:
+    """Доступ к «Проверке»: любой вошедший (не только админ)."""
+
+    @staticmethod
+    def _build(tmp_path):
+        from storage.verify import VerifyStore
+
+        _, server, base = _harness([_entry()], verify_store=VerifyStore(tmp_path))
+        return server, base
+
+    def test_a_guest_can_open_the_page(self, tmp_path) -> None:
+        server, base = self._build(tmp_path)
+        try:
+            with _client(base) as client:
+                _as_guest(client, "anna@mail")
+                response = client.get("/verify")
+                assert response.status_code == 200
+                assert 'name="providers"' in response.text
+                assert 'name="images"' in response.text
         finally:
             server.shutdown()
             server.server_close()

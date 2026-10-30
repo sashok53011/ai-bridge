@@ -1097,6 +1097,7 @@ class Gateway:
         user_dir_for=None,  # Callable[[str], Path | None] — каталог человека (серый список)
         rules=None,  # storage.rules.RuleStore | None — «строка → действие»
         autotest_store=None,  # storage.autotest.AutotestStore | None
+        verify_store=None,  # storage.verify.VerifyStore | None — «Проверка»
     ) -> None:
         self._entries_provider = entries_provider
         self._keys = keys
@@ -1115,6 +1116,7 @@ class Gateway:
         self._user_dir_for = user_dir_for
         self._rules = rules
         self._autotest_store = autotest_store
+        self._verify_store = verify_store
         # Реестр доступа: {человек: (время, годен?)} и память о поломке.
         self._access_cache: dict[str, tuple[float, bool]] = {}
         self._access_down_until = 0.0
@@ -2027,6 +2029,190 @@ class Gateway:
                     "stopped": True}
         return {"provider": provider_id, "results": results, "prompt": prompt}
 
+    def run_verify(
+        self,
+        provider_specs: list[dict],
+        system_prompt: str,
+        user_prompt: str,
+        images: list[str],
+        *,
+        record: bool = False,
+    ) -> dict:
+        """Проверка: несколько провайдеров × несколько картинок.
+
+        Каждая картинка — отдельный запрос (vision), ответ и время
+        фиксируются в строке результата. Чистый отчёт: способности и
+        списки не меняются, даже если ``record=True`` (пользователь
+        выбрал «чисто отчёт»).
+        """
+        import time
+
+        system_prompt = (system_prompt or "").strip()
+        user_prompt = (user_prompt or "").strip()
+        images = [str(x) for x in (images or []) if str(x).strip()]
+        if not user_prompt:
+            return {"provider": "", "results": [], "error": "промпт пользователя не задан"}
+        if not images:
+            return {"provider": "", "results": [], "error": "нет картинок"}
+        if not provider_specs:
+            return {"provider": "", "results": [], "error": "не выбрано ни одного провайдера"}
+
+        entries = self._entries_provider()
+        by_id = {str(e.get("id") or ""): e for e in entries}
+
+        # План: провайдер × картинка.
+        plan: list[tuple[str, str, int]] = []
+        results: list[dict] = []
+        for spec in provider_specs:
+            pid = str(spec.get("id") or "").strip()
+            model = str(spec.get("model") or "").strip()
+            entry = by_id.get(pid)
+            if entry is None:
+                for index in range(len(images)):
+                    results.append(self._verify_fail(pid, model, index, "провайдер не найден"))
+                continue
+            for index in range(len(images)):
+                plan.append((pid, model, index))
+
+        total = len(plan)
+        if self._verify_store is not None:
+            self._verify_store.plan(total)
+
+        stopped = False
+        for pid, model, index in plan:
+            if self._verify_store is not None and self._verify_store.stop_requested():
+                stopped = True
+                break
+            entry = by_id.get(pid)
+            if entry is None:
+                continue
+            model = model or str(entry.get("model") or "").strip()
+            if self._verify_store is not None:
+                self._verify_store.tick(entry.get("name") or pid, f"картинка {index + 1}")
+            result = self._run_one_verify(entry, model, system_prompt, user_prompt,
+                                         images[index], index)
+            results.append(result)
+            if self._verify_store is not None:
+                self._verify_store.record(result)
+                self._verify_store.advance()
+
+        provider_list = ", ".join(str(s.get("id") or "") for s in provider_specs)
+        if self._verify_store is not None:
+            self._verify_store.finish(
+                provider_list, results, prompt=user_prompt,
+                system_prompt=system_prompt, images=images,
+            )
+
+        if stopped:
+            return {"provider": provider_list, "results": results,
+                    "prompt": user_prompt, "system_prompt": system_prompt,
+                    "images": images, "stopped": True}
+        return {"provider": provider_list, "results": results,
+                "prompt": user_prompt, "system_prompt": system_prompt,
+                "images": images}
+
+    def _verify_fail(self, provider_id: str, model: str, image_index: int,
+                     text: str) -> dict:
+        return {
+            "provider": provider_id,
+            "model": model,
+            "image_index": image_index,
+            "ts": _now_iso(),
+            "status": "fail",
+            "http_status": 0,
+            "response": text,
+            "duration": 0.0,
+            "req": "",
+            "resp": "",
+        }
+
+    def _run_one_verify(self, entry: dict, model: str, system_prompt: str,
+                        user_prompt: str, image: str, image_index: int) -> dict:
+        import time
+
+        key = self._keys.get(entry["id"])
+        if not model:
+            return self._verify_fail(str(entry.get("id") or ""), model, image_index,
+                                     "у провайдера не выбрана модель")
+        if not key:
+            return self._verify_fail(str(entry.get("id") or ""), model, image_index,
+                                     "нужен ключ — введите его кнопкой «ключ»")
+
+        body: dict = {"model": model, "messages": []}
+        messages: list = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": [
+            {"type": "text", "text": user_prompt},
+            {"type": "image_url", "image_url": {"url": image}},
+        ]})
+        body["messages"] = messages
+        body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        req_text = body_bytes.decode("utf-8", errors="replace")
+
+        client = self._provider_factory(entry["url"], timeout=60.0)
+        start = time.monotonic()
+        try:
+            response = client.forward_chat(body_bytes, api_key=key, timeout=60.0, stream=False)
+            elapsed = round(time.monotonic() - start, 1)
+            raw = response.read() if hasattr(response, "read") else b""
+            resp_text = raw.decode("utf-8", errors="replace")
+            status_code = getattr(response, "status_code", 0)
+            if status_code >= 400:
+                result = {
+                    "provider": str(entry.get("id") or ""),
+                    "model": model,
+                    "image_index": image_index,
+                    "ts": _now_iso(),
+                    "status": "fail",
+                    "http_status": status_code,
+                    "response": f"HTTP {status_code}: {resp_text}",
+                    "duration": elapsed,
+                    "req": req_text,
+                    "resp": resp_text,
+                }
+            else:
+                try:
+                    data = json.loads(resp_text) if resp_text else {}
+                except ValueError:
+                    data = {}
+                content = ""
+                if isinstance(data, dict) and "choices" in data and data["choices"]:
+                    msg = data["choices"][0].get("message", {}) or {}
+                    content = msg.get("content") or ""
+                elif isinstance(data, dict) and data.get("error"):
+                    content = str(data["error"])
+                else:
+                    content = resp_text
+                result = {
+                    "provider": str(entry.get("id") or ""),
+                    "model": model,
+                    "image_index": image_index,
+                    "ts": _now_iso(),
+                    "status": "ok",
+                    "http_status": status_code,
+                    "response": content,
+                    "duration": elapsed,
+                    "req": req_text,
+                    "resp": resp_text,
+                }
+            response.close()
+            return result
+        except Exception as exc:  # noqa: BLE001
+            elapsed = round(time.monotonic() - start, 1)
+            return {
+                "provider": str(entry.get("id") or ""),
+                "model": model,
+                "image_index": image_index,
+                "ts": _now_iso(),
+                "status": "error",
+                "http_status": 0,
+                "response": str(exc),
+                "duration": elapsed,
+                "req": req_text,
+                "resp": "",
+            }
+
     def _run_one_autotest(self, entry: dict, model: str, test_type: str,
                           image_b64: str, prompt: str, *, record: bool,
                           voice: str = "", audio: bytes | None = None,
@@ -2900,6 +3086,7 @@ def serve(
     user_dir_for=None,
     rules=None,
     autotest_store=None,
+    verify_store=None,
 ) -> int:
     """Слушает, пока не придёт Ctrl+C. Возвращает код выхода.
 
@@ -2921,6 +3108,7 @@ def serve(
         api_gate=api_gate, access_checker=access_checker, event_log=event_log,
         usage_store=usage_store, reputation=reputation, capabilities=capabilities,
         lists=lists, user_dir_for=user_dir_for, rules=rules, autotest_store=autotest_store,
+        verify_store=verify_store,
     )
     server = _Server((host, port), _Handler)
     server.gateway = gateway  # type: ignore[attr-defined]

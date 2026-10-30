@@ -220,6 +220,7 @@ def _nav(*, can_edit: bool) -> str:
     links = [
         '<a href="/">каталог</a>',
         '<a href="/stats">статистика</a>',
+        '<a href="/verify">проверка</a>',
         '<a href="/tokens">приложения и токены</a>',
         '<a href="/messages">сообщения</a>',
         '<a href="/bugs">нашёл bug</a>',
@@ -2730,6 +2731,220 @@ def autotest_page(
 </html>"""
 
 
+def verify_page(
+    providers: list[dict],
+    *,
+    system_prompt: str = "",
+    user_prompt: str = "",
+    notice: str = "",
+    can_edit: bool = False,
+    last_run: dict | None = None,
+    progress: dict | None = None,
+) -> str:
+    """Проверка: несколько провайдеров × несколько картинок, один прогон.
+
+    Каждый провайдер — одной моделью (выбирается в таблице) и одной
+    или несколькими картинками. Отчёт чистый: способности и списки не
+    меняются. ``providers`` — каталог глазами вошедшего (с has_key,
+    models, enabled).
+    """
+    progress = progress or {}
+    running = bool(progress.get("running"))
+    last_run = last_run or {"results": [], "timestamp": "", "images": []}
+    results = last_run.get("results") or []
+    images = last_run.get("images") or []
+
+    notice_html = f'<p class="notice{" bad" if False else ""}">{escape(notice)}</p>' if notice else ""
+
+    # Таблица провайдеров: чекбокс «включить» + выбор одной модели.
+    rows = []
+    for entry in providers:
+        pid = escape(str(entry.get("id") or ""), quote=True)
+        name = escape(str(entry.get("name") or entry.get("id") or ""))
+        models = entry.get("models") or []
+        current = str(entry.get("model") or "")
+        options = [f'<option value="">как настроено ({escape(current or "—")})</option>']
+        for m in models:
+            selected = " selected" if m == current else ""
+            options.append(f'<option value="{escape(str(m), quote=True)}"{selected}>{escape(str(m))}</option>')
+        key_hint = "ключ задан" if entry.get("has_key") else "без ключа"
+        disabled = "" if (entry.get("has_key") and (models or current)) else "disabled"
+        rows.append(
+            f'<tr><td><input type="checkbox" name="providers" value="{pid}"></td>'
+            f'<td>{name}<span class="role"> · {escape(key_hint)}</span></td>'
+            f'<td><select name="model_{pid}">{"".join(options)}</select></td></tr>'
+        )
+    providers_table = (
+        f'<div class="card"><table>'
+        f'<tr><th></th><th>провайдер</th><th>модель (одна на прогон)</th></tr>'
+        + "\n".join(rows) +
+        f'</table></div>'
+    ) if rows else '<p class="role">провайдеров нет</p>'
+
+    progress_html = ""
+    if running:
+        done = int(progress.get("done") or 0)
+        total = int(progress.get("total") or 0)
+        pct = int(done * 100 / total) if total else 0
+        progress_html = (
+            f'<div class="progress-block" id="progress">'
+            f'<h2>Идёт проверка</h2>'
+            f'<p class="role">{escape(str(progress.get("model") or "—"))} · '
+            f'{done} из {total} ({pct}%)</p>'
+            f'<progress id="prog-bar" max="100" value="{pct}"></progress>'
+            f'<form method="post" action="/verify/stop" style="margin-top:.5rem">'
+            f'<button type="submit" class="ghost danger">остановить</button></form>'
+            f'</div>'
+        )
+
+    results_html = verify_results_html(
+        results,
+        provider=str(last_run.get("provider") or ""),
+        timestamp=str(last_run.get("timestamp") or ""),
+        system_prompt=str(last_run.get("system_prompt") or ""),
+        user_prompt=str(last_run.get("prompt") or ""),
+        images=images,
+        running=running,
+    )
+
+    notice_html = f'<p class="notice{" bad" if False else ""}">{escape(notice)}</p>' if notice else ""
+
+    # Polling — по образцу автотеста: статус раз в секунду, результаты
+    # подгружаются, пока идёт прогон.
+    poll_script = ""
+    if running:
+        poll_script = """<script>
+(function(){
+  var settled = false;
+  function poll(){
+    fetch("/verify/status", {cache: "no-store"}).then(function(r){return r.json();})
+      .then(function(s){
+        if (s.running) {
+          var done = s.done || 0, total = s.total || 0;
+          var pct = total ? Math.round(done * 100 / total) : 0;
+          var bar = document.getElementById("prog-bar");
+          if (bar) bar.value = pct;
+          var t = document.querySelector("#progress .role");
+          if (t) t.textContent = (s.model || "—") + " · " + done + " из " + total + " (" + pct + "%)";
+          setTimeout(poll, 1000);
+        } else if (!settled) {
+          settled = true;
+          fetch("/verify/results", {cache: "no-store"})
+            .then(function(r){return r.text();})
+            .then(function(html){
+              var wrap = document.getElementById("verify-results");
+              if (wrap) wrap.innerHTML = html;
+            });
+          setTimeout(function(){ location.reload(); }, 500);
+        }
+      }).catch(function(){ setTimeout(poll, 2000); });
+  }
+  poll();
+})();
+</script>"""
+
+    return f"""<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Проверка провайдеров — AI-приставка</title>
+<style>
+{_style()}
+  .verify-th {{ white-space: nowrap; }}
+  .verify-img {{ max-width: 6rem; max-height: 6rem; border-radius: .4rem; display: block; }}
+  table.verify results td {{ vertical-align: top; }}
+</style>
+</head>
+<body>
+{_nav(can_edit=can_edit)}
+<h1>Проверка провайдеров на картинках</h1>
+{notice_html}
+<p class="role">Один прогон: выбранные провайдеры × выбранные картинки.
+Каждая картинка — отдельный запрос с system/user prompt. Чистый отчёт:
+способности и списки не меняются. На платных моделях — доли цента.</p>
+<form method="post" action="/verify/run" enctype="multipart/form-data" class="addform">
+  <label>system prompt (необязательно)
+    <textarea name="system_prompt" rows="3"
+              placeholder="например: ты ассистент, отвечаешь коротко">{escape(system_prompt)}</textarea>
+  </label>
+  <label>user prompt (обязательно)
+    <textarea name="user_prompt" rows="3" required
+              placeholder="например: что на картинке? Ответь одним предложением">{escape(user_prompt)}</textarea>
+  </label>
+  <label>картинки / PDF (несколько)
+    <input name="images" type="file" accept="image/*,.pdf" multiple>
+  </label>
+  {providers_table}
+  <button type="submit" class="primary">запустить проверку</button>
+</form>
+{progress_html}
+<div id="verify-results">{results_html}</div>
+{poll_script}
+{LOCAL_TIME_SCRIPT}
+</body>
+</html>"""
+
+
+def verify_results_html(
+    results: list,
+    *,
+    provider: str = "",
+    timestamp: str = "",
+    system_prompt: str = "",
+    user_prompt: str = "",
+    images: list[str] | None = None,
+    running: bool = False,
+) -> str:
+    """Результаты проверки: плоская таблица провайдер·модель·картинка·ответ."""
+    images = images or []
+    if not results and not running:
+        return '<p class="role">результатов пока нет</p>'
+    ok = sum(1 for r in results if r.get("status") == "ok")
+    total = len(results)
+    heading = "Идёт проверка…" if running else "Результаты последнего прогона"
+    ts_html = (
+        f'<span data-ts="{escape(timestamp, quote=True)}">'
+        f'{escape(str(timestamp).replace("T", " ").replace("Z", ""))}</span>'
+        if timestamp else "—"
+    )
+    rows = []
+    for r in results:
+        idx = int(r.get("image_index") or 0)
+        thumb = "—"
+        if 0 <= idx < len(images):
+            src = images[idx].strip()
+            if src.startswith(("http://", "https://", "data:image/")):
+                thumb = (
+                    f'<img class="verify-img" src="{escape(src, quote=True)}" '
+                    f'alt="картинка {idx + 1}" loading="lazy">'
+                )
+        status = r.get("status", "?")
+        badge = "✅" if status == "ok" else "❌"
+        prov = escape(str(r.get("provider") or "—"))
+        mdl = escape(str(r.get("model") or "—"))
+        http = r.get("http_status", 0)
+        dur = r.get("duration", 0)
+        ts = str(r.get("ts") or "").replace("T", " ").replace("Z", "")
+        answer = escape(str(r.get("response") or ""))
+        rows.append(
+            f'<tr><td class="ts" data-ts="{escape(str(r.get("ts") or ""), quote=True)}">{escape(ts)}</td>'
+            f'<td>{prov}</td><td class="model">{mdl}</td>'
+            f'<td>{thumb}</td>'
+            f'<td class="status">{badge} HTTP {http} · {dur}s</td>'
+            f'<td class="cell"><div class="answer-md">{escape(answer)}</div></td></tr>'
+        )
+    return (
+        f'<h2>{heading}</h2>'
+        f'<p class="role">запуск: {ts_html} · прошли: {ok}/{total} · время местное</p>'
+        + (f'<p class="role">system: <code>{escape(system_prompt)}</code></p>' if system_prompt else "")
+        + (f'<p class="role">user: <code>{escape(user_prompt)}</code></p>' if user_prompt else "")
+        + f'<div class="card"><table class="verify">'
+        f'<tr><th>время</th><th>провайдер</th><th>модель</th><th>картинка</th>'
+        f'<th>статус</th><th>ответ</th></tr>'
+        + "\n".join(rows) +
+        f"</table></div>"
+    )
 def pick_model_page(
     provider_name: str,
     provider_id: str,
