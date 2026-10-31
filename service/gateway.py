@@ -1426,53 +1426,25 @@ class Gateway:
             if req:
                 fields["req"] = req
 
-            if action == "grey":
+            if action in ("grey", "black"):
                 self.note("правило", user_id or "—",
-                          f"{entry['name']}: {hit} → серый список (правило)",
+                          f"{entry['name']}: {hit} → переключение (списки не тронуты)",
                           **fields)
-                self._decide_soft(entry, model, f"правило: {hit}", user_id,
-                                  status=status, resp=resp, req=req)
-                leave = True
-            elif action == "black":
-                self.note("правило", user_id or "—",
-                          f"{entry['name']}: {hit} → чёрный список (правило)",
-                          **fields)
-                self._decide_hard(entry, model, f"правило: {hit}", user_id,
-                                  status=status, resp=resp, req=req)
                 leave = True
             elif action == "white":
-                try:
-                    known = self._capabilities.known(key) if self._capabilities else {}
-                except Exception:  # noqa: BLE001
-                    known = {}
-                group = self._group_of(entry, known)
-                self._lists.whitelist_place(key, group, f"правило: {hit}")
                 self.note("правило", user_id or "—",
-                          f"{entry['name']}: {hit} → в белый список "
-                          f"(группа {group})", **fields)
+                          f"{entry['name']}: {hit} → списки не тронуты",
+                          **fields)
             elif action == "untouched":
                 self.note("правило", user_id or "—",
                           f"{entry['name']}: {hit} → списки не тронуты",
                           **fields)
             elif action in LEARN_ACTIONS:
                 capability, ok = LEARN_ACTIONS[action]
-                self._learn(entry, model, capability, ok, f"правило: {hit}", req=req, resp=resp)
-                # Новые списки «доказано без vision/tools»: модель, доказавшая
-                # отсутствие, добавляется; доказавшая присутствие — удаляется.
-                if capability == "vision":
-                    if ok:
-                        self._lists.refused_vision_drop(key)
-                    else:
-                        self._lists.refused_vision_add(key)
-                elif capability == "tools":
-                    if ok:
-                        self._lists.refused_tools_drop(key)
-                    else:
-                        self._lists.refused_tools_add(key)
                 verb = "умеет" if ok else "не умеет"
                 word = "картинки" if capability == "vision" else "инструменты"
                 self.note("правило", user_id or "—",
-                          f"{entry['name']}: {hit} → выучено «{verb} {word}»",
+                          f"{entry['name']}: {hit} → «{verb} {word}» (списки не тронуты)",
                           **fields)
                 if not ok:
                     leave = True  # сказала «не умеет» — ответ пустой, уходим
@@ -2097,11 +2069,6 @@ class Gateway:
             resp_text = raw.decode("utf-8", errors="replace")
 
             if status_code >= 400:
-                if status_code == 402:
-                    try:
-                        self._lists.paid_add(f"{entry['id']}/{model}")
-                    except Exception:  # noqa: BLE001
-                        pass
                 if status_code == 400:
                     try:
                         _refusal, reaction_cap = _capability_refusal(
@@ -2121,13 +2088,6 @@ class Gateway:
                     "req": req_text,
                     "resp": resp_text,
                 }
-                if record and status_code == 400 and reaction_cap:
-                    self._learn(entry, model, reaction_cap, False, "автотест",
-                                req=req_text, resp=resp_text)
-                    if reaction_cap == "vision":
-                        self._lists.refused_vision_add(f"{entry['id']}/{model}")
-                    elif reaction_cap == "tools":
-                        self._lists.refused_tools_add(f"{entry['id']}/{model}")
             elif test_type in _MEDIA_TEST_TYPES:
                 # Генерация/распознавание: свой разбор ответа; запись в
                 # способности не участвует — маршрутизация их не использует.
@@ -2173,21 +2133,6 @@ class Gateway:
                     "req": req_text,
                     "resp": resp_text,
                 }
-                if record:
-                    if test_type == "vision":
-                        self._learn(entry, model, "vision", True, "автотест",
-                                    req=req_text, resp=resp_text)
-                        try:
-                            self._lists.refused_vision_drop(f"{entry['id']}/{model}")
-                        except Exception:  # noqa: BLE001
-                            pass
-                    elif test_type == "tools":
-                        self._learn(entry, model, "tools", True, "автотест",
-                                    req=req_text, resp=resp_text)
-                        try:
-                            self._lists.refused_tools_drop(f"{entry['id']}/{model}")
-                        except Exception:  # noqa: BLE001
-                            pass
             response.close()
         except Exception as exc:  # noqa: BLE001
             elapsed = round(time.monotonic() - start, 1)
@@ -2310,26 +2255,9 @@ class Gateway:
                     switched=bool(problems),
                 )
             if status < 400:
-                # Живой ответ снимает с модели все прошлые штрафы.
-                self._healed(entry, model)
-                # Тело ответа — для журнала и для выученных фактов.
-                resp_text = (
-                    resp_body.decode("utf-8", errors="replace") if resp_body else ""
-                )
-                # И доказывает способности: запрос с картинкой/инструментами
-                # прошёл — модель умеет то, что просил клиент.
-                for capability in needs:
-                    self._learn(entry, model, capability, True,
-                                req=body_fields.get("req", ""), resp=resp_text)
-                # Решение: подтверждена — в белый список (только при смене
-                # состояния; основание — статус и фрагмент ответа).
-                self._decide_success(entry, model, user_id, status=status, resp=resp_text,
-                                    needs=needs, req=body_fields.get("req", ""))
-            else:
-                # Ответ дошёл, но это вина клиента (400/413/422) — списки не трогаем.
-                self._decide_client(entry, model, user_id, status=status,
-                                    resp=resp_body.decode("utf-8", errors="replace") if resp_body else "",
-                                    req=body_fields.get("req", ""))
+                # Живой ответ: ничего не решаем автоматически — списки
+                # ведёт админ руками через кодовые слова.
+                pass
             return status, content_type, chunks, entry["name"], model
 
         for attempt in attempts:
@@ -2561,28 +2489,6 @@ class Gateway:
         if problems:
             # Все попытки с причинами: диагностика в одну строку.
             message += ": " + "; ".join(problems[:6])
-        # Решения по каждому отказу: мягкие и жёсткие идут в списки.
-        for item in failures:
-            kind = item["kind"]
-            if kind == "soft":
-                self._decide_soft(item["entry"], item["model"], item["reason"], user_id,
-                                  status=item.get("status", 0), resp=item.get("resp", ""),
-                                  req=item.get("req", ""))
-            elif kind == "hard":
-                self._decide_hard(item["entry"], item["model"], item["reason"], user_id,
-                                  status=item.get("status", 0), resp=item.get("resp", ""),
-                                  req=item.get("req", ""))
-            # neutral — ключ или способность: списки не тронуты, но решение
-            # озвучено, чтобы в журнале не было «тишины».
-            else:
-                self.note(
-                    "решение", user_id or "—",
-                    f"{item['entry']['name']}: {item['reason']} — списки не тронуты",
-                    model=item["model"], provider=item["entry"]["name"],
-                    **({"status": item["status"]} if item.get("status") else {}),
-                    **({"req": item["req"]} if item.get("req") else {}),
-                    **({"resp": item["resp"]} if item.get("resp") else {}),
-                )
         self._record_usage(
             user_id, {"id": "—"}, requested_model or "—", {}, ok=False, switched=False
         )

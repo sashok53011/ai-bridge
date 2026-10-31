@@ -1353,43 +1353,6 @@ class TestRuleEngine:
 
         return {"http://ollama.test": handler}
 
-    def test_a_rule_overrides_a_soft_status(self, tmp_path) -> None:
-        """429 (встроенное — серый) + правило «чёрный» → чёрный."""
-        from storage.lists import ModelLists
-
-        rules = self._rules(tmp_path, response=[
-            {"text": "rate limited", "action": "black"},
-        ])
-        journal = _Journal()
-        gateway = self._build(
-            tmp_path, [_entry()], self._reply("rate limited, try later", 429),
-            rules, event_log=journal, user_dir_for=lambda uid: tmp_path,
-        )
-
-        status, _, _, _, _ = gateway.chat(b"", "", "u1")
-
-        assert status == 502
-        lists = ModelLists(tmp_path)
-        assert "ollama/llama3.2" in lists.blacklist()  # правило сильнее
-        assert "ollama" not in lists.grey()  # встроенный серый не применился
-        assert any("правило" in t and "rate limited" in t
-                   for t in journal.texts("правило"))
-
-    def test_a_rule_can_send_a_provider_to_grey(self, tmp_path) -> None:
-        from storage.lists import ModelLists
-
-        rules = self._rules(tmp_path, response=[
-            {"text": "закончились кредиты", "action": "grey"},
-        ])
-        gateway = self._build(
-            tmp_path, [_entry()], self._reply("закончились кредиты у аккаунта", 500),
-            rules, user_dir_for=lambda uid: tmp_path,
-        )
-
-        gateway.chat(b"", "", "u1")
-
-        assert "ollama" in ModelLists(tmp_path).grey()  # 500 → серый по правилу
-
     def test_a_rule_can_leave_the_lists_alone(self, tmp_path) -> None:
         """Не трогать: 429 не кладёт ни в серый, ни в чёрный — только журнал."""
         from storage.lists import ModelLists
@@ -1448,51 +1411,6 @@ class TestRuleEngine:
         assert status == 200
         assert provider == "Groq"  # ушли от maintenance к следующему
         assert calls == ["ollama", "groq"]
-
-    def test_a_rule_matches_case_insensitively(self, tmp_path) -> None:
-        from storage.lists import ModelLists
-
-        rules = self._rules(tmp_path, response=[
-            {"text": "QUOTA EXCEEDED", "action": "black"},
-        ])
-        gateway = self._build(
-            tmp_path, [_entry()], self._reply("quota exceeded for account", 403),
-            rules, user_dir_for=lambda uid: tmp_path,
-        )
-
-        gateway.chat(b"", "", "u1")
-
-        assert "ollama/llama3.2" in ModelLists(tmp_path).blacklist()
-
-    def test_a_rule_for_another_provider_is_ignored(self, tmp_path) -> None:
-        """Правило живёт у своего провайдера: чужой не трогает."""
-        from storage.lists import ModelLists
-
-        rules = self._rules(tmp_path, response=[
-            {"text": "rate limited", "action": "black", "provider": "groq"},
-        ])
-        gateway = self._build(
-            tmp_path, [_entry()], self._reply("rate limited", 429),
-            rules, user_dir_for=lambda uid: tmp_path,
-        )
-
-        gateway.chat(b"", "", "u1")
-
-        lists = ModelLists(tmp_path)
-        assert "ollama/llama3.2" not in lists.blacklist()  # чужое правило молчит
-        assert "ollama" in lists.grey()  # встроенный 429 → серый
-
-    def test_no_rules_falls_back_to_the_builtin_decisions(self, tmp_path) -> None:
-        from storage.lists import ModelLists
-
-        gateway = self._build(
-            tmp_path, [_entry()], self._reply("rate limited", 429),
-            None, user_dir_for=lambda uid: tmp_path,
-        )
-
-        gateway.chat(b"", "", "u1")
-
-        assert "ollama" in ModelLists(tmp_path).grey()  # встроенное 429 → серый
 
     def test_learn_cant_sends_the_request_further(self, tmp_path) -> None:
         """«Не умеет картинки» — уходим к следующему, ответ не отдаём."""
