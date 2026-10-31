@@ -1557,6 +1557,7 @@ def stats_page(
     whitelist: dict | None = None, greylist: str = "", blacklist: str = "",
     grey_rows: list[dict] | None = None,
     novision: str = "", notools: str = "", paid: str = "",
+    code_lists: dict[str, str] | None = None,
 ) -> str:
     """Статистика по моделям: что есть у модели и как она служит.
 
@@ -1571,6 +1572,53 @@ def stats_page(
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     whitelist = whitelist or {}
+    code_lists = code_lists or {}
+
+    def code_lists_html() -> str:
+        """Кодовые слова: имя = модель для клиента, значение — список моделей.
+
+        Админ создаёт/правит/удаляет списки. Форма сохранения — POST
+        на /stats/codes/save, удаление — /stats/codes/drop. Список моделей
+        — по одной на строку, порядок = приоритет.
+        """
+        if not can_edit:
+            return ""
+
+        def card(name: str, text: str) -> str:
+            return (
+                f'<div class="listcard"><h3>{escape(name)}</h3>'
+                f'<p class="role">модели по одной на строку, сверху — главные</p>'
+                f'<form method="post" action="/stats/codes/save/{escape(name, quote=True)}">'
+                f'<textarea name="text" rows="6" spellcheck="false" '
+                f'placeholder="провайдер/модель">{escape(text)}</textarea>'
+                f'<button type="submit" class="primary">сохранить</button>'
+                f"</form>"
+                f'<form method="post" action="/stats/codes/drop/{escape(name, quote=True)}" '
+                f'style="margin-top:.4rem">'
+                f'<button type="submit">удалить список</button></form>'
+                f"</div>"
+            )
+
+        cards = "".join(card(name, text) for name, text in sorted(code_lists.items()))
+        create = (
+            '<div class="listcard"><h3>Новый список</h3>'
+            '<p class="role">имя — кодовое слово (латиница, цифры, дефис); '
+            'клиент увидит его как модель</p>'
+            '<form method="post" action="/stats/codes/create">'
+            '<input name="name" placeholder="vision_tools_1m" '
+            'pattern="[a-z0-9][a-z0-9_-]{0,63}" required>'
+            '<textarea name="text" rows="4" spellcheck="false" '
+            'placeholder="провайдер/модель"></textarea>'
+            '<button type="submit" class="primary">создать</button>'
+            "</form></div>"
+        )
+        return (
+            '<h2>Кодовые слова (списки моделей)</h2>'
+            '<p class="role">Это то, что клиент видит в списке моделей как «модель». '
+            'Запрос на кодовое слово идёт по моделям списка сверху вниз. '
+            'Порядок строк = приоритет.</p>'
+            f'<div class="lists">{cards}{create}</div>'
+        )
 
     def grey_timer_html() -> str:
         """Таблица серого списка: провайдер спит, видно сколько осталось.
@@ -1817,6 +1865,7 @@ def stats_page(
 </table>
 </div>
 {lists_html()}
+{code_lists_html()}
 {paused_html()}
 {LOCAL_TIME_SCRIPT}
 </body>

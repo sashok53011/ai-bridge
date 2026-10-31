@@ -1300,185 +1300,18 @@ class Gateway:
         except Exception:  # noqa: BLE001
             pass
 
-    def _repute_chain(self, attempts: list[dict], by_id: dict) -> list[dict]:
-        """Отсечь модели на паузе. Но если ушли все — берём и наказанные:
-        чужой ответ лучше мёртвой ошибки, а удачный запрос снимет паузу."""
-        if self._reputation is None or not attempts:
-            return attempts
-        try:
-            free = [
-                attempt
-                for attempt in attempts
-                if self._reputation.remaining(
-                    self._rep_key(by_id.get(attempt["providerId"], {}), attempt["model"])
-                )
-                == 0
-            ]
-        except Exception:  # noqa: BLE001
-            return attempts
-        return free or attempts
-
     # ------------------------------------------------------------ способности
-
-    #: Как человек называет то, что просил запрос — для журнала.
-    _CAP_WORDS = {"vision": "с картинкой", "tools": "с инструментами"}
 
     def _learn(
         self, entry: dict, model: str, capability: str, ok: bool, reason: str = "",
         *, req: str = "", resp: str = "",
     ) -> None:
-        """Запомнить доказанный факт и рассказать о нём в журнале.
+        """Обучение способностей отключено: списки ведёт админ руками.
 
-        Каждый шаг описывается подробно — журнал это видит:
-        - успех на неизвестной модели: «выучила vision»;
-        - успех после прежнего «не умеет»: «перевернула "не умеет"»;
-        - повторный успех: «подтвердила vision»;
-        - отказ провайдера: «выучила "не умеет tools"» / «подтверждено».
-        Отказ канала («только через WebSocket») — не про способности:
-        не учи ни vision, ни tools, но событие отметить всё равно надо.
+        Метод оставлен как пустышка, чтобы вызовы не ломались; ничего
+        не записывает и не решает при маршрутизации.
         """
-        if self._capabilities is None:
-            return
-        key = self._rep_key(entry, model)
-        subject = f"{key} ({entry.get('name') or entry.get('id')})"
-        if not capability:
-            if reason:
-                fields = {}
-                if req:
-                    fields["req"] = req
-                if resp:
-                    fields["resp"] = resp
-                self.note(
-                    "способности", "—",
-                    f"{subject}: {reason} — не про способности, не учила",
-                    **fields,
-                )
-            return
-        try:
-            was = self._capabilities.known(key).get(capability)
-            self._capabilities.learn(key, capability, ok)
-        except Exception:  # noqa: BLE001 — знания не должны ломать чат
-            return
-        with_what = self._CAP_WORDS.get(capability, f"запросом ({capability})")
-        if ok:
-            if was is None:
-                text = f"{subject}: запрос {with_what} прошёл — выучила {capability}"
-            elif was:
-                text = f"{subject}: запрос {with_what} прошёл — подтвердила {capability}"
-            else:
-                text = (
-                    f"{subject}: запрос {with_what} прошёл — перевернула "
-                    f"«не умеет», теперь {capability}"
-                )
-        else:
-            detail = reason or "провайдер отверг запрос"
-            if was is None:
-                text = f"{subject}: {detail} — выучила «не умеет {capability}»"
-            elif was:
-                text = (
-                    f"{subject}: {detail} — отозвала {capability}: "
-                    "выучила «не умеет»"
-                )
-            else:
-                text = f"{subject}: {detail} — «не умеет {capability}» подтверждено"
-        fields = {}
-        if req:
-            fields["req"] = req
-        if resp:
-            fields["resp"] = resp
-        self.note("способности", "—", text, **fields)
-
-    def _skipped_by_capability(
-        self, entries: list[dict], attempts: list[dict], needs: tuple[str, ...]
-    ) -> list[str]:
-        """Модели, не попавшие в цепочку из-за способностей.
-
-        Нужно для честной диагностики: когда фолбэк «пустой», в ошибке
-        видно, сколько моделей отсеяно и почему («запрос требует vision»),
-        а не только причина последней попытки.
-        """
-        if not needs:
-            return []
-        used = {attempt["providerId"] for attempt in attempts}
-        skipped: list[str] = []
-        for entry in entries:
-            model = str(entry.get("model") or "").strip()
-            if not model or entry["id"] in used:
-                continue
-            caps = str(entry.get("capabilities") or "").lower()
-            if not all(word in caps for word in needs):
-                skipped.append(f"{entry['id']}/{model}")
-        return skipped
-
-    def _apply_lists(self, entries: list[dict], user_id: str = "",
-                     needs: tuple[str, ...] = ()) -> list[dict]:
-        """Четыре уровня списков + степень совпадения группы.
-
-        Уровни (`_tier`): 1 — белый (подтверждённые), 2 — неизвестный,
-        3 — серый этого человека с истёкшим сном, 4 — чёрный (последний
-        шанс). Спящий **провайдер** (серый) исключается целиком — со
-        всеми моделями. Уровень решает, в каком порядке эшелоны идут;
-        внутри эшелона сортирует `core.routes`.
-
-        Степень совпадения (`_fit`) — какой группе модель отвечает на
-        **этот** запрос: 0 — точное совпадение (текстовой запрос → текстовая
-        группа, картинка → vision, инструменты → tools), 1 — надмножество
-        (умеет больше, чем просят — дороже, но сгодится), 2 — не умеет
-        нужного (из цепочки её выкинет фильтр способностей, но пусть
-        сортировка не поднимает её вверх).
-        """
-        if self._lists is None:
-            return entries
-        try:
-            white = self._lists.whitelist()
-            black = self._lists.blacklist()
-            grey = self._grey_of(user_id)
-        except Exception:  # noqa: BLE001 — списки не должны ломать чат
-            return entries
-        now = datetime.now(timezone.utc)
-        needed = set(needs)
-        kept: list[dict] = []
-        for entry in entries:
-            model = str(entry.get("model") or "").strip()
-            key = f"{entry['id']}/{model}".lower()
-            short = model.lower()
-            cell = grey.get(entry["id"])  # серый — провайдером, со всеми моделями
-            if cell and cell["until"] > now:
-                continue  # спит — не трогаем все его модели
-            if black and (key in black or short in black):
-                tier = 4
-            elif (self._lists is not None and
-                  (key in self._lists.paid() or short in self._lists.paid())):
-                tier = 4  # платная — последний шанс, после бесплатных
-            elif white and (key in white or short in white):
-                tier = 1
-            elif cell:  # срок сна истёк — провайдер пробудился
-                tier = 3
-            else:
-                tier = 2
-            fit = self._fit_of(entry, needed)
-            kept.append({**entry, "_tier": tier, "_fit": fit})
-        return kept
-
-    @staticmethod
-    def _fit_of(entry: dict, needed: set) -> int:
-        """Степень совпадения группы модели с запросом.
-
-        Способности берутся из обученного поля «Способности» (оно уже
-        склеено с рукописной справкой в `_taught_entries`).
-        """
-        caps = str(entry.get("capabilities") or "").lower()
-        has = {
-            word for word in ("vision", "tools") if word in caps
-        }
-        if not needed:
-            # Текстовый запрос: точка — текстовая группа; надмножество (vision/tools) дороже.
-            return 0 if not has else 1
-        if has == needed:
-            return 0  # точное совпадение: vision→vision, tools→tools, оба→оба
-        if needed < has:
-            return 1  # умеет больше, чем просят — сгодится, но это надмножество
-        return 2  # нужного нет
+        return
 
     def _grey_of(self, user_id: str) -> dict:
         """Серый список человека: пусто, если каталога нет."""
@@ -1488,6 +1321,30 @@ class Gateway:
         if directory is None:
             return {}
         return ModelLists(directory).grey()
+
+    def _skip_sleeping(self, entries: list[dict], user_id: str) -> list[dict]:
+        """Убрать записи спящих провайдеров (внутренний серый список).
+
+        Серый список — внутренняя механика: провайдер, отвечавший мягким
+        отказом (лимит/кредиты), спит до срока и не получает запросов.
+        Не выставляется как кодовое слово — только тихо пропускается.
+        """
+        if not self._user_dir_for or not user_id:
+            return entries
+        try:
+            grey = self._grey_of(user_id)
+        except Exception:  # noqa: BLE001 — серый не должен ломать чат
+            return entries
+        if not grey:
+            return entries
+        now = datetime.now(timezone.utc)
+        sleeping = {
+            provider_id for provider_id, cell in grey.items()
+            if isinstance(cell, dict) and cell.get("until") and cell["until"] > now
+        }
+        if not sleeping:
+            return entries
+        return [entry for entry in entries if entry["id"] not in sleeping]
 
     # ------------------------------------------------------------ решения
 
@@ -1811,108 +1668,32 @@ class Gateway:
             **fields,
         )
 
-    def _taught_entries(self, entries: list[dict]) -> list[dict]:
-        """Копии записей с выученными способностями в поле «Способности».
-
-        Живой факт перекрывает рукописную справку в обе стороны: успех
-        дописывает способность, честный отказ вычёркивает — кто последний,
-        тот и прав. Маршрутизатор (`core/routes.py`) читает текст поля и
-        не меняется; знание вливается через существующий вход.
-
-        Дополнительно помечаем `_refused` — способности, от которых модель
-        **доказала** отказ (обученный `False` или явное «не умеет …» в
-        справке). Это не то же самое, что «просто не заявлена»: доказанный
-        отказ позволяет роутеру не тратить попытку на заведомо
-        неподходящую модель, даже если клиент её назвал.
-
-        Новые списки «доказано без vision/tools» (novision.txt / notools.txt)
-        дополняют эту память: модель в списке считается отказавшей, и
-        приставка больше не кормит её картинками/инструментами.
-        """
-        if self._capabilities is None and self._lists is None:
-            return entries
-        taught: list[dict] = []
-        for entry in entries:
-            key = self._rep_key(entry, str(entry.get("model") or "").strip())
-            known = {}
-            if self._capabilities is not None:
-                try:
-                    known = self._capabilities.known(key)
-                except Exception:  # noqa: BLE001
-                    known = {}
-            refused = {
-                capability
-                for capability, value in known.items()
-                if value is False
-            }
-            # Явное «не умеет …» в рукописной справке — тоже отказ.
-            text = str(entry.get("capabilities") or "").lower()
-            for capability in ("vision", "tools"):
-                if f"не умеет {capability}" in text:
-                    refused.add(capability)
-            # Новые списки: «доказано без vision/tools» — глобальные, как
-            # blacklist. Модель в списке считается доказавшей отсутствие.
-            if self._lists is not None:
-                model_key = key.lower()
-                short = str(entry.get("model") or "").strip().lower()
-                if model_key in self._lists.refused_vision() or short in self._lists.refused_vision():
-                    refused.add("vision")
-                if model_key in self._lists.refused_tools() or short in self._lists.refused_tools():
-                    refused.add("tools")
-            if known or refused:
-                entry = {
-                    **entry,
-                    "capabilities": _merge_capabilities(
-                        entry.get("capabilities"), known
-                    ) if known else entry.get("capabilities"),
-                    "_refused": refused,
-                }
-            taught.append(entry)
-        return taught
-
     # ------------------------------------------------------------ решения
 
+    def _code_lists(self) -> dict[str, list[str]]:
+        """Кодовые слова → список моделей по порядку. Пусто без списков."""
+        if self._lists is None:
+            return {}
+        try:
+            out: dict[str, list[str]] = {}
+            for name in self._lists.code_names():
+                models = self._lists.code_models(name)
+                if models:
+                    out[name] = models
+            return out
+        except Exception:  # noqa: BLE001 — списки не должны ломать чат
+            return {}
+
     def models_payload(self, user_id: str = "") -> dict:
-        """Объединённый список: настроенные (без префикса) + live (с префиксом)."""
-        entries_provider, keys = self._context(user_id)
-        entries = entries_provider()
-        configured = advertised_models(entries)
+        """Список кодовых слов (имён списков), которые клиент видит как модели.
 
-        # Берём кэш для включённых провайдеров; протухшее обновляем тут же
-        # (stale-while-revalidate): сеть не блокирует ответ.
-        live: dict[str, list[str]] = {}
-        now = time.monotonic()
-        stale: list[dict] = []
-        with self._cache_lock:
-            for entry in entries:
-                if not entry.get("enabled"):
-                    continue
-                cached = self._live_cache.get(entry["id"])
-                if cached and now - cached[0] < _MODELS_TTL:
-                    live[entry["id"]] = cached[1]
-                else:
-                    stale.append(entry)
-
-        # Протухшие обновляем синхронно — это быстро (короткий таймаут),
-        # и клиент получает полный список с первого раза.
-        for entry in stale:
-            try:
-                client = self._provider_factory(
-                    entry["url"], timeout=_MODELS_FETCH_TIMEOUT
-                )
-                key = keys.get(entry["id"])
-                models = [m["name"] for m in client.fetch_models(key)]
-                live[entry["id"]] = models
-                with self._cache_lock:
-                    self._live_cache[entry["id"]] = (now, models)
-            except Exception:  # noqa: BLE001 — молчащий провайдер не крашит список
-                continue
-
-        models = union_models(
-            [{"id": e["id"], "model": e.get("model", "")} for e in entries if e.get("enabled")],
-            live,
-        )
-        return {"object": "list", "data": models} if models else _NO_MODELS
+        Пустой список кодовых слов — отдаём пусто: админ создаёт списки сам.
+        """
+        codes = self._code_lists()
+        if not codes:
+            return _NO_MODELS
+        data = [{"id": name, "owned_by": "list"} for name in sorted(codes)]
+        return {"object": "list", "data": data}
 
     def _chat_timeout(self, entry: dict) -> float:
         """Таймаут чата для одного провайдера.
@@ -2440,10 +2221,12 @@ class Gateway:
         ``(502, ..., [описание со всеми попытками])``.
         """
         entries_provider, keys = self._context(user_id)
-        entries = self._taught_entries(entries_provider())
+        entries = entries_provider()
         needs = _needs_of(body, self._rules)
-        entries = self._apply_lists(entries, user_id, needs)
-        attempts = route(entries, requested_model, needs=needs)
+        # Серый список (внутренний) — пропускаем спящих провайдеров.
+        entries = self._skip_sleeping(entries, user_id)
+        attempts = route(entries, requested_model, needs=needs,
+                         code_lists=self._code_lists())
         started = time.monotonic()
         # Тело запроса для журнала — пишется всегда (лимит 4000, на странице
         # видно целиком).
@@ -2458,12 +2241,6 @@ class Gateway:
                     f"; запрос требует: {', '.join(needs)} — включите провайдера "
                     "с такими способностями (поле «Способности»)"
                 )
-                skipped = self._skipped_by_capability(entries, attempts, needs)
-                if skipped:
-                    message += (
-                        f"; без нужных способностей: {len(skipped)} — "
-                        + ", ".join(skipped[:5])
-                    )
             if available:
                 message += f"; доступны: {available}"
             else:
@@ -2472,8 +2249,6 @@ class Gateway:
             return 502, "application/json", [_error_body(message, code="model_not_available")], "", ""
 
         by_id = {entry["id"]: entry for entry in entries}
-        # Модели на паузе пропускаются — если остались свободные.
-        attempts = self._repute_chain(attempts, by_id)
         problems: list[str] = []
         # Отказы с классификацией: чем закончилась каждая попытка.
         failures: list[dict] = []
@@ -2782,14 +2557,6 @@ class Gateway:
                 record=False, chat_event=False,
             )
 
-        skipped = self._skipped_by_capability(entries, attempts, needs)
-        if skipped:
-            # Почему фолбэк «пустой»: модели были, но не прошли по
-            # способностям — честнее сказать об этом, чем молчать.
-            problems.append(
-                f"пропущено {len(skipped)} моделей: запрос требует "
-                f"{', '.join(needs)} — " + ", ".join(skipped[:5])
-            )
         message = "ни один провайдер не ответил"
         if problems:
             # Все попытки с причинами: диагностика в одну строку.

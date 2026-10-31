@@ -847,6 +847,10 @@ class WebUi:
                 )
             rows.sort(key=lambda row: (-row["requests"], row["model"]))
             penalized = self._reputation.penalized() if self._reputation else []
+            codes: dict[str, str] = {}
+            if self._lists:
+                for name in self._lists.code_names():
+                    codes[name] = self._lists.code_text(name)
             self._send_html(
                 handler,
                 200,
@@ -859,6 +863,7 @@ class WebUi:
                     novision=self._lists.text("novision.txt") if self._lists else "",
                     notools=self._lists.text("notools.txt") if self._lists else "",
                     paid=self._lists.text("paid.txt") if self._lists else "",
+                    code_lists=codes,
                 ),
             )
             return
@@ -2409,6 +2414,51 @@ class WebUi:
             self._redirect(
                 handler,
                 f"{which}: сохранено" if ok else f"{which}: неизвестный файл",
+                bad=not ok, to="/stats",
+            )
+            return
+
+        if clean == "/stats/codes/create":
+            if not is_admin or self._lists is None:
+                self._forbidden(handler, "создание списков — только администратору")
+                return
+            name = field("name").strip().lower()
+            if not self._lists.code_valid(name):
+                self._redirect(handler, "имя — кодовое слово: латиница, цифры, дефис",
+                               bad=True, to="/stats")
+                return
+            self._lists.code_write(name, field("text"))
+            self._event("списки", str(viewer.get("email") or ""), f"создан список {name}")
+            self._redirect(handler, f"список {name} создан", to="/stats")
+            return
+
+        if clean.startswith("/stats/codes/save/"):
+            if not is_admin or self._lists is None:
+                self._forbidden(handler, "правка списков — только администратору")
+                return
+            name = urllib.parse.unquote(clean[len("/stats/codes/save/"):]).strip().lower()
+            ok = self._lists.code_write(name, field("text"))
+            self._event(
+                "списки", str(viewer.get("email") or ""),
+                f"{name}: {'сохранено' if ok else 'невалидное имя'}",
+            )
+            self._redirect(
+                handler,
+                f"{name}: сохранено" if ok else f"{name}: невалидное имя",
+                bad=not ok, to="/stats",
+            )
+            return
+
+        if clean.startswith("/stats/codes/drop/"):
+            if not is_admin or self._lists is None:
+                self._forbidden(handler, "удаление списков — только администратору")
+                return
+            name = urllib.parse.unquote(clean[len("/stats/codes/drop/"):]).strip().lower()
+            ok = self._lists.code_drop(name)
+            self._event("списки", str(viewer.get("email") or ""), f"удалён список {name}")
+            self._redirect(
+                handler,
+                f"список {name} удалён" if ok else f"{name}: не найден",
                 bad=not ok, to="/stats",
             )
             return

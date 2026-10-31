@@ -2155,7 +2155,9 @@ class TestStats:
             "novision.txt", "notools.txt", "paid.txt",
         ):
             assert f'action="/stats/save/{filename}"' in page.text, filename
-        assert page.text.count("<textarea") == 9
+        # Плюс форма создания нового кодового слова.
+        assert page.text.count("<textarea") == 10
+        assert 'action="/stats/codes/create"' in page.text
 
     def test_the_admin_can_save_a_list(self, harness) -> None:
         from storage.lists import ModelLists

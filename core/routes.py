@@ -148,8 +148,13 @@ def advertised_models(entries: list[dict]) -> list[dict]:
     return [{"id": model, "owned_by": provider_id} for model, provider_id in seen.items()]
 
 
-def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = ()) -> list[dict]:
+def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = (),
+          code_lists: dict[str, list[str]] | None = None) -> list[dict]:
     """Цепочка попыток для запроса: [{providerId, model}, ...].
+
+    ``code_lists`` — кодовые слова (имя → список моделей по порядку).
+    Запрос, совпавший с кодовым словом, раскрывается в цепочку всех моделей
+    этого списка в заданном порядке. Иначе работает прежняя логика ниже.
 
     ``needs`` — требования самого запроса (vision/tools): когда модель
     отказалась и мы переключаемся, дальше по приоритету идут только модели
@@ -169,6 +174,45 @@ def route(entries: list[dict], requested: str = "", needs: tuple[str, ...] = ())
 
     def attempt(entry: dict) -> dict:
         return {"providerId": entry["id"], "model": str(entry.get("model") or "").strip()}
+
+    # Кодовое слово: раскрыть в цепочку моделей списка по порядку.
+    # Каждая строка — «провайдер/модель» или просто «модель»; ищем
+    # подходящую запись и строим попытку. Порядок строк = приоритет.
+    if code_lists and wanted in code_lists:
+        by_id = {entry["id"]: entry for entry in chain}
+        short = {}
+        for entry in chain:
+            short.setdefault(str(entry.get("model") or "").strip().lower(), entry)
+        attempts: list[dict] = []
+        seen: set = set()
+        for spec in code_lists[wanted]:
+            spec = str(spec or "").strip()
+            if not spec:
+                continue
+            provider_id, slash, model_name = spec.partition("/")
+            entry = None
+            if slash and model_name.strip():
+                # «провайдер/модель» — точное закрепление.
+                candidate = by_id.get(provider_id.strip().lower())
+                if candidate is not None:
+                    entry = candidate
+                    model_out = model_name.strip()
+            if entry is None:
+                # «модель» — по имени модели среди включённых.
+                candidate = short.get(spec.lower())
+                if candidate is not None:
+                    entry = candidate
+                    model_out = str(entry.get("model") or "").strip()
+            if entry is None or entry["id"] in seen:
+                continue
+            attempts.append({"providerId": entry["id"], "model": model_out})
+            seen.add(entry["id"])
+        if needs:
+            # Запрос с картинками/инструментами: способные первыми.
+            capable = [a for a in attempts if _capable(by_id.get(a["providerId"], {}), needs)]
+            plain = [a for a in attempts if a not in capable]
+            attempts = capable + plain
+        return attempts
 
     def last_resort(attempts: list[dict], seen: set) -> list[dict]:
         """Последний шанс — остальные включённые по приоритету.

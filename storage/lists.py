@@ -134,6 +134,86 @@ class ModelLists:
         self.directory = directory or default_dir()
         self._lock = threading.Lock()
 
+    # ------------------------------------------------- кодовые слова
+    # Пользовательские списки: имя файла = кодовое слово (латиница,
+    # цифры, дефис/подчёркивание). Живут в отдельной папке lists/ и не
+    # мешают автоматическим спискам выше. Имя — то, что клиент видит как
+    # «модель»; запрос на него раскрывается в цепочку моделей списка.
+
+    _CODE_DIR = "lists"
+    _CODE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+    def _code_path(self, name: str) -> Path:
+        return self.directory / self._CODE_DIR / f"{name.strip().lower()}.txt"
+
+    def code_valid(self, name: str) -> bool:
+        """Годится ли имя как кодовое слово: латиница, цифры, - и _."""
+        return bool(self._CODE_NAME_RE.match(str(name or "").strip().lower()))
+
+    def code_names(self) -> list[str]:
+        """Все кодовые слова (имена файлов в lists/), по алфавиту."""
+        folder = self.directory / self._CODE_DIR
+        try:
+            names = sorted(
+                path.stem for path in folder.glob("*.txt")
+            )
+        except OSError:
+            return []
+        return names
+
+    def code_models(self, name: str) -> list[str]:
+        """Модели списка в порядке строк (приоритет сверху вниз).
+
+        Пустое имя или невалидное кодовое слово — пусто. Формат строк —
+        как в остальных списках: имя на строке, всё после # — комментарий.
+        """
+        if not self.code_valid(name):
+            return []
+        lines = _read_lines(self._code_path(name))
+        models: list[str] = []
+        for line in lines:
+            model = line.split("#", 1)[0].strip()
+            if model:
+                models.append(model)
+        return models
+
+    def code_text(self, name: str) -> str:
+        """Сырое содержимое файла списка — для textarea на странице."""
+        if not self.code_valid(name):
+            return ""
+        try:
+            return self._code_path(name).read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def code_write(self, name: str, text: str) -> bool:
+        """Записать модели списка (правка со страницы админа).
+
+        False — невалидное имя (защита от записи куда попало).
+        """
+        if not self.code_valid(name):
+            return False
+        try:
+            path = self._code_path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text.replace("\r\n", "\n"), encoding="utf-8")
+            return True
+        except OSError:
+            return False
+
+    def code_drop(self, name: str) -> bool:
+        """Удалить весь список (кодовое слово). True — был и удалён."""
+        if not self.code_valid(name):
+            return False
+        try:
+            path = self._code_path(name)
+            if path.exists():
+                path.unlink()
+                return True
+        except OSError:
+            pass
+        return False
+
     # ------------------------------------------------------------ чтение
 
     def _path(self, name: str) -> Path:
