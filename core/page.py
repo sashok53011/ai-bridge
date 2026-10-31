@@ -2085,8 +2085,8 @@ def logs_page(
 <p><form method="post" action="/logs/clear" style="display:inline">
   <button type="submit" class="ghost danger">очистить</button>
 </form>
-<span class="role">обновляется само раз в 10 секунд (пока ты не читаешь и не прокручиваешь),
-тела запросов и ответов свёрнуты — раскрываются по клику</span></p>
+<span class="role">обновляется само раз в 10 секунд (не пока открыто тело или ты занят);
+место чтения и раскрытые тела сохраняются — тело запроса/ответа раскрывается по клику</span></p>
 <div class="card">
 <table>
 <tr><th>время</th><th>тип</th><th>кто</th><th>событие</th></tr>
@@ -2095,14 +2095,39 @@ def logs_page(
 </div>
 <script>
 // Автообновление: раз в 10 секунд, но не пока открыто тело или человек
-// занят страницей (клик, прокрутка, мышь) — иначе чтение рвёт прыжком.
+// занят страницей. Перед перезагрузкой запоминаем место чтения и
+// раскрытые тела — после загрузки возвращаем, чтение не рвётся прыжком.
 var busy = false;
 ["click", "scroll", "keydown", "mousemove"].forEach(function (ev) {{
   window.addEventListener(ev, function () {{ busy = true; }}, {{ passive: true }});
 }});
+function saveState() {{
+  var open = [];
+  document.querySelectorAll("details.payload").forEach(function (d, i) {{
+    if (d.open) open.push(i);
+  }});
+  try {{
+    sessionStorage.setItem("log:scroll", String(window.scrollY));
+    sessionStorage.setItem("log:open", JSON.stringify(open));
+  }} catch (e) {{}}
+}}
+function restoreState() {{
+  var y = 0, open = [];
+  try {{
+    y = parseInt(sessionStorage.getItem("log:scroll") || "0", 10) || 0;
+    open = JSON.parse(sessionStorage.getItem("log:open") || "[]");
+  }} catch (e) {{}}
+  document.querySelectorAll("details.payload").forEach(function (d, i) {{
+    if (open.indexOf(i) >= 0) d.open = true;
+  }});
+  if (y > 0) window.scrollTo(0, y);
+}}
+window.addEventListener("load", restoreState);
 setTimeout(function tick() {{
-  if (!busy && !document.querySelector("details.payload[open]")) location.reload();
-  else {{ busy = false; setTimeout(tick, 5000); }}
+  if (!busy && !document.querySelector("details.payload[open]")) {{
+    saveState();
+    location.reload();
+  }} else {{ busy = false; setTimeout(tick, 5000); }}
 }}, 10000);
 </script>
 {LOCAL_TIME_SCRIPT}
