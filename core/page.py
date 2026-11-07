@@ -1808,7 +1808,6 @@ def sql_playground_page(
     </section>
   </div>
   <section><h2>Схема базы · {len(tables)} объектов</h2>
-    <p class="role">Раскройте таблицу, чтобы увидеть поля{" и примеры записей" if include_data else ""}.</p>
     <div class="sql-tables">{schema_html}</div>
   </section>
   {result_html}
