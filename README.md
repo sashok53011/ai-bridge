@@ -1,5 +1,7 @@
 # ai-bridge
 
+Language: [English](README.en.md) · [Deutsch](README.de.md) · [Русский](README.ru.md)
+
 AI-приставка: каталог AI-провайдеров, ключи на устройстве, статистика
 от сообщества. Сервер — свой PocketBase на `pb.devhorizon.online`
 (инстанс на FreedomBox; с 16.10.2026 каталог не общий с прежним
