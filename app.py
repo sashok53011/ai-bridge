@@ -384,6 +384,8 @@ def _serve(
             fresh, _, _, flags = server.fetch_catalogue()
             state["providers"] = fresh
             state["server_flags"] = flags
+            from storage.catalogue_sync import sync_catalogue
+            sync_catalogue(root, fresh)
         except ServerError as exc:
             # Каталог — украшение; без него работают включённые записи.
             print(f"каталог не обновился: {exc}", file=sys.stderr)
@@ -422,6 +424,8 @@ def _serve(
 
     sqlite_path = os.environ.get("AI_BRIDGE_SQLITE_PATH", "").strip()
     sql_playground = SqlPlayground(sqlite_path) if sqlite_path else None
+    from storage.catalogue_sync import sync_catalogue
+    sync_catalogue(root, providers)
 
     ui = WebUi(
         lambda: state["providers"],
@@ -470,6 +474,7 @@ def _serve(
         capabilities=capabilities,
         lists=lists,
         user_dir_for=user_dir_for,
+    )
 
 
 def _remove_provider(

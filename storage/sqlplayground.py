@@ -144,6 +144,75 @@ class SqlPlayground:
                         table["sample_truncated"] = True
                 tables.append(table)
 
+            # Добавляем таблицу providers из catalogue.db, если она есть.
+            import os
+            cat_dir = os.environ.get("AI_BRIDGE_HOME", str(self._database.parent))
+            catalogue_db = Path(cat_dir) / "catalogue.db"
+            if catalogue_db.is_file():
+                try:
+                    cat_conn = sqlite3.connect(
+                        f"{catalogue_db.as_uri()}?mode=ro", uri=True, timeout=1.0
+                    )
+                    try:
+                        cat_names = cat_conn.execute(
+                            "SELECT name FROM sqlite_master "
+                            "WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+                        ).fetchall()
+                        for (cat_name,) in cat_names:
+                            if cat_name in known_names:
+                                continue
+                            quoted = self._quote_identifier(cat_name)
+                            cat_columns = [
+                                {
+                                    "name": str(row[1]),
+                                    "type": str(row[2] or ""),
+                                    "not_null": bool(row[3]),
+                                    "primary_key": bool(row[5]),
+                                }
+                                for row in cat_conn.execute(
+                                    f"PRAGMA table_info({quoted})"
+                                )
+                            ]
+                            cat_table: dict[str, Any] = {
+                                "name": cat_name,
+                                "type": "table",
+                                "columns": cat_columns,
+                            }
+                            if include_data:
+                                preview = cat_conn.execute(
+                                    f"SELECT * FROM {quoted} LIMIT 6"
+                                )
+                                cat_table["sample_columns"] = [
+                                    str(column[0])
+                                    for column in preview.description or ()
+                                ]
+                                cat_rows = []
+                                cat_size = 0
+                                while len(cat_rows) < 5:
+                                    row = preview.fetchone()
+                                    if row is None:
+                                        break
+                                    display_row = [
+                                        self._display_value(value) for value in row
+                                    ]
+                                    cat_size += sum(
+                                        len(str(value).encode("utf-8"))
+                                        for value in display_row
+                                    )
+                                    if cat_size > 64_000:
+                                        cat_table["sample_truncated"] = True
+                                        break
+                                    cat_rows.append(display_row)
+                                cat_table["sample_rows"] = cat_rows
+                                if len(cat_rows) == 5 and preview.fetchone() is not None:
+                                    cat_table["sample_truncated"] = True
+                            tables.append(cat_table)
+                            known_names.add(cat_name)
+                    finally:
+                        cat_conn.close()
+                except (OSError, sqlite3.Error):
+                    pass
+
             relations = self._relations(connection, known_names)
             return {"tables": tables, "relations": relations}
 
@@ -235,6 +304,80 @@ class SqlPlayground:
                 "разрешены SELECT, WITH, INSERT, UPDATE, DELETE, "
                 "CREATE, DROP, ALTER, REPLACE, PRAGMA"
             )
+
+        # Если запрос обращается к таблице из catalogue.db — читаем оттуда.
+        import os
+        cat_dir = os.environ.get("AI_BRIDGE_HOME", str(self._database.parent))
+        catalogue_db = Path(cat_dir) / "catalogue.db"
+        if catalogue_db.is_file():
+            try:
+                cat_conn = sqlite3.connect(
+                    f"{catalogue_db.as_uri()}?mode=ro", uri=True, timeout=1.0
+                )
+                try:
+                    cat_tables = {
+                        str(row[0])
+                        for row in cat_conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    }
+                    # Ищем имя таблицы в запросе.
+                    query_tables = set()
+                    for tname in cat_tables:
+                        if tname in query:
+                            query_tables.add(tname)
+                    if query_tables:
+                        # Запрос к catalogue.db — выполняем там.
+                        deadline = time.monotonic() + self.timeout
+                        cat_conn.set_progress_handler(
+                            lambda: int(time.monotonic() > deadline), 1_000
+                        )
+                        try:
+                            cursor = cat_conn.execute(query)
+                            columns = [
+                                str(column[0])
+                                for column in cursor.description or ()
+                            ]
+                            rows = []
+                            result_size = 0
+                            truncated = False
+                            while len(rows) < self.max_rows:
+                                row = cursor.fetchone()
+                                if row is None:
+                                    break
+                                display_row = [
+                                    self._display_value(value) for value in row
+                                ]
+                                row_size = sum(
+                                    len(str(value).encode("utf-8"))
+                                    for value in display_row
+                                )
+                                if result_size + row_size > self.max_result_bytes:
+                                    truncated = True
+                                    break
+                                result_size += row_size
+                                rows.append(display_row)
+                            if (
+                                len(rows) == self.max_rows
+                                and cursor.fetchone() is not None
+                            ):
+                                truncated = True
+                        except sqlite3.Error as exc:
+                            message = str(exc).replace(
+                                str(catalogue_db), "[каталог]"
+                            )
+                            raise SqlPlaygroundError(message[:500]) from exc
+                        finally:
+                            cat_conn.set_progress_handler(None, 0)
+                        return {
+                            "columns": columns,
+                            "rows": rows,
+                            "truncated": truncated,
+                        }
+                finally:
+                    cat_conn.close()
+            except (OSError, sqlite3.Error):
+                pass
 
         with self._connection(read_only=read_only) as connection:
             deadline = time.monotonic() + self.timeout
