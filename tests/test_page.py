@@ -275,10 +275,6 @@ class TestEditPage:
         assert '<select name="model">' in page
         assert "<option" in page and "gpt-5" in page
 
-    def test_a_fetch_failure_is_explained_in_place(self) -> None:
-        page = edit_page(_entry(), models_error="без ключа список недоступен")
-        assert "без ключа список недоступен" in page
-
     def test_the_current_model_stays_in_a_fetched_list(self) -> None:
         """Текущая модель попадает в список, даже если её там нет."""
         page = edit_page(_entry(model="старая"), models=["gpt-5"])
@@ -792,28 +788,17 @@ class TestAddPage:
             }
         )
         for name in (
-            "name", "url", "api_key", "model", "loginUrl", "getApiKeyUrl",
-            "infoUrl", "pricing", "context", "capabilities", "logoUrl",
+            "name", "url", "api_key", "model", "getApiKeyUrl",
         ):
             assert f'name="{name}"' in page
         assert 'value="Мой LMS"' in page
         assert "показать модели" in page
-        assert "https://a/logo.png" in page
 
     def test_models_become_a_select_and_keep_an_unknown_value(self) -> None:
         page = add_page(values={"model": "custom"}, models=["qwen3", "llama3"])
         assert '<select name="model">' in page
         assert ">qwen3</option>" in page
         assert 'value="custom"' in page  # введённая вручную модель не теряется
-
-    def test_a_keyless_provider_gets_a_help_line(self) -> None:
-        page = add_page(models_error="без ключа список недоступен")
-        assert "без ключа список недоступен" in page
-
-    def test_the_destination_note_matches_the_role(self) -> None:
-        assert "видят только вы" in add_page(is_admin=False)
-        assert "видят все" in add_page(is_admin=True)
-
 
 class TestLogsPage:
     def test_events_render_newest_first(self) -> None:

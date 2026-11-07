@@ -289,16 +289,11 @@ def _nav(*, can_edit: bool) -> str:
     links = [
         '<a href="/">каталог</a>',
         '<a href="/stats">статистика</a>',
-        '<a href="/verify">проверка</a>',
         '<a href="/tokens">приложения и токены</a>',
-        '<a href="/messages">сообщения</a>',
-        '<a href="/bugs">нашёл bug</a>',
     ]
     if can_edit:
         links.append('<a href="/sql">SQL Playground</a>')
         links.append('<a href="/logs">журнал</a>')
-        links.append('<a href="/rules">правила</a>')
-        links.append('<a href="/autotest">автотесты</a>')
         links.append('<a href="/users">пользователи</a>')
     # Вид шапки живёт в браузере: тема и свои цвета (кнопки, полоса)
     # хранятся в localStorage, применяются сразу, без перезагрузки.
@@ -776,8 +771,6 @@ def catalogue_page(
 
 {add_html}
 
-<p class="role">Ключи хранятся только на этом устройстве и уходят напрямую провайдеру —
-на сервер каталога они не попадают никогда.</p>
 <script>
 (function () {{
   var search = document.getElementById("catalogue-search");
@@ -877,12 +870,6 @@ def edit_page(
     if key_hint:
         key_field += f'<p class="role">{escape(key_hint)}</p>'
 
-    fetch_note = (
-        escape(models_error)
-        if models_error
-        else "Кнопка «показать модели» запросит список у провайдера — "
-             "если ключ задан, вводить его заново не нужно."
-    )
 
     fields = "\n  ".join(
         [
@@ -942,10 +929,6 @@ def edit_page(
 </form>
 {oauth_html}
 </div>
-<p class="role">{fetch_note}</p>
-<p class="role">Цена, контекст, способности и логотипы остаются как есть —
-они заполняются при добавлении. Пустое поле не стирает значение — кроме
-поля «Модель»: очистите его, чтобы убрать модель.</p>
 </body>
 </html>"""
 
@@ -1050,11 +1033,6 @@ def add_page(
             "Модель", "model", value=str(v.get("model") or ""), placeholder="qwen3:0.6b"
         )
 
-    fetch_note = (
-        escape(models_error)
-        if models_error
-        else "Кнопка «показать модели» запросит список у провайдера — она ниже, под полем модели."
-    )
     # Ключ возвращается в ту же форму после «показать модели»: иначе он
     # терялся между запросом списка и сохранением — провайдер добавлялся
     # без ключа, а повторный запрос списка жаловался «без ключа». В поле
@@ -1064,11 +1042,6 @@ def add_page(
         f'<input type="password" name="api_key" autocomplete="off" '
         f'value="{escape(str(v.get("api_key") or ""), quote=True)}" '
         'placeholder="sk-…"></label>'
-    )
-    destination = (
-        "попадёт в каталог — видят все"
-        if is_admin
-        else "попадёт в ваше личное пространство — видят только вы"
     )
     notice_html = f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
 
@@ -1096,23 +1069,11 @@ def add_page(
   {key_field}
   {model_control}
   <button type="submit" name="action" value="fetch">показать модели</button>
-  {field("Страница логина провайдера", "loginUrl", value=str(v.get("loginUrl") or ""))}
   {field("Где получить ключ", "getApiKeyUrl", value=str(v.get("getApiKeyUrl") or ""))}
-  {field("Страница с описанием и ценами", "infoUrl", value=str(v.get("infoUrl") or ""))}
-  <label>Логотипы (URL провайдера по строке)
-  <textarea name="logoUrl" rows="3">{escape(str(v.get("logoUrl") or ""))}</textarea></label>
-  {field("Контекст", "context", value=str(v.get("context") or ""), placeholder="128K")}
-  {field("Цена", "pricing", value=str(v.get("pricing") or ""), placeholder="$0.1/1M вход, $0.4/1M выход")}
-  {field("Способности", "capabilities", value=str(v.get("capabilities") or ""), placeholder="vision, thinking, tools")}
   <button type="submit" name="action" value="save" class="primary">сохранить</button>
   <a href="/">назад</a>
 </form>
 </div>
-<p class="role">{destination}. Ключ уходит только к провайдеру, на сервер каталога не попадает никогда.</p>
-<p class="role">{fetch_note}</p>
-<p class="role">Цена, контекст и способности — справка для выбора модели: заполните
-значениями выбранной модели, её увидят все. Если провайдер не отдаёт список
-моделей без ключа — введите ключ выше и нажмите «показать модели» ещё раз.</p>
 </body>
 </html>"""
 
@@ -2515,8 +2476,7 @@ def logs_page(
 <p><form method="post" action="/logs/clear" style="display:inline">
   <button type="submit" class="ghost danger">очистить</button>
 </form>
-<span class="role">обновляется само раз в 10 секунд (не пока открыто тело или ты занят);
-место чтения и раскрытые тела сохраняются — тело запроса/ответа раскрывается по клику</span></p>
+</p>
 <div class="card">
 <table>
 <tr><th>время</th><th>тип</th><th>кто</th><th>событие</th></tr>
@@ -2630,9 +2590,6 @@ def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> 
 {_nav(can_edit=True)}
 <h1>Пользователи</h1>
 {notice_html}
-<p class="role">Регистрация открыта; защита — модерация: заблокированный
-не пускается ни одной приставкой (проверка перед каждым запросом),
-удалённый теряет аккаунт и своё пространство на этом устройстве.</p>
 <div class="card">
 <table>
 <tr><th>почта</th><th>роль</th><th>последний вход</th><th></th></tr>
