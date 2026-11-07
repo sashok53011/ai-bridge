@@ -150,6 +150,12 @@ def _style() -> str:
     border-radius: 999px; cursor: pointer; font: inherit; }
   #theme-sel:hover { border-color: color-mix(in srgb, var(--head) 65%, transparent); }
   #theme-sel option { color: var(--text); background: var(--card); }
+  /* Переключатель языка. */
+  .lang-switch { display: inline-flex; align-items: center; gap: .15rem;
+    margin-left: .5rem; font-size: .8rem; }
+  .lang-switch a { color: color-mix(in srgb, var(--head) 70%, transparent);
+    text-decoration: none; padding: .1rem .35rem; border-radius: 999px; }
+  .lang-switch a:hover { color: var(--head); background: color-mix(in srgb, var(--head) 14%, transparent); }
   .topnav.plain #theme-sel { border-color: var(--line); background: var(--card);
     color: var(--text); }
   /* Свои цвета: пилюля-заголовок, при клике — панелька с четырьмя
@@ -286,28 +292,38 @@ def _nav(*, can_edit: bool) -> str:
     назад читался явно. «Выйти» визуально приглушено и стоит последним,
     подальше от рабочих ссылок: случайный клик не выкинет из приставки.
     """
+    from core.i18n import t, LANGS, LANG_NAMES, get_lang
+
+    lang = get_lang()
     links = [
-        '<a href="/">каталог</a>',
-        '<a href="/stats">статистика</a>',
-        '<a href="/sql">SQL Playground</a>',
-        '<a href="/tokens">приложения и токены</a>',
+        f'<a href="/">{t("nav.catalogue")}</a>',
+        f'<a href="/stats">{t("nav.stats")}</a>',
+        f'<a href="/sql">{t("nav.sql")}</a>',
+        f'<a href="/tokens">{t("nav.tokens")}</a>',
     ]
     if can_edit:
-        links.append('<a href="/logs">журнал</a>')
-        links.append('<a href="/users">пользователи</a>')
+        links.append(f'<a href="/logs">{t("nav.logs")}</a>')
+        links.append(f'<a href="/users">{t("nav.users")}</a>')
+
+    # Переключатель языка — ссылки с параметром ?lang=xx.
+    lang_links = " · ".join(
+        f'<a href="?lang={code}" class="lang-link"{" style=\"font-weight:700\"" if code == lang else ""}>{LANG_NAMES[code]}</a>'
+        for code in LANGS
+    )
+
     # Вид шапки живёт в браузере: тема и свои цвета (кнопки, полоса)
     # хранятся в localStorage, применяются сразу, без перезагрузки.
     theme_select = (
-        '<label class="theme-switch" title="цветовая тема">'
-        '<select id="theme-sel" aria-label="цветовая тема">'
-        '<option value="system">системная</option>'
-        '<option value="emerald">зелёная</option>'
-        '<option value="blue">синяя</option>'
-        '<option value="yellow">жёлтая</option>'
-        '<option value="purple">фиолетовая</option>'
-        '<option value="cyberpunk">киберпанк</option>'
-        '<option value="aurora">северное сияние</option>'
-        '<option value="synthwave">синтвейв</option>'
+        f'<label class="theme-switch" title="{t("nav.theme")}">'
+        f'<select id="theme-sel" aria-label="{t("nav.theme")}">'
+        f'<option value="system">{t("nav.theme.system")}</option>'
+        f'<option value="emerald">{t("nav.theme.emerald")}</option>'
+        f'<option value="blue">{t("nav.theme.blue")}</option>'
+        f'<option value="yellow">{t("nav.theme.yellow")}</option>'
+        f'<option value="purple">{t("nav.theme.purple")}</option>'
+        f'<option value="cyberpunk">{t("nav.theme.cyberpunk")}</option>'
+        f'<option value="aurora">{t("nav.theme.aurora")}</option>'
+        f'<option value="synthwave">{t("nav.theme.synthwave")}</option>'
         '</select></label>'
     )
     # Свои цвета — четыре независимых: полоса шапки (верх) и нежный
@@ -427,12 +443,13 @@ def _nav(*, can_edit: bool) -> str:
     links.append(colors)
     links.append(ui_script)
     links.append(
-        '<form method="post" action="/logout">'
-        '<button class="out" type="submit">выйти</button></form>'
+        f'<form method="post" action="/logout">'
+        f'<button class="out" type="submit">{t("nav.logout")}</button></form>'
     )
     return (
         f'{theme_script}<header class="topnav"><a class="brand" href="/">AI-приставка</a>'
-        f'<nav>{" ".join(links)}</nav></header>'
+        f'<nav>{" ".join(links)}</nav>'
+        f'<span class="lang-switch">{lang_links}</span></header>'
     )
 
 def _footer(visits: int) -> str:
@@ -589,18 +606,20 @@ def catalogue_page(
 
     ``statuses`` — {id провайдера: живая строка состояния локального}.
     """
+    from core.i18n import t
+
     statuses = statuses or {}
     rows = "\n".join(
         _provider_row(
             entry,
             can_edit=can_edit,
-            key_hint="задан" if entry["id"] in keyed_ids else "",
+            key_hint=t("cat.key_set") if entry["id"] in keyed_ids else "",
             status=statuses.get(entry["id"], ""),
         )
         for entry in providers
     )
     if not rows:
-        rows = '<tr><td colspan="3" class="empty">каталог пуст</td></tr>'
+        rows = f'<tr><td colspan="3" class="empty">{t("cat.empty")}</td></tr>'
 
     notice_html = (
         f'<p class="notice{" bad" if notice_bad else ""}">{escape(notice)}</p>'
@@ -614,27 +633,27 @@ def catalogue_page(
     # Добавить провайдера может каждый: админ — в каталог для всех,
     # человек — в своё личное пространство (форма рассказывает разницу).
     endpoint_html = (
-        f'<div class="hero-endpoint"><span class="hero-label">Для приложений · endpoint OpenAI</span>'
+        f'<div class="hero-endpoint"><span class="hero-label">{t("cat.endpoint_label")}</span>'
         f'<div class="endpoint-line">{_copy_line(app_address, "v1addr")}</div></div>'
         if app_address else ""
     )
     hero_html = f"""<section class="catalogue-hero">
   <div class="hero-copy">
-    <span class="hero-status"><span class="status-dot"></span>ваше пространство AI-провайдеров</span>
-    <h1>Каталог провайдеров</h1>
-    <p>Подключайте модели, храните ключи локально и выбирайте, кому доверить запросы.</p>
+    <span class="hero-status"><span class="status-dot"></span>{t("cat.hero_status")}</span>
+    <h1>{t("cat.hero_title")}</h1>
+    <p>{t("cat.hero_desc")}</p>
   </div>
   <div class="hero-side">
     {endpoint_html}
     <div class="hero-metrics">
-      <div><b>{len(providers)}</b><span>провайдеров</span></div>
-      <div><b>{active_count}</b><span>включено</span></div>
-      <div><b>{keyed_count}</b><span>с ключом</span></div>
+      <div><b>{len(providers)}</b><span>{t("cat.providers")}</span></div>
+      <div><b>{active_count}</b><span>{t("cat.active")}</span></div>
+      <div><b>{keyed_count}</b><span>{t("cat.with_key")}</span></div>
     </div>
   </div>
 </section>"""
     copy_script = COPY_SCRIPT if app_address else ""
-    add_html = '<p class="add"><a class="btn-ghost" href="/add">+ добавить провайдера</a></p>'
+    add_html = f'<p class="add"><a class="btn-ghost" href="/add">{t("cat.add_provider")}</a></p>'
 
     return f"""<!doctype html>
 <html lang="ru">
@@ -1085,11 +1104,13 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
     админ всё равно попадёт на страницу. Регистрация — открытая,
     но ссылка показывается только когда сервер её вообще принимает.
     """
+    from core.i18n import t
+
     notice_html = (
         f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
     )
     signup_html = (
-        '<p class="role">нет аккаунта? <a href="/signup">зарегистрироваться</a></p>'
+        f'<p class="role">{t("login.no_account")} <a href="/signup">{t("login.signup")}</a></p>'
         if signup_open
         else ""
     )
@@ -1098,7 +1119,7 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Вход — AI-приставка</title>
+<title>{t("login.title")} — AI-приставка</title>
 <style>
 {_style()}
   input {{ width: 100%; margin: .3rem 0; font-family: monospace; }}
@@ -1108,22 +1129,22 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
 </head>
 <body>
 <header class="topnav plain"><span class="brand">AI-приставка</span></header>
-<h1>Вход</h1>
+<h1>{t("login.title")}</h1>
 {notice_html}
 <div class="card">
 <form method="post" action="/login">
-  <input name="email" type="email" placeholder="почта" autocomplete="username" autofocus>
-  <input name="password" type="password" placeholder="пароль" autocomplete="current-password">
-  <button type="submit" class="primary">войти</button>
+  <input name="email" type="email" placeholder="{t("login.email")}" autocomplete="username" autofocus>
+  <input name="password" type="password" placeholder="{t("login.password")}" autocomplete="current-password">
+  <button type="submit" class="primary">{t("login.submit")}</button>
 </form>
 {signup_html}
 <details>
-<summary class="role">вход по токену (аварийный)</summary>
+<summary class="role">{t("login.emergency")}</summary>
 <form method="post" action="/login">
-  <input name="token" type="password" placeholder="токен приставки" autocomplete="off">
-  <button type="submit">войти по токену</button>
+  <input name="token" type="password" placeholder="{t("login.token")}" autocomplete="off">
+  <button type="submit">{t("login.submit")}</button>
 </form>
-<p class="role">Токен: <code>uv run python app.py --token</code>.</p>
+<p class="role">Token: <code>uv run python app.py --token</code>.</p>
 </details>
 </div>
 </body>
@@ -1173,6 +1194,8 @@ def tokens_page(
     can_edit: bool = False,
 ) -> str:
     """Приложения и токены: адрес для настройки, тумблер доступа, список."""
+    from core.i18n import t
+
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     if tokens:
         rows = "\n".join(
@@ -1181,25 +1204,20 @@ def tokens_page(
             f'<td>{escape(str(item.get("created") or "")[:10])}</td>'
             f'<td><form method="post" action="/tokens/revoke">'
             f'<input type="hidden" name="tail" value="{escape(str(item.get("tail") or ""), quote=True)}">'
-            f'<button type="submit" class="ghost danger">отозвать</button></form></td></tr>'
+            f'<button type="submit" class="ghost danger">{t("tokens.revoke")}</button></form></td></tr>'
             for item in tokens
         )
     else:
-        rows = '<tr><td colspan="4" class="empty">токенов пока нет</td></tr>'
+        rows = f'<tr><td colspan="4" class="empty">{t("tokens.empty")}</td></tr>'
 
-    api_button = "включить доступ" if not api_on else "выключить доступ"
-    api_status = (
-        "доступ приложений включён — токены работают"
-        if api_on
-        else "доступ приложений ВЫКЛЮЧЕН — ни один токен не пройдёт"
-    )
+    api_button = t("tokens.api_on") if not api_on else t("tokens.api_off")
+    api_status = t("tokens.api_on_hint") if api_on else t("tokens.api_off_hint")
     address_html = ""
     copy_script = ""
     if app_address:
         copy_script = COPY_SCRIPT
-        address_html = f"""<h2>Настройка в приложении</h2>
-<p class="role">Тип endpoint — <b>OpenAI</b>. Адрес вставьте в поле
-«custom base URL», а ключом будет ваш токен ниже.</p>
+        address_html = f"""<h2>{t("tokens.setup")}</h2>
+<p class="role">{t("tokens.setup_hint")}</p>
 <p>{_copy_line(app_address, "v1big")}</p>"""
 
     return f"""<!doctype html>
@@ -1947,8 +1965,9 @@ def logs_page(
     10 секунд пропускает моменты, когда открыто тело или человек
     занят страницей — иначе чтение рвёт прыжком.
     """
+    from core.i18n import t
     rows = "\n".join(_log_row(item) for item in events) or (
-        '<tr><td colspan="4" class="empty">событий пока нет</td></tr>'
+        f'<tr><td colspan="4" class="empty">{t("logs.empty")}</td></tr>'
     )
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     summary_html = _log_summary(events)
@@ -1957,7 +1976,7 @@ def logs_page(
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Журнал — AI-приставка</title>
+<title>{t("logs.title")} — AI-приставка</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
@@ -2085,21 +2104,23 @@ setTimeout(function tick() {{
 
 def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> str:
     """Пользователи приставки: блокировка и удаление (модерация)."""
+    from core.i18n import t
+
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     if users:
         rows = []
         for item in users:
             mine = str(item.get("id")) == current_id
             blocked = bool(item.get("blocked"))
-            badge = ' <span class="badge badge-dead">заблокирован</span>' if blocked else ""
+            badge = f' <span class="badge badge-dead">{t("users.blocked")}</span>' if blocked else ""
             controls = "<td></td>" if mine else (
                 f'<td><form method="post" action="/users/block">'
                 f'<input type="hidden" name="id" value="{escape(str(item.get("id")), quote=True)}">'
                 f'<button type="submit" class="ghost">'
-                f'{"разблокировать" if blocked else "заблокировать"}</button></form> '
+                f'{t("users.unblock") if blocked else t("users.block")}</button></form> '
                 f'<form method="post" action="/users/delete">'
                 f'<input type="hidden" name="id" value="{escape(str(item.get("id")), quote=True)}">'
-                f'<button type="submit" class="ghost danger">удалить</button></form></td>'
+                f'<button type="submit" class="ghost danger">{t("users.delete")}</button></form></td>'
             )
             rows.append(
                 f'<tr><td>{escape(str(item.get("email") or ""))}{badge}</td>'
@@ -2109,13 +2130,13 @@ def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> 
             )
         rows_html = "\n".join(rows)
     else:
-        rows_html = '<tr><td colspan="4" class="empty">никто ещё не регистрировался</td></tr>'
+        rows_html = f'<tr><td colspan="4" class="empty">{t("users.empty")}</td></tr>'
     return f"""<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Пользователи — AI-приставка</title>
+<title>{t("users.title")} — AI-приставка</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; }}
@@ -2125,11 +2146,11 @@ def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> 
 </head>
 <body>
 {_nav(can_edit=True)}
-<h1>Пользователи</h1>
+<h1>{t("users.title")}</h1>
 {notice_html}
 <div class="card">
 <table>
-<tr><th>почта</th><th>роль</th><th>последний вход</th><th></th></tr>
+<tr><th>{t("login.email")}</th><th>{t("users.role")}</th><th>{t("users.last_login")}</th><th></th></tr>
 {rows_html}
 </table>
 </div>

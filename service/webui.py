@@ -675,6 +675,27 @@ class WebUi:
         notice = (params.get("notice") or [""])[0]
         notice_bad = (params.get("bad") or ["0"])[0] == "1"
 
+        # Язык: ?lang=xx в URL → cookie → по умолчанию ru.
+        from core.i18n import set_lang, LANGS
+        lang = (params.get("lang") or [""])[0]
+        if lang in LANGS:
+            handler.send_response(302)
+            handler.send_header("Location", f"/{clean}" if clean != "/" else "/")
+            handler.send_header(
+                "Set-Cookie",
+                f"ai_lang={lang}; Path=/; Max-Age=31536000; SameSite=Strict",
+            )
+            handler.send_header("Content-Length", "0")
+            handler.end_headers()
+            return
+        cookie_lang = ""
+        cookie_header = handler.headers.get("Cookie") or ""
+        for part in cookie_header.split(";"):
+            kv = part.strip().split("=", 1)
+            if len(kv) == 2 and kv[0] == "ai_lang":
+                cookie_lang = kv[1].strip()
+        set_lang(cookie_lang if cookie_lang in LANGS else "ru")
+
         if clean == "/login":
             self._send_html(handler, 200, login_page(notice if notice_bad else ""))
             return
@@ -1396,6 +1417,16 @@ class WebUi:
 
         clean = urllib.parse.urlsplit(path).path
         content_type = handler.headers.get("Content-Type", "")
+
+        # Язык из cookie (для POST-ответов).
+        from core.i18n import set_lang, LANGS
+        cookie_lang = ""
+        cookie_header = handler.headers.get("Cookie") or ""
+        for part in cookie_header.split(";"):
+            kv = part.strip().split("=", 1)
+            if len(kv) == 2 and kv[0] == "ai_lang":
+                cookie_lang = kv[1].strip()
+        set_lang(cookie_lang if cookie_lang in LANGS else "ru")
 
         if content_type.startswith("multipart/form-data"):
             form, files = self._parse_multipart(body, content_type)
