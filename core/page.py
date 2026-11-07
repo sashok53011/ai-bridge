@@ -194,6 +194,8 @@ def _style() -> str:
     .topnav nav::-webkit-scrollbar { display: none; }
     .topnav nav > a, .topnav nav > label, .topnav nav > details,
     .topnav nav > form { flex: 0 0 auto; }
+    .lang-switch { flex: 1 1 100%; justify-content: center;
+      margin-left: 0; margin-top: .25rem; font-size: .85rem; }
   }
   .badge { font-size: .72rem; padding: .12rem .55rem; border-radius: 999px; font-weight: 600; }
   .badge-on { background: var(--accent); color: #fff; }
@@ -641,7 +643,6 @@ def catalogue_page(
   <div class="hero-copy">
     <span class="hero-status"><span class="status-dot"></span>{t("cat.hero_status")}</span>
     <h1>{t("cat.hero_title")}</h1>
-    <p>{t("cat.hero_desc")}</p>
   </div>
   <div class="hero-side">
     {endpoint_html}
