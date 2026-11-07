@@ -387,6 +387,27 @@ class WebUi:
 
     # ------------------------------------------------------------ защита
 
+    @staticmethod
+    def _resolve_lang(handler: BaseHTTPRequestHandler) -> str:
+        """Определить язык: cookie → Accept-Language браузера → en."""
+        from core.i18n import LANGS
+        # 1. Cookie — явный выбор пользователя.
+        cookie = handler.headers.get("Cookie") or ""
+        for part in cookie.split(";"):
+            kv = part.strip().split("=", 1)
+            if len(kv) == 2 and kv[0] == "ai_lang":
+                val = kv[1].strip()
+                if val in LANGS:
+                    return val
+        # 2. Accept-Language от браузера.
+        accept = handler.headers.get("Accept-Language") or ""
+        for chunk in accept.split(","):
+            code = chunk.split(";")[0].strip().lower()[:2]
+            if code in LANGS:
+                return code
+        # 3. По умолчанию — English.
+        return "en"
+
     def _refusal(self, handler: BaseHTTPRequestHandler) -> str | None:
         """Чужой Origin (кнопки со страницы-обманки) отклоняется всегда.
 
@@ -675,7 +696,7 @@ class WebUi:
         notice = (params.get("notice") or [""])[0]
         notice_bad = (params.get("bad") or ["0"])[0] == "1"
 
-        # Язык: ?lang=xx в URL → cookie → по умолчанию ru.
+        # Язык: cookie (выбор пользователя) → Accept-Language браузера → ru.
         from core.i18n import set_lang, LANGS
         lang = (params.get("lang") or [""])[0]
         if lang in LANGS:
@@ -688,13 +709,8 @@ class WebUi:
             handler.send_header("Content-Length", "0")
             handler.end_headers()
             return
-        cookie_lang = ""
-        cookie_header = handler.headers.get("Cookie") or ""
-        for part in cookie_header.split(";"):
-            kv = part.strip().split("=", 1)
-            if len(kv) == 2 and kv[0] == "ai_lang":
-                cookie_lang = kv[1].strip()
-        set_lang(cookie_lang if cookie_lang in LANGS else "ru")
+        resolved = self._resolve_lang(handler)
+        set_lang(resolved)
 
         if clean == "/login":
             self._send_html(handler, 200, login_page(notice if notice_bad else ""))
@@ -1476,15 +1492,9 @@ class WebUi:
         clean = urllib.parse.urlsplit(path).path
         content_type = handler.headers.get("Content-Type", "")
 
-        # Язык из cookie (для POST-ответов).
-        from core.i18n import set_lang, LANGS
-        cookie_lang = ""
-        cookie_header = handler.headers.get("Cookie") or ""
-        for part in cookie_header.split(";"):
-            kv = part.strip().split("=", 1)
-            if len(kv) == 2 and kv[0] == "ai_lang":
-                cookie_lang = kv[1].strip()
-        set_lang(cookie_lang if cookie_lang in LANGS else "ru")
+        # Язык из cookie / Accept-Language.
+        from core.i18n import set_lang
+        set_lang(self._resolve_lang(handler))
 
         if content_type.startswith("multipart/form-data"):
             form, files = self._parse_multipart(body, content_type)

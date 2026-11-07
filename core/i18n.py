@@ -9,7 +9,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 
 #: Текущий язык (contextvar — безопасно в многопоточном сервере).
-_current_lang: ContextVar[str] = ContextVar("lang", default="ru")
+_current_lang: ContextVar[str] = ContextVar("lang", default="en")
 
 #: Доступные языки.
 LANGS = ("ru", "en", "de")
@@ -20,7 +20,7 @@ LANG_NAMES = {"ru": "Русский", "en": "English", "de": "Deutsch"}
 
 def set_lang(lang: str) -> None:
     """Установить язык для текущего запроса."""
-    _current_lang.set(lang if lang in LANGS else "ru")
+    _current_lang.set(lang if lang in LANGS else "en")
 
 
 def get_lang() -> str:
