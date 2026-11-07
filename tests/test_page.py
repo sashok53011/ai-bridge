@@ -18,6 +18,7 @@ from core.page import (
     oauth_page,
     pick_model_page,
     signup_page,
+    sql_playground_page,
     stats_page,
     test_page as chat_test_page,  # имя «test_*» путает pytest с тестами
     token_created_page,
@@ -39,6 +40,54 @@ def _entry(**kwargs) -> dict:
     }
     base.update(kwargs)
     return base
+
+
+class TestSqlPlaygroundPage:
+    def test_schema_relations_and_query_result_are_rendered_safely(self) -> None:
+        page = sql_playground_page(
+            schema={
+                "tables": [
+                    {
+                        "name": "users",
+                        "columns": [{"name": "email", "type": "TEXT"}],
+                        "sample_columns": ["email"],
+                        "sample_rows": [['<script>alert("x")</script>']],
+                    }
+                ],
+                "relations": [
+                    {
+                        "source": "posts",
+                        "field": "author",
+                        "target": "users",
+                        "cardinality": "N:1",
+                    }
+                ],
+            },
+            query='SELECT "<script>"',
+            result={
+                "columns": ["value"],
+                "rows": [['<script>alert("x")</script>']],
+                "truncated": False,
+            },
+            include_data=True,
+        )
+
+        assert "SQL Playground" in page
+        assert "N:1" in page
+        assert "user@example" not in page
+        assert "<script>alert" not in page
+        assert page.count("&lt;script&gt;") >= 2
+        assert 'name="include_data"' in page
+        assert "checked" in page
+        assert 'href="/sql"' in page
+
+    def test_unconfigured_page_explains_local_database_setting(self) -> None:
+        page = sql_playground_page(configured=False)
+
+        assert "AI_BRIDGE_SQLITE_PATH" in page
+        assert "Только администратору" in page
+        assert "data.db" in page
+        assert 'action="/sql/run"' not in page
 
 
 class TestCataloguePage:
@@ -140,6 +189,30 @@ class TestCataloguePage:
         page = catalogue_page([_entry()], keyed_ids=frozenset({"ollama"}))
         assert "<th>ключ</th>" in page
         assert ">задан<" in page
+
+    def test_catalogue_search_and_filters_work_without_exposing_provider_urls(self) -> None:
+        page = catalogue_page(
+            [
+                _entry(enabled=True, capabilities="vision"),
+                _entry(id="cloud", name="Cloud", url="https://private.example/v1",
+                       capabilities="tools"),
+            ],
+            keyed_ids=frozenset({"ollama"}),
+        )
+        assert 'id="catalogue-search"' in page
+        assert 'id="catalogue-filter"' in page
+        assert 'data-local="1"' in page
+        assert 'data-local="0"' in page
+        assert 'data-enabled="1"' in page
+        assert 'data-key="1"' in page
+        assert 'data-capabilities="vision"' in page
+        assert 'data-capabilities="tools"' in page
+        assert 'value="vision"' in page
+        assert 'value="tools"' in page
+        assert "https://private.example" not in page
+        assert "llama3.2" not in page
+        assert 'addEventListener("input", applyFilter)' in page
+        assert "table.catalogue tr.provider-row[hidden] { display: none; }" in page
 
 
 class TestEditPage:
@@ -1203,6 +1276,20 @@ class TestGreyTimer:
             grey_rows=[{"id": "ollama", "minutes": 30, "reason": "x", "cycle": 1}],
         )
         assert "таймер пробуждения" not in page
+
+    def test_stats_page_shows_a_compact_usage_summary(self) -> None:
+        page = stats_page(
+            [
+                {"model": "m1", "requests": 3, "fails": 1},
+                {"model": "m2", "requests": 0, "fails": 0},
+            ],
+            can_edit=True,
+            penalized=[{"key": "p/m", "fails": 3, "blocks": 1, "until": 60}],
+        )
+        assert 'class="stats-kpis"' in page
+        assert ">3</b>" in page
+        assert ">67%</b>" in page
+        assert ">1</b>" in page
 
 
 class TestAutotestMediaForm:

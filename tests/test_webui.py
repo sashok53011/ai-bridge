@@ -7,6 +7,7 @@
 
 import json
 import os
+import sqlite3
 import threading
 import urllib.parse
 from pathlib import Path
@@ -24,6 +25,7 @@ from storage.mail import MailStore
 from storage.secretbox import SecretBox
 from storage.sessions import SessionStore
 from storage.snapshot import Snapshot
+from storage.sqlplayground import SqlPlayground
 from storage.usertokens import UserTokens
 from storage.users import UserStore, user_dir
 
@@ -2330,6 +2332,48 @@ class TestReputationPage:
 
         assert refused.status_code == 403
         assert store.remaining("ollama/llama3.2") > 0  # штрафы на месте
+
+
+class TestSqlPlaygroundRoutes:
+    @staticmethod
+    def _database(path: Path) -> None:
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE sample (value TEXT)")
+            connection.execute("INSERT INTO sample VALUES ('hello')")
+
+    def test_admin_can_inspect_schema_and_run_select(self, harness, tmp_path) -> None:
+        database = tmp_path / "data.db"
+        self._database(database)
+        _, base = harness([_entry()], sql_playground=SqlPlayground(database))
+
+        with _client(base) as client:
+            _as_admin(client)
+            schema = client.get("/sql")
+            result = client.post(
+                "/sql/run",
+                data={"query": "SELECT value FROM sample"},
+            )
+
+        assert schema.status_code == 200
+        assert "sample" in schema.text
+        assert schema.headers["Cache-Control"] == "no-store"
+        assert result.status_code == 200
+        assert "hello" in result.text
+        assert "Результат запроса" in result.text
+
+    def test_guest_cannot_view_or_query_database(self, harness, tmp_path) -> None:
+        database = tmp_path / "data.db"
+        self._database(database)
+        _, base = harness([_entry()], sql_playground=SqlPlayground(database))
+
+        with _client(base) as client:
+            _as_guest(client)
+            page = client.get("/sql")
+            result = client.post("/sql/run", data={"query": "SELECT * FROM sample"})
+
+        assert page.status_code == 403
+        assert result.status_code == 403
+
 
 class TestAutotestRun:
     """Запуск теста: post/redirect/GET — перезагрузка не перезапускает тест.

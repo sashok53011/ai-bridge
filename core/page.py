@@ -16,19 +16,20 @@ from html import escape
 
 from core.catalogue import can_remove
 from core.markdown import render as render_markdown
+from core.routes import is_local_url
 
 
 def _style() -> str:
-    """Общий вид страниц: светлая изумрудная тема, тёмная — по системной.
+    """Общий вид страниц в стиле AI Studio: чистая сетка и выразительные карточки.
 
     Всё на CSS-переменных: одна правка красит все страницы. Кнопки —
-    пилюли, карточки — с лёгкой тенью; навигация одна на все страницы,
-    «выйти» приглушён и подальше от рабочих ссылок.
+    компактные скруглённые элементы, карточки — с лёгкой тенью; навигация
+    одна на все страницы, «выйти» приглушён и подальше от рабочих ссылок.
     """
     return """  :root { color-scheme: light dark;
-    --bg: #f4f8f6; --card: #ffffff; --text: #1b2a24; --muted: #5c6b64;
-    --line: #e2e9e5; --accent: #0e9f6e; --accent-deep: #0a7d56;
-    --accent-soft: rgba(14, 159, 110, .10);
+    --bg: #f1f5f9; --card: #ffffff; --text: #0f172a; --muted: #64748b;
+    --line: #e2e8f0; --accent: #059669; --accent-deep: #047857;
+    --accent-soft: rgba(5, 150, 105, .10);
     /* Четыре своих цвета: полоса (шапка) и кнопки, у каждого — верх и
        низ. По умолчанию всё следует за акцентом; пипетки разводят. */
     --nav-a: var(--accent); --nav-b: var(--accent-deep);
@@ -36,20 +37,26 @@ def _style() -> str:
     --bad: #c0392b; --bad-soft: rgba(192, 57, 43, .10);
     --warn-soft: rgba(176, 140, 20, .14); --blue-soft: rgba(42, 90, 128, .12); }
   @media (prefers-color-scheme: dark) { :root {
-    --bg: #0e1512; --card: #17201b; --text: #e6efe9; --muted: #96a49d;
-    --line: #29332d; --accent: #34d399; --accent-deep: #0e9f6e;
-    --accent-soft: rgba(52, 211, 153, .12);
+    --bg: #060911; --card: #0d121f; --text: #f8fafc; --muted: #94a3b8;
+    --line: #1e293b; --accent: #22d3ee; --accent-deep: #0891b2;
+    --accent-soft: rgba(34, 211, 238, .12);
     --bad: #e5736a; --bad-soft: rgba(229, 115, 106, .14);
     --warn-soft: rgba(202, 168, 60, .16); --blue-soft: rgba(96, 152, 196, .16); } }
   /* Цветовые темы: класс на <html> переопределяет акцент. «Системная» —
-     акцент по умолчанию (зелёный) и тёмная/светлая по системе. */
+     акцент по умолчанию и светлый/тёмный режим по настройкам системы. */
   .theme-blue { --accent: #2563eb; --accent-deep: #1d4ed8; --accent-soft: rgba(37, 99, 235, .12); }
   .theme-yellow { --accent: #d97706; --accent-deep: #b45309; --accent-soft: rgba(217, 119, 6, .12); }
   .theme-purple { --accent: #7c3aed; --accent-deep: #6d28d9; --accent-soft: rgba(124, 58, 237, .12); }
+  .theme-cyberpunk { --accent: #06b6d4; --accent-deep: #0891b2; --accent-soft: rgba(6, 182, 212, .12); }
+  .theme-aurora { --accent: #10b981; --accent-deep: #0f766e; --accent-soft: rgba(16, 185, 129, .12); }
+  .theme-synthwave { --accent: #d946ef; --accent-deep: #c026d3; --accent-soft: rgba(217, 70, 239, .12); }
   @media (prefers-color-scheme: dark) {
     .theme-blue { --accent: #60a5fa; --accent-deep: #2563eb; --accent-soft: rgba(96, 165, 250, .14); }
     .theme-yellow { --accent: #fbbf24; --accent-deep: #d97706; --accent-soft: rgba(251, 191, 36, .14); }
     .theme-purple { --accent: #a78bfa; --accent-deep: #7c3aed; --accent-soft: rgba(167, 139, 250, .14); }
+    .theme-cyberpunk { --accent: #22d3ee; --accent-deep: #0891b2; --accent-soft: rgba(34, 211, 238, .14); }
+    .theme-aurora { --accent: #34d399; --accent-deep: #0f766e; --accent-soft: rgba(52, 211, 153, .14); }
+    .theme-synthwave { --accent: #e879f9; --accent-deep: #c026d3; --accent-soft: rgba(232, 121, 249, .14); }
   }
   /* Свои цвета (кладёт браузер): производные оттенки считает CSS от
      выбранного base-цвета, JS только запоминает и применяет его. */
@@ -58,21 +65,31 @@ def _style() -> str:
   html.custom-nav { --nav-b: color-mix(in srgb, var(--nav-a) 74%, #000); }
   * { box-sizing: border-box; }
   html { background: var(--bg); }
-  body { font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text);
-    margin: 0 auto; max-width: 100%; padding: 1rem 1.2rem 3rem; min-height: 100vh; }
-  h1 { font-size: 1.35rem; margin: .8rem 0 .6rem; }
-  h2 { font-size: 1.05rem; margin-top: 1.5rem; }
+  body { font: 15px/1.55 "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg); color: var(--text); margin: 0 auto; max-width: 90rem;
+    padding: 1rem clamp(.8rem, 3vw, 2rem) 3rem; min-height: 100vh;
+    text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+  h1 { font-size: clamp(1.45rem, 2.5vw, 2rem); line-height: 1.2;
+    letter-spacing: -.035em; margin: 1.25rem 0 .45rem; font-weight: 800; }
+  h2 { font-size: 1.12rem; margin-top: 1.6rem; letter-spacing: -.015em; }
   a { color: var(--accent); }
   input, select, textarea { padding: .4rem .55rem; border: 1px solid var(--line);
-    border-radius: .5rem; background: var(--card); color: var(--text); font: inherit; }
-  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
-  button, .btn-ghost { display: inline-block; padding: .32rem .9rem; border: 1px solid var(--line);
-    border-radius: 999px; background: var(--card); color: var(--text); cursor: pointer;
-    font: inherit; font-size: .88rem; text-decoration: none; }
+    border-radius: .7rem; background: var(--card); color: var(--text); font: inherit;
+    transition: border-color .16s, box-shadow .16s, background .16s; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+  button, .btn-ghost { display: inline-block; padding: .38rem .82rem; border: 1px solid var(--line);
+    border-radius: .72rem; background: var(--card); color: var(--text); cursor: pointer;
+    font: inherit; font-size: .86rem; font-weight: 600; text-decoration: none;
+    transition: transform .16s, border-color .16s, box-shadow .16s, background .16s; }
   button:hover, .btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+  button:active, .btn-ghost:active { transform: translateY(1px); }
+  button:focus-visible, a:focus-visible, summary:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--accent) 48%, transparent); outline-offset: 2px; }
   /* Основное действие — заливная изумрудная кнопка. */
   button.primary, form.primary button[type=submit] { background: var(--accent);
-    border-color: var(--accent); color: #fff; font-weight: 600; }
+    border-color: var(--accent); color: #fff; font-weight: 700;
+    box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 20%, transparent); }
   button.primary:hover, form.primary button[type=submit]:hover { background: var(--accent-deep);
     border-color: var(--accent-deep); color: #fff; }
   button.ghost { background: transparent; border-color: transparent; color: var(--muted); }
@@ -88,23 +105,35 @@ def _style() -> str:
   .notice { background: var(--soft); color: var(--text); padding: .5rem .8rem;
     border-radius: .6rem; }
   .notice.bad { background: var(--bad-soft); }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 1rem;
-    padding: .8rem 1rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 1.15rem;
+    padding: 1rem 1.1rem; box-shadow: 0 8px 24px rgba(15, 23, 42, .045);
+    transition: border-color .2s, box-shadow .2s; }
+  @media (prefers-color-scheme: dark) {
+    .card { box-shadow: 0 12px 32px rgba(0, 0, 0, .18); }
+  }
   /* Таблица шире карточки — прокручивается внутри неё, а не лезет наружу. */
   .card { overflow-x: auto; }
   /* Шапка — плашка своего цвета: логотип-ссылка слева, разделы справа.
      Разделы — пилюли с рамкой (как ссылки-действия в строках), «выйти»
      в той же форме, но приглушено. */
-  .topnav { display: flex; justify-content: space-between; align-items: center;
-    gap: .5rem; flex-wrap: wrap; padding: .55rem .9rem; border-radius: .9rem;
+  .topnav { position: sticky; top: .5rem; z-index: 20; display: flex;
+    justify-content: space-between; align-items: center;
+    gap: .5rem; flex-wrap: wrap; padding: .55rem .9rem; border-radius: 1rem;
     background: linear-gradient(135deg, var(--nav-a), var(--nav-b));
-    box-shadow: 0 2px 6px color-mix(in srgb, var(--nav-a) 40%, transparent); }
-  .topnav .brand { font-weight: 700; font-size: 1.1rem; color: #fff; text-decoration: none;
-    margin-right: .4rem; }
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--nav-a) 40%, transparent),
+      0 8px 24px color-mix(in srgb, var(--nav-a) 24%, transparent);
+    backdrop-filter: blur(16px); }
+  .topnav .brand { display: inline-flex; align-items: center; gap: .55rem;
+    font-weight: 800; font-size: 1.05rem; letter-spacing: -.025em;
+    color: #fff; text-decoration: none; margin-right: .4rem; }
+  .topnav .brand::before { content: "✦"; display: inline-grid; place-items: center;
+    width: 1.85rem; height: 1.85rem; border-radius: .65rem;
+    color: #082f33; background: linear-gradient(135deg, #6ee7b7, #67e8f9);
+    box-shadow: 0 2px 12px rgba(103, 232, 249, .3); }
   .topnav .brand:hover { text-decoration: underline; }
-  .topnav nav { display: flex; gap: .45rem; align-items: center; font-size: .9rem; flex-wrap: wrap; }
+  .topnav nav { display: flex; gap: .35rem; align-items: center; font-size: .9rem; flex-wrap: wrap; }
   .topnav nav a { color: color-mix(in srgb, var(--head) 85%, transparent); text-decoration: none;
-    font-weight: 500; padding: .2rem .65rem;
+    font-weight: 600; padding: .28rem .65rem;
     border: 1px solid color-mix(in srgb, var(--head) 40%, transparent); border-radius: 999px; }
   .topnav nav a:hover { color: var(--head); background: color-mix(in srgb, var(--head) 16%, transparent);
     border-color: color-mix(in srgb, var(--head) 65%, transparent); text-decoration: none; }
@@ -144,10 +173,22 @@ def _style() -> str:
   .colors .panel input[type=color] { width: 2.2rem; height: 1.5rem; padding: 0;
     border: 1px solid var(--line); border-radius: 999px; background: var(--card);
     cursor: pointer; }
+  /* Счётчик посещений: мелкий, приглушённый текст в самом низу. */
+  .page-counter { text-align: right; font-size: .75rem; color: var(--muted);
+  margin-top: 2rem; opacity: .6; }
   /* Вход/регистрация — шапка без плашки, они ещё не в системе. */
   .topnav.plain { background: none; box-shadow: none; padding: .2rem 0;
-    border-bottom: 1px solid var(--line); border-radius: 0; }
+    border-bottom: 1px solid var(--line); border-radius: 0; position: static;
+    backdrop-filter: none; }
   .topnav.plain .brand { color: var(--text); }
+  @media (max-width: 52rem) {
+    .topnav { top: .25rem; padding: .5rem .65rem; }
+    .topnav nav { flex: 1 1 100%; flex-wrap: nowrap; overflow-x: auto;
+      padding-bottom: .15rem; scrollbar-width: none; }
+    .topnav nav::-webkit-scrollbar { display: none; }
+    .topnav nav > a, .topnav nav > label, .topnav nav > details,
+    .topnav nav > form { flex: 0 0 auto; }
+  }
   .badge { font-size: .72rem; padding: .12rem .55rem; border-radius: 999px; font-weight: 600; }
   .badge-on { background: var(--accent); color: #fff; }
   .badge-dead { background: var(--bad); color: #fff; }
@@ -254,6 +295,7 @@ def _nav(*, can_edit: bool) -> str:
         '<a href="/bugs">нашёл bug</a>',
     ]
     if can_edit:
+        links.append('<a href="/sql">SQL Playground</a>')
         links.append('<a href="/logs">журнал</a>')
         links.append('<a href="/rules">правила</a>')
         links.append('<a href="/autotest">автотесты</a>')
@@ -268,6 +310,9 @@ def _nav(*, can_edit: bool) -> str:
         '<option value="blue">синяя</option>'
         '<option value="yellow">жёлтая</option>'
         '<option value="purple">фиолетовая</option>'
+        '<option value="cyberpunk">киберпанк</option>'
+        '<option value="aurora">северное сияние</option>'
+        '<option value="synthwave">синтвейв</option>'
         '</select></label>'
     )
     # Свои цвета — четыре независимых: полоса шапки (верх) и нежный
@@ -295,10 +340,13 @@ def _nav(*, can_edit: bool) -> str:
   var root=document.documentElement;
   var key="ai-bridge-theme";
   var saved=localStorage.getItem(key)||"system";
-  root.classList.remove("theme-blue","theme-yellow","theme-purple");
+  root.classList.remove("theme-blue","theme-yellow","theme-purple","theme-cyberpunk","theme-aurora","theme-synthwave");
   if(saved==="blue") root.classList.add("theme-blue");
   else if(saved==="yellow") root.classList.add("theme-yellow");
   else if(saved==="purple") root.classList.add("theme-purple");
+  else if(saved==="cyberpunk") root.classList.add("theme-cyberpunk");
+  else if(saved==="aurora") root.classList.add("theme-aurora");
+  else if(saved==="synthwave") root.classList.add("theme-synthwave");
   var accent=localStorage.getItem("ai-bridge-accent");
   var nav=localStorage.getItem("ai-bridge-nav");
   var soft=localStorage.getItem("ai-bridge-soft");
@@ -361,10 +409,13 @@ def _nav(*, can_edit: bool) -> str:
     sel.value=localStorage.getItem("ai-bridge-theme")||"system";
     sel.addEventListener("change",function(){
       localStorage.setItem("ai-bridge-theme",sel.value);
-      root.classList.remove("theme-blue","theme-yellow","theme-purple");
+      root.classList.remove("theme-blue","theme-yellow","theme-purple","theme-cyberpunk","theme-aurora","theme-synthwave");
       if(sel.value==="blue") root.classList.add("theme-blue");
       else if(sel.value==="yellow") root.classList.add("theme-yellow");
       else if(sel.value==="purple") root.classList.add("theme-purple");
+      else if(sel.value==="cyberpunk") root.classList.add("theme-cyberpunk");
+      else if(sel.value==="aurora") root.classList.add("theme-aurora");
+      else if(sel.value==="synthwave") root.classList.add("theme-synthwave");
       // Пресет сбрасывает свои цвета — иначе непонятно, что действует.
       clearAll(); syncInputs();
     });
@@ -388,6 +439,11 @@ def _nav(*, can_edit: bool) -> str:
         f'{theme_script}<header class="topnav"><a class="brand" href="/">AI-приставка</a>'
         f'<nav>{" ".join(links)}</nav></header>'
     )
+
+def _footer(visits: int) -> str:
+    """Счётчик посещений внизу страницы."""
+    return f'<div class="page-counter">посещений: {visits}</div>'
+
 
 
 def _badge(text: str, kind: str = "") -> str:
@@ -498,8 +554,24 @@ def _provider_row(
     # Модель и проверки убраны: каталог — про провайдеров, а не про
     # цифры (они на статистике). Справка и живой статус — под именем.
     extra = facts_html + status_html
+    capabilities = str(entry.get("capabilities") or "").lower()
+    search_text = " ".join(
+        str(value or "")
+        for value in (
+            entry.get("name"),
+            entry.get("id"),
+            entry.get("context"),
+            entry.get("pricing"),
+            entry.get("capabilities"),
+        )
+    ).lower()
     return (
-        f'<tr class="{"on" if entry.get("enabled") else ""}">'
+        f'<tr class="provider-row{" on" if entry.get("enabled") else ""}" '
+        f'data-provider="{entry_id}" data-enabled="{"1" if entry.get("enabled") else "0"}" '
+        f'data-local="{"1" if is_local_url(str(entry.get("url") or "")) else "0"}" '
+        f'data-key="{"1" if key_hint else "0"}" '
+        f'data-capabilities="{escape(capabilities, quote=True)}" '
+        f'data-search="{escape(search_text, quote=True)}">'
         f'<td class="name">{logo_html}{name} {" ".join(badges)}{extra}</td>'
         f'<td class="key">{escape(key_hint)}</td>'
         f'<td class="actions">{" ".join(actions)}</td>'
@@ -542,14 +614,30 @@ def catalogue_page(
     )
     role_html = f'<p class="role">{escape(role)}</p>' if role else ""
 
+    active_count = sum(bool(entry.get("enabled")) for entry in providers)
+    keyed_count = sum(entry.get("id") in keyed_ids for entry in providers)
     # Добавить провайдера может каждый: админ — в каталог для всех,
     # человек — в своё личное пространство (форма рассказывает разницу).
-    address_html = (
-        '<p class="role">Для приложений (тип endpoint — OpenAI): '
-        f"{_copy_line(app_address, 'v1addr')}</p>"
-        if app_address
-        else ""
+    endpoint_html = (
+        f'<div class="hero-endpoint"><span class="hero-label">Для приложений · endpoint OpenAI</span>'
+        f'<div class="endpoint-line">{_copy_line(app_address, "v1addr")}</div></div>'
+        if app_address else ""
     )
+    hero_html = f"""<section class="catalogue-hero">
+  <div class="hero-copy">
+    <span class="hero-status"><span class="status-dot"></span>ваше пространство AI-провайдеров</span>
+    <h1>Каталог провайдеров</h1>
+    <p>Подключайте модели, храните ключи локально и выбирайте, кому доверить запросы.</p>
+  </div>
+  <div class="hero-side">
+    {endpoint_html}
+    <div class="hero-metrics">
+      <div><b>{len(providers)}</b><span>провайдеров</span></div>
+      <div><b>{active_count}</b><span>включено</span></div>
+      <div><b>{keyed_count}</b><span>с ключом</span></div>
+    </div>
+  </div>
+</section>"""
     copy_script = COPY_SCRIPT if app_address else ""
     add_html = '<p class="add"><a class="btn-ghost" href="/add">+ добавить провайдера</a></p>'
 
@@ -564,11 +652,20 @@ def catalogue_page(
   table {{ border-collapse: separate; border-spacing: 0; width: 100%; }}
   th, td {{ text-align: left; padding: .55rem .7rem; border-bottom: 1px solid var(--line);
     overflow-wrap: anywhere; }}
-  th {{ font-size: .8rem; text-transform: lowercase; letter-spacing: .03em; color: var(--muted); }}
+  th {{ font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted);
+    background: color-mix(in srgb, var(--bg) 75%, var(--card)); }}
   tbody tr:last-child td {{ border-bottom: none; }}
-  tr.on td {{ background: var(--soft); }}
-  .actions {{ white-space: nowrap; }}
-  .actions form {{ margin-right: .3rem; }}
+  table.catalogue {{ border-spacing: 0 .45rem; margin: -.45rem 0; }}
+  table.catalogue tr.provider-row td {{ background: var(--card); border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line); vertical-align: middle; }}
+  table.catalogue tr.provider-row td:first-child {{ border-left: 1px solid var(--line);
+    border-radius: .85rem 0 0 .85rem; }}
+  table.catalogue tr.provider-row td:last-child {{ border-right: 1px solid var(--line);
+    border-radius: 0 .85rem .85rem 0; }}
+  table.catalogue tr.on td {{ background: color-mix(in srgb, var(--soft) 60%, var(--card)); }}
+  .actions {{ white-space: nowrap; display: flex; justify-content: flex-end; align-items: center;
+    gap: .3rem; flex-wrap: wrap; }}
+  .actions form {{ margin: 0; }}
   .facts {{ display: block; font-size: .8em; color: var(--muted); }}
   /* Живое состояние локального сервера — что в памяти прямо сейчас. */
   .localstatus {{ display: inline-block; margin-top: .15rem; font-size: .78rem;
@@ -578,16 +675,71 @@ def catalogue_page(
   .empty {{ opacity: .6; text-align: center; padding: 2rem; }}
   .addr code {{ font-family: monospace; user-select: all; background: var(--soft);
     padding: .15rem .4rem; border-radius: .35rem; }}
-  .add {{ margin-top: 1.5rem; }}
+  .catalogue-hero {{ position: relative; overflow: hidden; display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(18rem, .78fr); gap: 1.5rem;
+    align-items: center; margin: 1.1rem 0 1.2rem; padding: clamp(1.25rem, 3vw, 2rem);
+    color: #f8fafc; border: 1px solid rgba(103, 232, 249, .18); border-radius: 1.5rem;
+    background: linear-gradient(120deg, #0b1220 0%, #111827 56%, #0b2430 100%);
+    box-shadow: 0 18px 48px rgba(2, 8, 23, .18); }}
+  .catalogue-hero::after {{ content: ""; position: absolute; width: 23rem; height: 23rem;
+    right: 12%; top: -18rem; border-radius: 50%; pointer-events: none;
+    background: #06b6d4; opacity: .16; filter: blur(60px); }}
+  .hero-copy, .hero-side {{ position: relative; z-index: 1; }}
+  .hero-status {{ display: inline-flex; align-items: center; gap: .5rem; padding: .32rem .7rem;
+    border: 1px solid rgba(103, 232, 249, .28); border-radius: 999px;
+    background: rgba(8, 47, 73, .55); color: #a5f3fc; font-size: .76rem; font-weight: 700; }}
+  .status-dot {{ width: .48rem; height: .48rem; border-radius: 50%; background: #34d399;
+    box-shadow: 0 0 12px rgba(52, 211, 153, .8); }}
+  .catalogue-hero h1 {{ margin: .85rem 0 .45rem; color: #fff; }}
+  .catalogue-hero p {{ max-width: 39rem; margin: 0; color: #cbd5e1; }}
+  .hero-side {{ display: grid; gap: .7rem; }}
+  .hero-endpoint {{ min-width: 0; padding: .75rem .85rem; border: 1px solid rgba(148, 163, 184, .24);
+    border-radius: 1rem; background: rgba(2, 6, 23, .46); }}
+  .hero-label {{ display: block; margin-bottom: .35rem; color: #cbd5e1;
+    font-size: .7rem; font-weight: 700; letter-spacing: .03em; }}
+  .hero-endpoint .addr {{ display: flex; align-items: center; gap: .5rem; min-width: 0; }}
+  .hero-endpoint .addr code {{ min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: #a5f3fc; background: rgba(15, 23, 42, .85); }}
+  .hero-endpoint .addr button {{ flex: 0 0 auto; border-color: rgba(148, 163, 184, .4);
+    background: rgba(30, 41, 59, .8); color: #e2e8f0; }}
+  .hero-metrics {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: .55rem; }}
+  .hero-metrics > div {{ display: flex; flex-direction: column; gap: .1rem;
+    padding: .55rem .7rem; border: 1px solid rgba(148, 163, 184, .18);
+    border-radius: .85rem; background: rgba(15, 23, 42, .52); }}
+  .hero-metrics b {{ color: #fff; font-size: 1.25rem; line-height: 1.2; }}
+  .hero-metrics span {{ color: #94a3b8; font-size: .7rem; }}
+  .catalogue-toolbar {{ display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+    margin: 0 0 .8rem; padding: .8rem; border: 1px solid var(--line);
+    border-radius: 1rem; background: var(--card); box-shadow: 0 4px 16px rgba(15, 23, 42, .035); }}
+  .catalogue-search {{ flex: 1 1 15rem; min-width: 12rem; }}
+  .catalogue-search input {{ width: 100%; padding: .62rem .8rem .62rem 2.35rem;
+    background: var(--bg); }}
+  .search-wrap {{ position: relative; flex: 1 1 16rem; }}
+  .search-wrap::before {{ content: "⌕"; position: absolute; left: .8rem; top: 50%;
+    transform: translateY(-53%); color: var(--muted); font-size: 1.25rem; }}
+  .catalogue-toolbar select {{ min-width: 10rem; padding: .58rem .75rem; background: var(--bg); }}
+  .catalogue-count {{ margin-left: auto; color: var(--muted); font-size: .78rem;
+    white-space: nowrap; }}
+  #filtered-empty[hidden] {{ display: none; }}
+  .add {{ margin-top: 1rem; }}
   input[type=password] {{ font-family: monospace; }}
   @media (max-width: 52rem) {{
+    .catalogue-hero {{ grid-template-columns: 1fr; }}
+    .catalogue-toolbar {{ align-items: stretch; }}
+    .catalogue-count {{ margin: 0; }}
     /* На телефоне строка каталога складывается в карточку. */
     table.catalogue thead {{ display: none; }}
-    table.catalogue tr {{ display: block; border: 1px solid var(--line);
+    table.catalogue tr.provider-row {{ display: block; border: 1px solid var(--line);
       border-radius: .8rem; margin: .6rem 0; padding: .3rem .5rem; background: var(--card); }}
-    table.catalogue tr.on {{ background: var(--soft); }}
-    table.catalogue td {{ display: block; border: none; padding: .2rem .2rem; }}
+    table.catalogue tr.provider-row[hidden] {{ display: none; }}
+    table.catalogue tr.provider-row.on {{ background: var(--soft); }}
+    table.catalogue tr.provider-row td, table.catalogue tr.provider-row td:first-child,
+    table.catalogue tr.provider-row td:last-child {{ display: block; border: none;
+      border-radius: 0; padding: .2rem .2rem; background: transparent; }}
     .actions {{ white-space: normal; }}
+    .actions {{ justify-content: flex-start; }}
+    .hero-metrics {{ gap: .4rem; }}
+    .hero-metrics > div {{ padding: .5rem; }}
   }}
 </style>
 </head>
@@ -595,11 +747,30 @@ def catalogue_page(
 {_nav(can_edit=can_edit)}
 {role_html}
 {notice_html}
-{address_html}
+{hero_html}
+<div class="catalogue-toolbar" role="search">
+  <div class="search-wrap catalogue-search">
+    <input id="catalogue-search" type="search" placeholder="Найти провайдера или способность…"
+           aria-label="Поиск по каталогу" autocomplete="off">
+  </div>
+  <select id="catalogue-filter" aria-label="Фильтр каталога">
+    <option value="all">Все провайдеры</option>
+    <option value="enabled">Включённые</option>
+    <option value="local">Локальные</option>
+    <option value="cloud">Облачные</option>
+    <option value="key">С ключом</option>
+    <option value="vision">Vision</option>
+    <option value="tools">Tools</option>
+  </select>
+  <span class="catalogue-count" id="catalogue-count" aria-live="polite">
+    показано {len(providers)} из {len(providers)}
+  </span>
+</div>
 <div class="card">
 <table class="catalogue">
 <tr><th>провайдер</th><th>ключ</th><th></th></tr>
 {rows}
+<tr id="filtered-empty" hidden><td colspan="3" class="empty">по этим условиям ничего не найдено</td></tr>
 </table>
 </div>
 
@@ -607,6 +778,35 @@ def catalogue_page(
 
 <p class="role">Ключи хранятся только на этом устройстве и уходят напрямую провайдеру —
 на сервер каталога они не попадают никогда.</p>
+<script>
+(function () {{
+  var search = document.getElementById("catalogue-search");
+  var filter = document.getElementById("catalogue-filter");
+  var count = document.getElementById("catalogue-count");
+  var empty = document.getElementById("filtered-empty");
+  var rows = Array.prototype.slice.call(document.querySelectorAll("tr[data-provider]"));
+  function applyFilter() {{
+    var query = (search.value || "").trim().toLowerCase();
+    var kind = filter.value;
+    var visible = 0;
+    rows.forEach(function (row) {{
+      var matches = !query || (row.getAttribute("data-search") || "").indexOf(query) >= 0;
+      if (kind === "enabled") matches = matches && row.dataset.enabled === "1";
+      else if (kind === "local") matches = matches && row.dataset.local === "1";
+      else if (kind === "cloud") matches = matches && row.dataset.local !== "1";
+      else if (kind === "key") matches = matches && row.dataset.key === "1";
+      else if (kind === "vision") matches = matches && row.dataset.capabilities.indexOf("vision") >= 0;
+      else if (kind === "tools") matches = matches && row.dataset.capabilities.indexOf("tools") >= 0;
+      row.hidden = !matches;
+      if (matches) visible++;
+    }});
+    empty.hidden = rows.length === 0 || visible !== 0;
+    count.textContent = "показано " + visible + " из " + rows.length;
+  }}
+  search.addEventListener("input", applyFilter);
+  filter.addEventListener("change", applyFilter);
+}})();
+</script>
 {copy_script}
 </body>
 </html>"""
@@ -1811,6 +2011,13 @@ def stats_page(
     body = "\n".join(cell(row) for row in rows) or (
         '<tr><td colspan="4" class="empty">пока нет ни моделей, ни запросов</td></tr>'
     )
+    total_requests = sum(int(row.get("requests", 0)) for row in rows)
+    total_fails = sum(int(row.get("fails", 0)) for row in rows)
+    success_rate = (
+        f"{round((total_requests - total_fails) * 100 / total_requests)}%"
+        if total_requests else "—"
+    )
+    paused_count = len(penalized or [])
     return f"""<!doctype html>
 <html lang="ru">
 <head>
@@ -1823,6 +2030,18 @@ def stats_page(
   table {{ border-collapse: collapse; width: 100%; }}
   th, td {{ text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }}
   th {{ font-size: .8rem; color: var(--muted); }}
+  .stats-kpis {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: .8rem; margin: 1.1rem 0; }}
+  .stats-kpi {{ min-width: 0; padding: 1rem 1.1rem; background: var(--card);
+    border: 1px solid var(--line); border-radius: 1rem;
+    box-shadow: 0 6px 20px rgba(15, 23, 42, .035); }}
+  .stats-kpi-label {{ color: var(--muted); font-size: .7rem; font-weight: 700;
+    letter-spacing: .07em; text-transform: uppercase; }}
+  .stats-kpi-value {{ display: block; margin-top: .25rem; font-size: 1.55rem;
+    line-height: 1.2; font-weight: 800; letter-spacing: -.03em;
+    font-variant-numeric: tabular-nums; }}
+  .stats-kpi-detail {{ display: block; margin-top: .25rem; color: var(--muted); font-size: .75rem; }}
+  @media (max-width: 42rem) {{ .stats-kpis {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }} }}
   td.num {{ font-family: monospace; white-space: nowrap; }}
   /* Длинное имя модели — в одну строку с многоточием; полное видно
      по наведению (title). Иначе on-phone строка растёт в высоту. */
@@ -1858,6 +2077,20 @@ def stats_page(
 {_nav(can_edit=can_edit)}
 <h1>Статистика</h1>
 {notice_html}
+<section class="stats-kpis" aria-label="Сводка статистики">
+  <div class="stats-kpi"><span class="stats-kpi-label">Модели</span>
+    <b class="stats-kpi-value">{len(rows)}</b>
+    <span class="stats-kpi-detail">в каталоге</span></div>
+  <div class="stats-kpi"><span class="stats-kpi-label">Запросы</span>
+    <b class="stats-kpi-value">{total_requests}</b>
+    <span class="stats-kpi-detail">по всем моделям</span></div>
+  <div class="stats-kpi"><span class="stats-kpi-label">Успешность</span>
+    <b class="stats-kpi-value">{success_rate}</b>
+    <span class="stats-kpi-detail">{total_fails} сбоев</span></div>
+  <div class="stats-kpi"><span class="stats-kpi-label">На паузе</span>
+    <b class="stats-kpi-value">{paused_count}</b>
+    <span class="stats-kpi-detail">моделей с ограничением</span></div>
+</section>
 <div class="card">
 <table>
 <tr><th>модель</th><th>запросов</th><th>последний</th><th>удачных</th></tr>
@@ -1897,6 +2130,193 @@ def token_created_page(token: str, name: str, *, can_edit: bool = False) -> str:
 </html>"""
 
 
+def sql_playground_page(
+    *,
+    schema: dict | None = None,
+    query: str = "",
+    result: dict | None = None,
+    error: str = "",
+    include_data: bool = False,
+    configured: bool = True,
+) -> str:
+    """Админская схема SQLite, предпросмотр записей и read-only SQL."""
+    schema = schema or {"tables": [], "relations": []}
+    tables = schema.get("tables") or []
+    relations = schema.get("relations") or []
+    notice_html = (
+        f'<p class="notice bad">{escape(error)}</p>' if error else ""
+    )
+    relation_html = "".join(
+        f'<div class="relation"><b>{escape(str(item.get("source") or ""))}'
+        f'.{escape(str(item.get("field") or ""))}</b>'
+        f'<span class="relation-kind">{escape(str(item.get("cardinality") or ""))}</span>'
+        f'<span>→ {escape(str(item.get("target") or ""))}</span></div>'
+        for item in relations
+    ) or '<p class="role">Связи не обнаружены.</p>'
+
+    def render_table(table: dict) -> str:
+        name = str(table.get("name") or "")
+        columns = table.get("columns") or []
+        fields = "".join(
+            "<tr>"
+            f'<td><code>{escape(str(column.get("name") or ""))}</code></td>'
+            f'<td>{escape(str(column.get("type") or "—"))}</td>'
+            f'<td>{"PK" if column.get("primary_key") else ""}</td>'
+            f'<td>{"да" if column.get("not_null") else "нет"}</td>'
+            "</tr>"
+            for column in columns
+        )
+        sample_html = ""
+        if include_data:
+            sample_columns = table.get("sample_columns") or []
+            sample_rows = table.get("sample_rows") or []
+            sample_html = (
+                '<div class="sql-scroll"><table class="sql-data"><thead><tr>'
+                + "".join(f"<th>{escape(str(column))}</th>" for column in sample_columns)
+                + "</tr></thead><tbody>"
+                + "".join(
+                    "<tr>"
+                    + "".join(
+                        f"<td>{escape(str(value))}</td>" for value in row
+                    )
+                    + "</tr>"
+                    for row in sample_rows
+                )
+                + "</tbody></table></div>"
+                + ("" if sample_rows else '<p class="role">Таблица пуста.</p>')
+                + (
+                    '<p class="role">Предпросмотр ограничен.</p>'
+                    if table.get("sample_truncated")
+                    else ""
+                )
+            )
+        return (
+            '<details class="sql-table">'
+            f"<summary><strong>{escape(name)}</strong>"
+            f'<span class="role">{len(columns)} полей · {escape(str(table.get("type") or "table"))}</span>'
+            "</summary>"
+            '<div class="sql-scroll"><table class="sql-fields"><thead><tr>'
+            "<th>поле</th><th>тип</th><th>ключ</th><th>обязательно</th>"
+            f"</tr></thead><tbody>{fields}</tbody></table></div>{sample_html}</details>"
+        )
+
+    schema_html = "".join(render_table(table) for table in tables)
+    if not schema_html:
+        schema_html = '<p class="role">Схема пока недоступна.</p>'
+
+    result_html = ""
+    if result is not None:
+        columns = result.get("columns") or []
+        rows = result.get("rows") or []
+        result_html = (
+            '<section class="card sql-result"><h2>Результат запроса</h2>'
+            f'<p class="role">{len(rows)} строк'
+            f'{" · показана первая часть" if result.get("truncated") else ""}</p>'
+            '<div class="sql-scroll"><table><thead><tr>'
+            + "".join(f"<th>{escape(str(column))}</th>" for column in columns)
+            + "</tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                + "".join(f"<td>{escape(str(value))}</td>" for value in row)
+                + "</tr>"
+                for row in rows
+            )
+            + "</tbody></table></div>"
+            + (
+                '<p class="role">'
+                + (
+                    "Превышен лимит объёма ответа."
+                    if result.get("truncated")
+                    else "Запрос не вернул строк."
+                )
+                + "</p>"
+                if not rows
+                else ""
+            )
+            + "</section>"
+        )
+
+    query_form = (
+        '<form method="post" action="/sql/run" class="sql-query">'
+        '<label for="sql-query">SQL-запрос</label>'
+        f'<textarea id="sql-query" name="query" rows="9" spellcheck="false" '
+        f'placeholder="SELECT name, type FROM _collections ORDER BY name;">'
+        f"{escape(query)}</textarea>"
+        '<label class="sql-check"><input type="checkbox" name="include_data" '
+        f'value="1"{" checked" if include_data else ""}>'
+        "Показывать до 5 примеров записей в таблицах</label>"
+        f'<button type="submit" class="primary"{" disabled" if not configured else ""}>'
+        "выполнить SELECT</button>"
+        "</form>"
+        if configured
+        else '<p class="role">Задайте AI_BRIDGE_SQLITE_PATH в окружении службы, '
+        "указав путь к data.db PocketBase. У пользователя службы должны быть "
+        "права чтения файла базы и файлов WAL.</p>"
+    )
+    return f"""<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SQL Playground — AI Bridge</title>
+{_style()}
+<style>
+  .sql-hero {{ padding: 1.25rem 1.4rem; margin: 1.2rem 0; border-radius: 1.2rem;
+    color: #fff; background: linear-gradient(120deg, #0f766e, #0f172a 75%); }}
+  .sql-hero h1 {{ margin: 0 0 .35rem; color: #fff; }}
+  .sql-hero p {{ margin: 0; color: #dbeafe; }}
+  .sql-layout {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(19rem, .8fr);
+    gap: 1rem; align-items: start; }}
+  .sql-query {{ display: grid; gap: .65rem; }}
+  .sql-query textarea {{ width: 100%; font: .9rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+  .sql-check {{ display: flex; gap: .5rem; align-items: center; color: var(--muted); font-size: .88rem; }}
+  .sql-check input {{ accent-color: var(--accent); }}
+  .sql-relations {{ display: grid; gap: .45rem; }}
+  .relation {{ display: flex; align-items: center; flex-wrap: wrap; gap: .55rem;
+    padding: .65rem .75rem; border: 1px solid var(--line); border-radius: .75rem;
+    background: var(--card); }}
+  .relation-kind {{ border-radius: 999px; padding: .1rem .5rem; color: var(--accent-deep);
+    background: var(--accent-soft); font-size: .78rem; font-weight: 700; }}
+  .sql-tables {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+    gap: .65rem; margin-top: .75rem; }}
+  .sql-table {{ min-width: 0; border: 1px solid var(--line); border-radius: .85rem;
+    background: var(--card); overflow: hidden; }}
+  .sql-table summary {{ display: flex; justify-content: space-between; gap: .75rem;
+    align-items: center; cursor: pointer; padding: .75rem .85rem; }}
+  .sql-table summary .role {{ white-space: nowrap; }}
+  .sql-scroll {{ overflow-x: auto; }}
+  .sql-fields, .sql-data {{ width: 100%; border-collapse: collapse; font-size: .83rem; }}
+  .sql-fields th, .sql-fields td, .sql-data th, .sql-data td {{
+    padding: .38rem .55rem; text-align: left; border-top: 1px solid var(--line); }}
+  .sql-fields th, .sql-data th {{ color: var(--muted); font-weight: 650; }}
+  .sql-data {{ margin-bottom: .35rem; }}
+  .sql-result {{ margin-top: 1rem; }}
+  .sql-result table {{ min-width: 100%; border-collapse: collapse; font-size: .84rem; }}
+  .sql-result th, .sql-result td {{ padding: .42rem .6rem; text-align: left;
+    border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }}
+  @media (max-width: 48rem) {{ .sql-layout {{ grid-template-columns: 1fr; }}
+    .sql-table summary {{ align-items: flex-start; }} }}
+</style></head><body>
+{_nav(can_edit=True)}
+<main>
+  <section class="sql-hero"><h1>SQL Playground</h1>
+    <p>Только администратору · схема PocketBase и SQL-запросы только для чтения.</p></section>
+  {notice_html}
+  <div class="sql-layout">
+    <section class="card"><h2>SQL-запрос</h2>
+      <p class="role">Разрешены SELECT и WITH. Запрос ограничен по времени и объёму ответа.</p>
+      {query_form}
+    </section>
+    <section class="card"><h2>Связи коллекций</h2>
+      <p class="role">N:1 — запись ссылается на одну запись; N:M — поле допускает несколько связей.</p>
+      <div class="sql-relations">{relation_html}</div>
+    </section>
+  </div>
+  <section><h2>Схема базы · {len(tables)} объектов</h2>
+    <p class="role">Раскройте таблицу, чтобы увидеть поля{" и примеры записей" if include_data else ""}.</p>
+    <div class="sql-tables">{schema_html}</div>
+  </section>
+  {result_html}
+</main></body></html>"""
+
+
 def _log_row(item: dict) -> str:
     """Строка журнала: тип, статус, событие плюс сворачиваемые тела.
 
@@ -1932,10 +2352,20 @@ def _log_row(item: dict) -> str:
                 f'<pre class="payload-body">{escape(value)}</pre>'
             )
     if bodies:
+        # Стабильный ключ тела — по нему автообновление восстанавливает
+        # раскрытые блоки после перезагрузки страницы, даже если сверху
+        # появились новые события (индексы при этом сдвигаются).
+        body_key = str(item.get("id") or "")
+        if not body_key:
+            body_key = (
+                f"{item.get('ts') or ''}|{item.get('kind') or ''}|"
+                f"{item.get('user') or ''}"
+            )
         # По умолчанию свёрнуто: тело есть, но журнал не раздувает вид.
         bodies = (
             '<details class="payload"><summary>показать тело</summary>'
-            f'<div class="payload-card">{bodies}</div></details>'
+            f'<div class="payload-card" data-key="{escape(body_key, quote=True)}">'
+            f'{bodies}</div></details>'
         )
     provider = str(item.get("provider") or "")
     provider_html = (
@@ -2101,14 +2531,28 @@ var busy = false;
 ["click", "scroll", "keydown", "mousemove"].forEach(function (ev) {{
   window.addEventListener(ev, function () {{ busy = true; }}, {{ passive: true }});
 }});
-function saveState() {{
+function _payloadKey(d) {{
+  var card = d.querySelector(".payload-card");
+  return card ? (card.getAttribute("data-key") || "") : "";
+}}
+function saveOpenKeys() {{
   var open = [];
-  document.querySelectorAll("details.payload").forEach(function (d, i) {{
-    if (d.open) open.push(i);
+  document.querySelectorAll("details.payload").forEach(function (d) {{
+    if (d.open) {{
+      var key = _payloadKey(d);
+      if (key) open.push(key);
+    }}
   }});
   try {{
-    sessionStorage.setItem("log:scroll", String(window.scrollY));
     sessionStorage.setItem("log:open", JSON.stringify(open));
+  }} catch (e) {{}}
+}}
+function saveState() {{
+  // Сохраняем только место чтения: открытые тела запоминаются отдельно,
+  // при каждом переключении (saveOpenKeys), иначе эта функция, вызываемая
+  // перед автообновлением, затирала бы сохранённые ключи пустым списком.
+  try {{
+    sessionStorage.setItem("log:scroll", String(window.scrollY));
   }} catch (e) {{}}
 }}
 function restoreState() {{
@@ -2117,12 +2561,19 @@ function restoreState() {{
     y = parseInt(sessionStorage.getItem("log:scroll") || "0", 10) || 0;
     open = JSON.parse(sessionStorage.getItem("log:open") || "[]");
   }} catch (e) {{}}
-  document.querySelectorAll("details.payload").forEach(function (d, i) {{
-    if (open.indexOf(i) >= 0) d.open = true;
+  document.querySelectorAll("details.payload").forEach(function (d) {{
+    var key = _payloadKey(d);
+    if (key && open.indexOf(key) >= 0) d.open = true;
   }});
   if (y > 0) window.scrollTo(0, y);
 }}
 window.addEventListener("load", restoreState);
+// Сохраняем раскрытые тела при каждом переключении — иначе при ручной
+// перезагрузке (F5) или после закрытия тела состояние терялось, и
+// раскрытый запрос «сворачивался» сам по себе.
+document.querySelectorAll("details.payload").forEach(function (d) {{
+  d.addEventListener("toggle", saveOpenKeys);
+}});
 setTimeout(function tick() {{
   if (!busy && !document.querySelector("details.payload[open]")) {{
     saveState();

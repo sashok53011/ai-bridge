@@ -16,6 +16,7 @@ import json
 import os
 import re
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -81,6 +82,7 @@ class EventLog:
             "ts": datetime.now(timezone.utc)
             .isoformat(timespec="seconds")
             .replace("+00:00", "Z"),
+            "id": uuid.uuid4().hex,
             "kind": kind,
             "user": user or "—",
             "text": _slim(str(text)),

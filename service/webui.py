@@ -46,6 +46,7 @@ from core.page import (
     pick_model_page,
     rules_page,
     signup_page,
+    sql_playground_page,
     stats_page,
     test_page,
     token_created_page,
@@ -71,6 +72,7 @@ from service.gateway import (
 )
 from service.space import Spaces
 from storage.notify import NotifyStore
+from storage.sqlplayground import SqlPlaygroundError
 from storage.sessions import SessionStore
 from storage.usertokens import UserTokens
 from storage.users import UserStore
@@ -105,6 +107,7 @@ _PAGE_TITLES = {
     "/index.html": "Каталог",
     "/add": "Новый провайдер",
     "/stats": "Статистика",
+    "/sql": "SQL Playground",
     "/tokens": "Приложения и токены",
     "/messages": "Сообщения",
     "/bugs": "Нашёл bug",
@@ -227,6 +230,7 @@ class WebUi:
         board=None,  # storage.board.BoardStore | None — доска «Нашёл bug»
         mail=None,  # storage.mail.MailStore | None — личная почта участников
         notify=None,  # storage.notify.NotifyStore | None — токен Telegram-бота
+        sql_playground=None,  # storage.sqlplayground.SqlPlayground | None
     ) -> None:
         self._providers_source = providers_source
         self._server = server
@@ -254,6 +258,7 @@ class WebUi:
         # Токен Telegram-бота: стор есть всегда (AI_BRIDGE_HOME),
         # без токена уведомления просто выключены.
         self._notify = notify if notify is not None else NotifyStore()
+        self._sql_playground = sql_playground
         # Ждущие device-flow входа GitHub: (user_id, provider_id) → состояние.
         self._oauth_pending: dict[tuple[str, str], dict] = {}
 
@@ -354,6 +359,29 @@ class WebUi:
         except Exception:  # noqa: BLE001 — обновление не должно ронять действие
             pass
 
+    def _sql_page(
+        self,
+        *,
+        query: str = "",
+        result: dict | None = None,
+        error: str = "",
+        include_data: bool = False,
+    ) -> str:
+        schema = {"tables": [], "relations": []}
+        if self._sql_playground is not None:
+            try:
+                schema = self._sql_playground.schema(include_data=include_data)
+            except SqlPlaygroundError as exc:
+                error = error or str(exc)
+        return sql_playground_page(
+            schema=schema,
+            query=query,
+            result=result,
+            error=error,
+            include_data=include_data,
+            configured=self._sql_playground is not None,
+        )
+
     def _event(self, kind: str, user: str, text: str, **fields) -> None:
         """Одно событие в журнал; без журнала — молча пропускаем."""
         if self._log is not None:
@@ -430,11 +458,14 @@ class WebUi:
     # ------------------------------------------------------------ ответы
 
     @staticmethod
-    def _send_html(handler: BaseHTTPRequestHandler, status: int, html: str) -> None:
+    def _send_html(handler: BaseHTTPRequestHandler, status: int, html: str,
+                   *, cache_control: str | None = None) -> None:
         body = html.encode("utf-8")
         handler.send_response(status)
         handler.send_header("Content-Type", "text/html; charset=utf-8")
         handler.send_header("Content-Length", str(len(body)))
+        if cache_control:
+            handler.send_header("Cache-Control", cache_control)
         handler.end_headers()
         handler.wfile.write(body)
 
@@ -868,6 +899,18 @@ class WebUi:
             )
             return
 
+        if clean == "/sql":
+            if not is_admin:
+                self._forbidden(handler, "SQL Playground — только администратору")
+                return
+            self._send_html(
+                handler,
+                200,
+                self._sql_page(include_data=(params.get("data") or ["0"])[0] == "1"),
+                cache_control="no-store",
+            )
+            return
+
         if clean == "/rules":
             if not is_admin:
                 self._forbidden(handler, "правила — только администратору")
@@ -1106,6 +1149,7 @@ class WebUi:
                     events,
                     notice=notice,
                 ),
+                cache_control="no-store",
             )
             return
 
@@ -1266,6 +1310,34 @@ class WebUi:
         is_admin = role == ROLE_ADMIN
         user_id = str(viewer["id"])
         space = self._spaces.for_user(user_id)
+
+        if clean == "/sql/run":
+            if not is_admin:
+                self._forbidden(handler, "SQL Playground — только администратору")
+                return
+            query = field("query")
+            include_data = field("include_data") == "1"
+            result = None
+            error = ""
+            if self._sql_playground is None:
+                error = "SQL Playground не настроен."
+            elif query:
+                try:
+                    result = self._sql_playground.execute(query)
+                except SqlPlaygroundError as exc:
+                    error = str(exc)
+            self._send_html(
+                handler,
+                200,
+                self._sql_page(
+                    query=query,
+                    result=result,
+                    error=error,
+                    include_data=include_data,
+                ),
+                cache_control="no-store",
+            )
+            return
 
         if clean.startswith("/toggle/"):
             provider_id = urllib.parse.unquote(clean[len("/toggle/") :])

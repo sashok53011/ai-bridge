@@ -294,6 +294,7 @@ def _serve(
     from storage.reputation import ReputationStore
     from storage.rules import RuleStore
     from storage.sessions import SessionStore
+    from storage.sqlplayground import SqlPlayground
     from storage.usertokens import UserTokens
     from storage.usage import UsageStore
     from storage.users import UserStore
@@ -438,6 +439,9 @@ def _serve(
             return None
         return spaces.for_user(user_id).directory
 
+    sqlite_path = os.environ.get("AI_BRIDGE_SQLITE_PATH", "").strip()
+    sql_playground = SqlPlayground(sqlite_path) if sqlite_path else None
+
     ui = WebUi(
         lambda: state["providers"],
         server,
@@ -460,6 +464,7 @@ def _serve(
         board=board,
         mail=mail,
         notify=notify,
+        sql_playground=sql_playground,
     )
 
     threading.Thread(target=refresh_loop, daemon=True).start()
