@@ -1260,8 +1260,7 @@ class WebUi:
             self._forbidden(handler, "это действие — только администратору")
             return
 
-        admin_space = self._spaces.for_user(user_id)
-
+        admin_space = self._spaces.for_user(str(viewer["id"]))
         if clean.startswith("/remove/"):
             provider_id = urllib.parse.unquote(clean[len("/remove/") :])
             entry = self._find(viewer, provider_id)
@@ -1364,6 +1363,17 @@ class WebUi:
             self._redirect(handler, notice, to=f"/edit/{urllib.parse.quote(provider_id)}")
             return
 
+
+        if clean == "/sql":
+            if not is_admin:
+                self._forbidden(handler, "SQL Playground — только администратору")
+                return
+            self._send_html(
+                handler, 200,
+                self._sql_page(include_data=(params.get("data") or ["0"])[0] == "1"),
+                cache_control="no-store",
+            )
+            return
 
         if clean == "/logs/clear":
             if self._log is not None:
