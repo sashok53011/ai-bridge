@@ -768,33 +768,91 @@ class WebUi:
             if not is_admin:
                 self._forbidden(handler, "статистика — только администратору")
                 return
+            usage = self._usage.totals() if self._usage else {}
+            rows = []
+            for entry in self._entries_for(viewer):
+                model = str(entry.get("model") or "")
+                key = f"{entry['id']}/{model}"
+                cell = usage.get(key) or {}
+                # Способности: рукописная справка с учётом выученного.
+                caps = str(entry.get("capabilities") or "")
+                if self._capabilities is not None:
+                    try:
+                        known = self._capabilities.known(key)
+                    except Exception:  # noqa: BLE001
+                        known = {}
+                    if known:
+                        caps = _merge_capabilities(caps, known)
+                rows.append(
+                    {
+                        "model": model or "—",
+                        "provider": entry["name"],
+                        "ctx": str(entry.get("context") or ""),
+                        "caps": caps,
+                        "requests": int(cell.get("requests", 0)),
+                        "fails": int(cell.get("fails", 0)),
+                        "last": str(cell.get("last") or ""),
+                    }
+                )
+            rows.sort(key=lambda row: (-row["requests"], row["model"]))
+            penalized = self._reputation.penalized() if self._reputation else []
+            codes: dict[str, str] = {}
+            if self._lists:
+                for name in self._lists.code_names():
+                    codes[name] = self._lists.code_text(name)
             self._send_html(
                 handler,
                 200,
-                self._sql_page(include_data=(params.get("data") or ["0"])[0] == "1"),
-                cache_control="no-store",
+                stats_page(
+                    rows, can_edit=True, notice=notice, penalized=penalized,
+                    whitelist=self._whitelist_groups() if self._lists else {},
+                    greylist=self._grey_text(viewer) if self._lists else "",
+                    grey_rows=self._grey_rows(viewer) if self._lists else [],
+                    blacklist=self._lists.text("blacklist.txt") if self._lists else "",
+                    novision=self._lists.text("novision.txt") if self._lists else "",
+                    notools=self._lists.text("notools.txt") if self._lists else "",
+                    paid=self._lists.text("paid.txt") if self._lists else "",
+                    code_lists=codes,
+                ),
             )
             return
 
-
+        if clean == "/logs":
+            if not is_admin:
+                self._forbidden(handler, "журнал — только администратору")
+                return
+            events = self._log.recent(500) if self._log is not None else []
+            self._send_html(
+                handler,
+                200,
+                logs_page(
+                    events,
+                    notice=notice,
+                ),
+                cache_control="no-store",
+            )
+            return
 
         if clean == "/users":
             if not is_admin:
                 self._forbidden(handler, "список людей — только администратору")
                 return
+            remote: dict[str, dict] = {}
+            try:
+                remote = {item["id"]: item for item in self._server.people()}
+            except ServerError:
+                remote = {}  # реестр молчит — покажем хотя бы локальные профили
+            people = [
+                {
+                    **profile,
+                    "blocked": bool(remote.get(str(profile.get("id")), {}).get("blocked")),
+                }
+                for profile in self._users.list_all()
+            ]
             self._send_html(
                 handler,
                 200,
-                key_page(
-                    entry["name"],
-                    provider_id=provider_id,
-                    has_key=bool(space.keys.get(provider_id)),
-                    notice=notice if notice_bad else "",
-                    can_edit=is_admin,
-                    login_url=entry.get("loginUrl", ""),
-                    key_url=entry.get("getApiKeyUrl", ""),
-                    oauth=copilot.is_copilot_url(entry.get("url")),
-                ),
+                users_page(people, current_id=str(viewer["id"]), notice=notice),
             )
             return
 
