@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import os
 import sys
 import threading
 import time
@@ -311,21 +312,56 @@ class WebUi:
         error: str = "",
         include_data: bool = False,
         is_admin: bool = False,
+        user_id: str = "",
+        db: str = "",
     ) -> str:
-        schema = {"tables": [], "relations": []}
-        if self._sql_playground is not None:
+        from storage.user_db import available_dbs, db_path_for
+        from core.schema_viz import load_schema, render_schema_svg
+        from pathlib import Path
+
+        root = Path(os.environ.get("AI_BRIDGE_HOME", ".").strip() or ".")
+        dbs = available_dbs(root, is_admin=is_admin, user_id=user_id)
+
+        # Выбранная база: первый доступный по умолчанию.
+        selected = db or (dbs[0]["path"] if dbs else "")
+        if selected and selected not in {d["path"] for d in dbs}:
+            # Нет прав — берём первую свою.
+            selected = dbs[0]["path"] if dbs else ""
+
+        viz_html = ""
+        tables_info: list[dict] = []
+        if selected:
             try:
-                schema = self._sql_playground.schema(include_data=include_data)
-            except SqlPlaygroundError as exc:
+                schema_data = load_schema(selected, include_data=include_data)
+                tables_info = schema_data.get("tables") or []
+                viz_html = render_schema_svg(schema_data, include_data=include_data)
+            except Exception as exc:  # noqa: BLE001
                 error = error or str(exc)
+
+        # Данные для таблицы.
+        rows_html = ""
+        if tables_info:
+            for t in tables_info:
+                cols = ", ".join(c["name"] for c in t["columns"])
+                fks = ", ".join(f"{f['from']}→{f['table']}" for f in t["fks"])
+                rows_html += (
+                    f"<tr><td><b>{escape(t['name'])}</b></td>"
+                    f"<td>{escape(cols)}</td>"
+                    f"<td>{escape(fks)}</td>"
+                    f"<td>{len(t['sample_rows'])}</td></tr>"
+                )
+
         return sql_playground_page(
-            schema=schema,
+            schema={"tables": tables_info, "relations": []},
             query=query,
             result=result,
             error=error,
             include_data=include_data,
-            configured=self._sql_playground is not None,
+            configured=bool(selected),
             is_admin=is_admin,
+            dbs=dbs,
+            selected_db=selected,
+            viz_html=viz_html,
         )
 
     def _event(self, kind: str, user: str, text: str, **fields) -> None:
@@ -1462,11 +1498,24 @@ class WebUi:
 
 
         if clean == "/sql":
+            from storage.user_db import sync_user_db, db_path_for
+            from pathlib import Path as _P
+            _root = _P(os.environ.get("AI_BRIDGE_HOME", ".").strip() or ".")
+            _user_db = db_path_for(str(viewer["id"]), _root)
+            if not _user_db.is_file():
+                _sq = os.environ.get("AI_BRIDGE_SQLITE_PATH", "").strip()
+                sync_user_db(
+                    _user_db, self._providers_source(),
+                    user_id=str(viewer["id"]),
+                    source_db=_P(_sq) if _sq else None,
+                )
             self._send_html(
                 handler, 200,
                 self._sql_page(
                     include_data=(params.get("data") or ["0"])[0] == "1",
                     is_admin=is_admin,
+                    user_id=str(viewer["id"]),
+                    db=(params.get("db") or [""])[0],
                 ),
                 cache_control="no-store",
             )
@@ -1542,15 +1591,43 @@ class WebUi:
         if clean == "/sql/run":
             query = field("query")
             include_data = field("include_data") == "1"
+            db = field("db")
             result = None
             error = ""
-            if self._sql_playground is None:
-                error = "SQL Playground не настроен."
-            elif query:
+            if query:
                 try:
-                    result = self._sql_playground.execute(query, read_only=not is_admin)
-                except SqlPlaygroundError as exc:
-                    error = str(exc)
+                    from storage.user_db import available_dbs, db_path_for
+                    from pathlib import Path
+                    import sqlite3 as _sq
+                    root = Path(os.environ.get("AI_BRIDGE_HOME", ".").strip() or ".")
+                    dbs = available_dbs(root, is_admin=is_admin, user_id=str(viewer["id"]))
+                    target = db or (dbs[0]["path"] if dbs else "")
+                    if not target:
+                        error = "База данных не найдена."
+                    else:
+                        # Админ — полный доступ, пользователь — только SELECT.
+                        read_only = not is_admin
+                        conn = _sq.connect(f"file:{target}?mode=ro", uri=True, timeout=3.0) if read_only else _sq.connect(target, timeout=3.0)
+                        if not read_only:
+                            conn.execute("PRAGMA foreign_keys = ON")
+                        else:
+                            conn.execute("PRAGMA query_only = ON")
+                        try:
+                            cur = conn.execute(query)
+                            columns = [str(c[0]) for c in (cur.description or [])]
+                            rows = []
+                            for _ in range(200):
+                                r = cur.fetchone()
+                                if r is None:
+                                    break
+                                rows.append([str(v) if not isinstance(v, bytes) else f"<BLOB {len(v)}>" for v in r])
+                            result = {"columns": columns, "rows": rows, "truncated": False}
+                        except _sq.Error as exc:
+                            error = str(exc)[:500]
+                        finally:
+                            conn.close()
+                except Exception as exc:  # noqa: BLE001
+                    error = str(exc)[:500]
             self._send_html(
                 handler,
                 200,
@@ -1560,6 +1637,8 @@ class WebUi:
                     error=error,
                     include_data=include_data,
                     is_admin=is_admin,
+                    user_id=str(viewer["id"]),
+                    db=db,
                 ),
                 cache_control="no-store",
             )

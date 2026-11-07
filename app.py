@@ -386,6 +386,13 @@ def _serve(
             state["server_flags"] = flags
             from storage.catalogue_sync import sync_catalogue
             sync_catalogue(root, fresh)
+            # Синхронизируем learning.db администратора.
+            from storage.user_db import sync_user_db, db_path_for
+            if sqlite_path:
+                sync_user_db(
+                    db_path_for(admin_id, root), fresh,
+                    user_id=admin_id, source_db=Path(sqlite_path),
+                )
         except ServerError as exc:
             # Каталог — украшение; без него работают включённые записи.
             print(f"каталог не обновился: {exc}", file=sys.stderr)
@@ -426,6 +433,13 @@ def _serve(
     sql_playground = SqlPlayground(sqlite_path) if sqlite_path else None
     from storage.catalogue_sync import sync_catalogue
     sync_catalogue(root, providers)
+    # Реляционная база для SQL Playground (learning.db).
+    from storage.user_db import sync_user_db, db_path_for
+    from pathlib import Path as _Path
+    sync_user_db(
+        db_path_for(admin_id, root), providers,
+        user_id=admin_id, source_db=_Path(sqlite_path) if sqlite_path else None,
+    )
 
     ui = WebUi(
         lambda: state["providers"],

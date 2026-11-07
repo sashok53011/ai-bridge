@@ -1656,21 +1656,31 @@ def sql_playground_page(
     include_data: bool = False,
     configured: bool = True,
     is_admin: bool = False,
+    dbs: list[dict] | None = None,
+    selected_db: str = "",
+    viz_html: str = "",
 ) -> str:
-    """Схема SQLite, предпросмотр записей и SQL; админу — полный доступ."""
+    """SQL Playground: выбор базы, схема, визуальная диаграмма, запросы."""
     schema = schema or {"tables": [], "relations": []}
     tables = schema.get("tables") or []
-    relations = schema.get("relations") or []
     notice_html = (
         f'<p class="notice bad">{escape(error)}</p>' if error else ""
     )
-    relation_html = "".join(
-        f'<div class="relation"><b>{escape(str(item.get("source") or ""))}'
-        f'.{escape(str(item.get("field") or ""))}</b>'
-        f'<span class="relation-kind">{escape(str(item.get("cardinality") or ""))}</span>'
-        f'<span>→ {escape(str(item.get("target") or ""))}</span></div>'
-        for item in relations
-    ) or '<p class="role">Связи не обнаружены.</p>'
+    dbs = dbs or []
+
+    # Селектор баз данных.
+    db_options = "".join(
+        f'<option value="{escape(d["path"], quote=True)}"'
+        f'{" selected" if d["path"] == selected_db else ""}>'
+        f'{escape(d["label"])}</option>'
+        for d in dbs
+    )
+    db_selector = (
+        f'<label class="sql-check"><b>База:</b> '
+        f'<select name="db" onchange="this.form.submit()">{db_options}</select></label>'
+        if dbs
+        else '<p class="role">Базы данных не найдены.</p>'
+    )
 
     def render_table(table: dict) -> str:
         name = str(table.get("name") or "")
@@ -1684,38 +1694,22 @@ def sql_playground_page(
             "</tr>"
             for column in columns
         )
-        sample_html = ""
-        if include_data:
-            sample_columns = table.get("sample_columns") or []
-            sample_rows = table.get("sample_rows") or []
-            sample_html = (
-                '<div class="sql-scroll"><table class="sql-data"><thead><tr>'
-                + "".join(f"<th>{escape(str(column))}</th>" for column in sample_columns)
-                + "</tr></thead><tbody>"
-                + "".join(
-                    "<tr>"
-                    + "".join(
-                        f"<td>{escape(str(value))}</td>" for value in row
-                    )
-                    + "</tr>"
-                    for row in sample_rows
-                )
-                + "</tbody></table></div>"
-                + ("" if sample_rows else '<p class="role">Таблица пуста.</p>')
-                + (
-                    '<p class="role">Предпросмотр ограничен.</p>'
-                    if table.get("sample_truncated")
-                    else ""
-                )
+        fk_html = ""
+        fks = table.get("fks") or []
+        if fks:
+            fk_html = "".join(
+                f'<p class="role">FK: {escape(f["from"])} → {escape(f["table"])}.{escape(f["to"])}</p>'
+                for f in fks
             )
         return (
             '<details class="sql-table">'
             f"<summary><strong>{escape(name)}</strong>"
-            f'<span class="role">{len(columns)} полей · {escape(str(table.get("type") or "table"))}</span>'
+            f'<span class="role">{len(columns)} полей</span>'
             "</summary>"
             '<div class="sql-scroll"><table class="sql-fields"><thead><tr>'
-            "<th>поле</th><th>тип</th><th>ключ</th><th>обязательно</th>"
-            f"</tr></thead><tbody>{fields}</tbody></table></div>{sample_html}</details>"
+            "<th>поле</th><th>тип</th><th>PK</th><th>NN</th>"
+            f"</tr></thead><tbody>{fields}</tbody></table></div>"
+            f"{fk_html}</details>"
         )
 
     schema_html = "".join(render_table(table) for table in tables)
@@ -1742,11 +1736,7 @@ def sql_playground_page(
             + "</tbody></table></div>"
             + (
                 '<p class="role">'
-                + (
-                    "Превышен лимит объёма ответа."
-                    if result.get("truncated")
-                    else "Запрос не вернул строк."
-                )
+                + ("Превышен лимит объёма ответа." if result.get("truncated") else "Запрос не вернул строк.")
                 + "</p>"
                 if not rows
                 else ""
@@ -1758,18 +1748,17 @@ def sql_playground_page(
         '<form method="post" action="/sql/run" class="sql-query">'
         '<label for="sql-query">SQL-запрос</label>'
         f'<textarea id="sql-query" name="query" rows="9" spellcheck="false" '
-        f'placeholder="SELECT name, type FROM _collections ORDER BY name;">'
+        f'placeholder="SELECT name FROM providers;">'
         f"{escape(query)}</textarea>"
         '<label class="sql-check"><input type="checkbox" name="include_data" '
         f'value="1"{" checked" if include_data else ""}>'
-        "Показывать до 5 примеров записей в таблицах</label>"
+        "Показывать примеры записей</label>"
+        f'{db_selector}'
         f'<button type="submit" class="primary"{" disabled" if not configured else ""}>'
-        "выполнить SELECT</button>"
+        "выполнить запрос</button>"
         "</form>"
         if configured
-        else '<p class="role">Задайте AI_BRIDGE_SQLITE_PATH в окружении службы, '
-        "указав путь к data.db PocketBase. У пользователя службы должны быть "
-        "права чтения файла базы и файлов WAL.</p>"
+        else '<p class="role">База данных не настроена.</p>'
     )
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1784,14 +1773,11 @@ def sql_playground_page(
     gap: 1rem; align-items: start; }}
   .sql-query {{ display: grid; gap: .65rem; }}
   .sql-query textarea {{ width: 100%; font: .9rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }}
-  .sql-check {{ display: flex; gap: .5rem; align-items: center; color: var(--muted); font-size: .88rem; }}
+  .sql-check {{ display: flex; gap: .5rem; align-items: center; color: var(--muted); font-size: .88rem; flex-wrap: wrap; }}
   .sql-check input {{ accent-color: var(--accent); }}
-  .sql-relations {{ display: grid; gap: .45rem; }}
-  .relation {{ display: flex; align-items: center; flex-wrap: wrap; gap: .55rem;
-    padding: .65rem .75rem; border: 1px solid var(--line); border-radius: .75rem;
-    background: var(--card); }}
-  .relation-kind {{ border-radius: 999px; padding: .1rem .5rem; color: var(--accent-deep);
-    background: var(--accent-soft); font-size: .78rem; font-weight: 700; }}
+  .sql-check select {{ padding: .25rem .5rem; border-radius: .5rem; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); font: inherit; }}
+  .sql-viz {{ overflow-x: auto; margin-top: .75rem; }}
   .sql-tables {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
     gap: .65rem; margin-top: .75rem; }}
   .sql-table {{ min-width: 0; border: 1px solid var(--line); border-radius: .85rem;
@@ -1800,11 +1786,9 @@ def sql_playground_page(
     align-items: center; cursor: pointer; padding: .75rem .85rem; }}
   .sql-table summary .role {{ white-space: nowrap; }}
   .sql-scroll {{ overflow-x: auto; }}
-  .sql-fields, .sql-data {{ width: 100%; border-collapse: collapse; font-size: .83rem; }}
-  .sql-fields th, .sql-fields td, .sql-data th, .sql-data td {{
-    padding: .38rem .55rem; text-align: left; border-top: 1px solid var(--line); }}
-  .sql-fields th, .sql-data th {{ color: var(--muted); font-weight: 650; }}
-  .sql-data {{ margin-bottom: .35rem; }}
+  .sql-fields {{ width: 100%; border-collapse: collapse; font-size: .83rem; }}
+  .sql-fields th, .sql-fields td {{ padding: .38rem .55rem; text-align: left; border-top: 1px solid var(--line); }}
+  .sql-fields th {{ color: var(--muted); font-weight: 650; }}
   .sql-result {{ margin-top: 1rem; }}
   .sql-result table {{ min-width: 100%; border-collapse: collapse; font-size: .84rem; }}
   .sql-result th, .sql-result td {{ padding: .42rem .6rem; text-align: left;
@@ -1815,21 +1799,18 @@ def sql_playground_page(
 {_nav(can_edit=True)}
 <main>
   <section class="sql-hero"><h1>SQL Playground</h1>
-    <p>{"Полный доступ: схема PocketBase и SQL-запросы." if is_admin else "Схема PocketBase и SQL-запросы только для чтения."}</p></section>
+    <p>{"Полный доступ: админ — любая база, пользователь — своя." if is_admin else "Доступ только к вашей базе данных."}</p></section>
   {notice_html}
   <div class="sql-layout">
     <section class="card"><h2>SQL-запрос</h2>
-      <p class="role">{"Разрешены SELECT, WITH, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, REPLACE, PRAGMA." if is_admin else "Разрешены SELECT и WITH."} Запрос ограничен по времени и объёму ответа.</p>
+      <p class="role">{"Разрешены все команды SQL." if is_admin else "Только SELECT."} Ограничение по времени и объёму ответа.</p>
       {query_form}
     </section>
-    <section class="card"><h2>Связи коллекций</h2>
-      <p class="role">N:1 — запись ссылается на одну запись; N:M — поле допускает несколько связей.</p>
-      <div class="sql-relations">{relation_html}</div>
+    <section class="card"><h2>Схема базы · {len(tables)} таблиц</h2>
+      <div class="sql-tables">{schema_html}</div>
     </section>
   </div>
-  <section><h2>Схема базы · {len(tables)} объектов</h2>
-    <div class="sql-tables">{schema_html}</div>
-  </section>
+  {"<section><h2>Диаграмма связей</h2><div class='sql-viz'>" + viz_html + "</div></section>" if viz_html else ""}
   {result_html}
 </main></body></html>"""
 
