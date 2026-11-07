@@ -1754,8 +1754,8 @@ def sql_playground_page(
     return f"""<!doctype html>
 <html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SQL Playground — AI Bridge</title>
-{_style()}
 <style>
+{_style()}
   .sql-hero {{ padding: 1.25rem 1.4rem; margin: 1.2rem 0; border-radius: 1.2rem;
     color: #fff; background: linear-gradient(120deg, #0f766e, #0f172a 75%); }}
   .sql-hero h1 {{ margin: 0 0 .35rem; color: #fff; }}
