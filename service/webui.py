@@ -310,6 +310,7 @@ class WebUi:
         result: dict | None = None,
         error: str = "",
         include_data: bool = False,
+        is_admin: bool = False,
     ) -> str:
         schema = {"tables": [], "relations": []}
         if self._sql_playground is not None:
@@ -324,6 +325,7 @@ class WebUi:
             error=error,
             include_data=include_data,
             configured=self._sql_playground is not None,
+            is_admin=is_admin,
         )
 
     def _event(self, kind: str, user: str, text: str, **fields) -> None:
@@ -1365,12 +1367,12 @@ class WebUi:
 
 
         if clean == "/sql":
-            if not is_admin:
-                self._forbidden(handler, "SQL Playground — только администратору")
-                return
             self._send_html(
                 handler, 200,
-                self._sql_page(include_data=(params.get("data") or ["0"])[0] == "1"),
+                self._sql_page(
+                    include_data=(params.get("data") or ["0"])[0] == "1",
+                    is_admin=is_admin,
+                ),
                 cache_control="no-store",
             )
             return
@@ -1439,9 +1441,6 @@ class WebUi:
         space = self._spaces.for_user(user_id)
 
         if clean == "/sql/run":
-            if not is_admin:
-                self._forbidden(handler, "SQL Playground — только администратору")
-                return
             query = field("query")
             include_data = field("include_data") == "1"
             result = None
@@ -1450,7 +1449,7 @@ class WebUi:
                 error = "SQL Playground не настроен."
             elif query:
                 try:
-                    result = self._sql_playground.execute(query)
+                    result = self._sql_playground.execute(query, read_only=not is_admin)
                 except SqlPlaygroundError as exc:
                     error = str(exc)
             self._send_html(
@@ -1461,6 +1460,7 @@ class WebUi:
                     result=result,
                     error=error,
                     include_data=include_data,
+                    is_admin=is_admin,
                 ),
                 cache_control="no-store",
             )

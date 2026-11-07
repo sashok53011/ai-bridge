@@ -289,10 +289,10 @@ def _nav(*, can_edit: bool) -> str:
     links = [
         '<a href="/">каталог</a>',
         '<a href="/stats">статистика</a>',
+        '<a href="/sql">SQL Playground</a>',
         '<a href="/tokens">приложения и токены</a>',
     ]
     if can_edit:
-        links.append('<a href="/sql">SQL Playground</a>')
         links.append('<a href="/logs">журнал</a>')
         links.append('<a href="/users">пользователи</a>')
     # Вид шапки живёт в браузере: тема и свои цвета (кнопки, полоса)
@@ -1636,8 +1636,9 @@ def sql_playground_page(
     error: str = "",
     include_data: bool = False,
     configured: bool = True,
+    is_admin: bool = False,
 ) -> str:
-    """Админская схема SQLite, предпросмотр записей и read-only SQL."""
+    """Схема SQLite, предпросмотр записей и SQL; админу — полный доступ."""
     schema = schema or {"tables": [], "relations": []}
     tables = schema.get("tables") or []
     relations = schema.get("relations") or []
@@ -1795,11 +1796,11 @@ def sql_playground_page(
 {_nav(can_edit=True)}
 <main>
   <section class="sql-hero"><h1>SQL Playground</h1>
-    <p>Только администратору · схема PocketBase и SQL-запросы только для чтения.</p></section>
+    <p>{"Полный доступ: схема PocketBase и SQL-запросы." if is_admin else "Схема PocketBase и SQL-запросы только для чтения."}</p></section>
   {notice_html}
   <div class="sql-layout">
     <section class="card"><h2>SQL-запрос</h2>
-      <p class="role">Разрешены SELECT и WITH. Запрос ограничен по времени и объёму ответа.</p>
+      <p class="role">{"Разрешены SELECT, WITH, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, REPLACE, PRAGMA." if is_admin else "Разрешены SELECT и WITH."} Запрос ограничен по времени и объёму ответа.</p>
       {query_form}
     </section>
     <section class="card"><h2>Связи коллекций</h2>

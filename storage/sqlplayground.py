@@ -17,13 +17,19 @@ _READ_QUERY = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+_WRITE_QUERY = re.compile(
+    r"\A\s*(?:(?:--[^\n]*(?:\n|$))|(?:/\*.*?\*/\s*))*"
+    r"(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|REPLACE|PRAGMA)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 class SqlPlaygroundError(ValueError):
     """Запрос отклонён или не может быть выполнен."""
 
 
 class SqlPlayground:
-    """Открывает SQLite-файл только с ``mode=ro`` и ограничивает запросы."""
+    """Открывает SQLite-файл; ``read_only=True`` — только ``mode=ro``."""
 
     def __init__(
         self,
@@ -40,17 +46,20 @@ class SqlPlayground:
         self.max_result_bytes = max_result_bytes
         self.timeout = timeout
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self, *, read_only: bool = True) -> sqlite3.Connection:
         try:
             path = self._database.resolve(strict=True)
             if not path.is_file():
                 raise SqlPlaygroundError("путь к базе не является файлом")
-            connection = sqlite3.connect(
-                f"{path.as_uri()}?mode=ro",
-                uri=True,
-                timeout=1.0,
-            )
-            connection.execute("PRAGMA query_only = ON")
+            if read_only:
+                connection = sqlite3.connect(
+                    f"{path.as_uri()}?mode=ro",
+                    uri=True,
+                    timeout=1.0,
+                )
+                connection.execute("PRAGMA query_only = ON")
+            else:
+                connection = sqlite3.connect(str(path), timeout=1.0)
             connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 65_536)
             connection.setlimit(sqlite3.SQLITE_LIMIT_COLUMN, 100)
             return connection
@@ -62,8 +71,8 @@ class SqlPlayground:
             ) from exc
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        connection = self._connect()
+    def _connection(self, *, read_only: bool = True) -> Iterator[sqlite3.Connection]:
+        connection = self._connect(read_only=read_only)
         try:
             yield connection
         except sqlite3.Error as exc:
@@ -214,14 +223,20 @@ class SqlPlayground:
                 seen.add(key)
         return relations
 
-    def execute(self, query: str) -> dict[str, Any]:
-        """Выполняет один SELECT/CTE с ограничением времени, объёма и строк."""
+    def execute(self, query: str, *, read_only: bool = True) -> dict[str, Any]:
+        """Выполняет запрос; для админа (``read_only=False``) — любой SQL."""
         if len(query) > 20_000:
             raise SqlPlaygroundError("запрос длиннее 20 000 символов")
-        if not _READ_QUERY.match(query):
-            raise SqlPlaygroundError("разрешены только запросы SELECT")
+        pattern = _READ_QUERY if read_only else _WRITE_QUERY
+        if not pattern.match(query):
+            if read_only:
+                raise SqlPlaygroundError("разрешены только запросы SELECT")
+            raise SqlPlaygroundError(
+                "разрешены SELECT, WITH, INSERT, UPDATE, DELETE, "
+                "CREATE, DROP, ALTER, REPLACE, PRAGMA"
+            )
 
-        with self._connection() as connection:
+        with self._connection(read_only=read_only) as connection:
             deadline = time.monotonic() + self.timeout
             connection.set_progress_handler(
                 lambda: int(time.monotonic() > deadline), 1_000
