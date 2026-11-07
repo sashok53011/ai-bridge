@@ -79,7 +79,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "cat.empty": {"ru": "каталог пуст", "en": "catalogue is empty", "de": "Katalog ist leer"},
     "cat.hero_status": {"ru": "ваше пространство AI-провайдеров", "en": "your AI provider space", "de": "Ihr KI-Anbieter-Bereich"},
     "cat.hero_title": {"ru": "Каталог провайдеров", "en": "Provider catalogue", "de": "Anbieterkatalog"},
-    "cat.hero_desc": {"ru": "Подключайте модели, храните ключи локально и выбирайте, кому доверить запросы.", "en": "Connect models, store keys locally and choose who to trust with your requests.", "de": "Modelle verbinden, Schlüssel lokal speichern und wählen, wem Ihre Anfragen vertraut werden."},
+    "cat.hero_desc": {"ru": "Подключайте модели, храните ключи локально и выбирайте, кому доверить запросы.", "en": "Connect models, store keys locally and choose who to trust with your requests.", "de": ""},
     "cat.endpoint_label": {"ru": "Для приложений · endpoint OpenAI", "en": "For apps · OpenAI endpoint", "de": "Für Apps · OpenAI-Endpunkt"},
     "cat.providers": {"ru": "провайдеров", "en": "providers", "de": "Anbieter"},
     "cat.active": {"ru": "включено", "en": "active", "de": "aktiv"},
