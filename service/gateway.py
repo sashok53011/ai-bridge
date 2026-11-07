@@ -29,8 +29,15 @@ from core.routes import advertised_models, is_local_url, request_needs, route, s
 from providers import copilot
 from providers.client import NeedsKeyError, Provider, ServerError
 from storage.lists import GREY_CYCLE_LIMIT, ModelLists
-from storage.rules import ACTION_CAPABILITY, LEARN_ACTIONS, describe, match_response
-
+try:
+    from storage.rules import ACTION_CAPABILITY, LEARN_ACTIONS, describe, match_response
+except ImportError:  # раздел «Правила» удалён — заглушки
+    ACTION_CAPABILITY = {}
+    LEARN_ACTIONS = {}
+    def describe(rule):  # type: ignore[misc]
+        return ""
+    def match_response(*a, **k):  # type: ignore[misc]
+        return False
 #: Пустой ответ на пустой список: клиенты ждут JSON, а не пустоту.
 _NO_MODELS = {"object": "list", "data": []}
 

@@ -292,7 +292,6 @@ def _serve(
     from storage.capabilities import CapabilityStore
     from storage.lists import ModelLists
     from storage.reputation import ReputationStore
-    from storage.rules import RuleStore
     from storage.sessions import SessionStore
     from storage.sqlplayground import SqlPlayground
     from storage.usertokens import UserTokens
@@ -306,24 +305,6 @@ def _serve(
     capabilities = CapabilityStore(root)
     # Три списка: белый (4 группы) / серый (персональный) / чёрный в root.
     lists = ModelLists(root)
-    # Правила «строка → действие» (страница «Правила», только админ).
-    rules = RuleStore(root)
-    # Общая доска «Нашёл bug» (страница «Нашёл bug», для всех вошедших).
-    from storage.board import BoardStore
-    board = BoardStore(root)
-    # Личная почта участников (страница «Сообщения», для всех вошедших).
-    from storage.mail import MailStore
-    mail = MailStore(root)
-    # Уведомления в Telegram: токен бота (админ), chat_id — в профилях.
-    from storage.notify import NotifyStore
-    notify = NotifyStore(root)
-    # Последний прогон автотестов (страница «Автотесты», только админ).
-    from storage.autotest import AutotestStore
-    autotest_store = AutotestStore(root)
-
-    # Последний прогон «Проверки» (страница /verify, любой вошедший).
-    from storage.verify import VerifyStore
-    verify_store = VerifyStore(root)
 
     # Миграция старого плоского whitelist.txt: раскладка по группам по
     # выученной подписи модели. Один раз при старте, повтор безопасен.
@@ -458,12 +439,6 @@ def _serve(
         capabilities=capabilities,
         lists=lists,
         refresh=refresh_catalogue,
-        rules=rules,
-        autotest_store=autotest_store,
-        verify_store=verify_store,
-        board=board,
-        mail=mail,
-        notify=notify,
         sql_playground=sql_playground,
     )
 
@@ -495,10 +470,6 @@ def _serve(
         capabilities=capabilities,
         lists=lists,
         user_dir_for=user_dir_for,
-        rules=rules,
-        autotest_store=autotest_store,
-        verify_store=verify_store,
-    )
 
 
 def _remove_provider(
