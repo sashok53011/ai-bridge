@@ -315,6 +315,7 @@ class WebUi:
         user_id: str = "",
         db: str = "",
     ) -> str:
+        from html import escape
         from storage.user_db import available_dbs, db_path_for
         from core.schema_viz import load_schema, render_schema_svg
         from pathlib import Path
@@ -620,53 +621,6 @@ class WebUi:
 
         return form, files
 
-    def _grey_text(self, viewer: dict) -> str:
-        """Серый список этого человека (персональный каталог) для страницы."""
-        from storage.lists import GREYLIST, ModelLists
-
-        try:
-            directory = self._spaces.for_user(str(viewer["id"])).directory
-            return ModelLists(directory).text(GREYLIST)
-        except Exception:  # noqa: BLE001
-            return ""
-
-    def _grey_rows(self, viewer: dict) -> list[dict]:
-        """Строки таблицы таймера серого списка: кто спит и сколько осталось.
-
-        Провайдер спит целиком (все модели); остаток — в минутах,
-        причина и номер цикла — из комментария файла.
-        """
-        from storage.lists import ModelLists
-
-        try:
-            directory = self._spaces.for_user(str(viewer["id"])).directory
-            cells = ModelLists(directory).grey()
-        except Exception:  # noqa: BLE001
-            return []
-        now = datetime.now(timezone.utc)
-        rows = []
-        for provider_id, cell in cells.items():
-            left = int((cell["until"] - now).total_seconds() // 60)
-            rows.append(
-                {
-                    "id": provider_id,
-                    "minutes": left,
-                    "reason": cell.get("reason") or "—",
-                    "cycle": int(cell.get("cycle") or 1),
-                }
-            )
-        rows.sort(key=lambda row: row["minutes"])
-        return rows
-
-    def _whitelist_groups(self) -> dict:
-        """Белый список по группам: {группа: содержимое файла}."""
-        from storage.lists import WHITELIST_FILES
-
-        groups: dict = {}
-        for group, filename in WHITELIST_FILES.items():
-            groups[group] = self._lists.text(filename)
-        return groups
-
     def _site_link(self, handler: BaseHTTPRequestHandler) -> str:
         """Внешний адрес приставки (scheme://host) — для ссылки в уведомлении.
 
@@ -848,23 +802,11 @@ class WebUi:
                 )
             rows.sort(key=lambda row: (-row["requests"], row["model"]))
             penalized = self._reputation.penalized() if self._reputation else []
-            codes: dict[str, str] = {}
-            if self._lists:
-                for name in self._lists.code_names():
-                    codes[name] = self._lists.code_text(name)
             self._send_html(
                 handler,
                 200,
                 stats_page(
                     rows, can_edit=True, notice=notice, penalized=penalized,
-                    whitelist=self._whitelist_groups() if self._lists else {},
-                    greylist=self._grey_text(viewer) if self._lists else "",
-                    grey_rows=self._grey_rows(viewer) if self._lists else [],
-                    blacklist=self._lists.text("blacklist.txt") if self._lists else "",
-                    novision=self._lists.text("novision.txt") if self._lists else "",
-                    notools=self._lists.text("notools.txt") if self._lists else "",
-                    paid=self._lists.text("paid.txt") if self._lists else "",
-                    code_lists=codes,
                 ),
             )
             return
@@ -2223,69 +2165,6 @@ class WebUi:
             self._redirect(handler, f"модель {key} прощена — штрафы сняты")
             return
 
-        if clean.startswith("/stats/save/"):
-            # Правка списков руками: файл в состоянии приставки, действие
-            # мгновенное (файлы перечитаются на каждый запрос).
-            if not is_admin or self._lists is None:
-                self._forbidden(handler, "правка списков — только администратору")
-                return
-            which = urllib.parse.unquote(clean[len("/stats/save/") :])
-            ok = self._lists.write_text(which, field("text"))
-            self._event(
-                "списки", str(viewer.get("email") or ""),
-                f"{which}: {'сохранено' if ok else 'неизвестный файл'}",
-            )
-            self._redirect(
-                handler,
-                f"{which}: сохранено" if ok else f"{which}: неизвестный файл",
-                bad=not ok, to="/stats",
-            )
-            return
-
-        if clean == "/stats/codes/create":
-            if not is_admin or self._lists is None:
-                self._forbidden(handler, "создание списков — только администратору")
-                return
-            name = field("name").strip().lower()
-            if not self._lists.code_valid(name):
-                self._redirect(handler, "имя — кодовое слово: латиница, цифры, дефис",
-                               bad=True, to="/stats")
-                return
-            self._lists.code_write(name, field("text"))
-            self._event("списки", str(viewer.get("email") or ""), f"создан список {name}")
-            self._redirect(handler, f"список {name} создан", to="/stats")
-            return
-
-        if clean.startswith("/stats/codes/save/"):
-            if not is_admin or self._lists is None:
-                self._forbidden(handler, "правка списков — только администратору")
-                return
-            name = urllib.parse.unquote(clean[len("/stats/codes/save/"):]).strip().lower()
-            ok = self._lists.code_write(name, field("text"))
-            self._event(
-                "списки", str(viewer.get("email") or ""),
-                f"{name}: {'сохранено' if ok else 'невалидное имя'}",
-            )
-            self._redirect(
-                handler,
-                f"{name}: сохранено" if ok else f"{name}: невалидное имя",
-                bad=not ok, to="/stats",
-            )
-            return
-
-        if clean.startswith("/stats/codes/drop/"):
-            if not is_admin or self._lists is None:
-                self._forbidden(handler, "удаление списков — только администратору")
-                return
-            name = urllib.parse.unquote(clean[len("/stats/codes/drop/"):]).strip().lower()
-            ok = self._lists.code_drop(name)
-            self._event("списки", str(viewer.get("email") or ""), f"удалён список {name}")
-            self._redirect(
-                handler,
-                f"список {name} удалён" if ok else f"{name}: не найден",
-                bad=not ok, to="/stats",
-            )
-            return
 
         if clean == "/logs/clear":
             if self._log is not None:

@@ -1271,10 +1271,6 @@ def tokens_page(
 def stats_page(
     rows: list[dict], *, can_edit: bool = False, notice: str = "",
     penalized: list[dict] | None = None,
-    whitelist: dict | None = None, greylist: str = "", blacklist: str = "",
-    grey_rows: list[dict] | None = None,
-    novision: str = "", notools: str = "", paid: str = "",
-    code_lists: dict[str, str] | None = None,
 ) -> str:
     """Статистика по моделям: что есть у модели и как она служит.
 
@@ -1283,89 +1279,8 @@ def stats_page(
     последний и какой процент удачных. Строки приходят собранными
     (webui), здесь только разметка.
 
-    Админу внизу — списки приставки: белый **разложен по группам**
-    способностей (text / vision / tools / vision-tools), серый
-    (персональный) с **таймером пробуждения** и чёрный.
     """
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
-    whitelist = whitelist or {}
-    code_lists = code_lists or {}
-
-    def code_lists_html() -> str:
-        """Кодовые слова: имя = модель для клиента, значение — список моделей.
-
-        Админ создаёт/правит/удаляет списки. Форма сохранения — POST
-        на /stats/codes/save, удаление — /stats/codes/drop. Список моделей
-        — по одной на строку, порядок = приоритет.
-        """
-        if not can_edit:
-            return ""
-
-        def card(name: str, text: str) -> str:
-            return (
-                f'<div class="listcard"><h3>{escape(name)}</h3>'
-                f'<p class="role">модели по одной на строку, сверху — главные</p>'
-                f'<form method="post" action="/stats/codes/save/{escape(name, quote=True)}">'
-                f'<textarea name="text" rows="6" spellcheck="false" '
-                f'placeholder="провайдер/модель">{escape(text)}</textarea>'
-                f'<button type="submit" class="primary">сохранить</button>'
-                f"</form>"
-                f'<form method="post" action="/stats/codes/drop/{escape(name, quote=True)}" '
-                f'style="margin-top:.4rem">'
-                f'<button type="submit">удалить список</button></form>'
-                f"</div>"
-            )
-
-        cards = "".join(card(name, text) for name, text in sorted(code_lists.items()))
-        create = (
-            '<div class="listcard"><h3>Новый список</h3>'
-            '<p class="role">имя — кодовое слово (латиница, цифры, дефис); '
-            'клиент увидит его как модель</p>'
-            '<form method="post" action="/stats/codes/create">'
-            '<input name="name" placeholder="vision_tools_1m" '
-            'pattern="[a-z0-9][a-z0-9_-]{0,63}" required>'
-            '<textarea name="text" rows="4" spellcheck="false" '
-            'placeholder="провайдер/модель"></textarea>'
-            '<button type="submit" class="primary">создать</button>'
-            "</form></div>"
-        )
-        return (
-            '<h2>Кодовые слова (списки моделей)</h2>'
-            '<p class="role">Это то, что клиент видит в списке моделей как «модель». '
-            'Запрос на кодовое слово идёт по моделям списка сверху вниз. '
-            'Порядок строк = приоритет.</p>'
-            f'<div class="lists">{cards}{create}</div>'
-        )
-
-    def grey_timer_html() -> str:
-        """Таблица серого списка: провайдер спит, видно сколько осталось.
-
-        Провайдер отстранён целиком (со всеми моделями); остаток
-        пересчитывается на каждый рендер, страница обновляется сама.
-        """
-        if not grey_rows:
-            return ""
-        lines = [
-            '<h3 class="listgroup">Серый список — таймер пробуждения</h3>',
-            "<table class=\"greytimer\">",
-            "<tr><th>провайдер</th><th>проснётся через</th>"
-            "<th>причина</th><th>цикл</th></tr>",
-        ]
-        for row in grey_rows:
-            minutes = int(row.get("minutes", 0))
-            if minutes > 0:
-                hours, mins = divmod(minutes, 60)
-                left = f"{hours} ч {mins} мин" if hours else f"{mins} мин"
-            else:
-                left = "уже проснулся"
-            lines.append(
-                f'<tr><td class="model">{escape(str(row.get("id") or "—"))}</td>'
-                f"<td>{left}</td>"
-                f'<td class="role">{escape(str(row.get("reason") or ""))}</td>'
-                f"<td>{int(row.get('cycle', 1))}</td></tr>"
-            )
-        lines.append("</table>")
-        return "\n".join(lines)
 
     def paused_html() -> str:
         """Секция «на паузе» — только админу, кнопка «вернуть» рядом."""
@@ -1393,101 +1308,6 @@ def stats_page(
             )
         lines.append("</table>")
         return "\n".join(lines)
-
-    def lists_html() -> str:
-        """Списки приставки: белый — четыре секции по группам, серый и чёрный.
-
-        Каждый список — форма с textarea: правка руками, сохранение —
-        POST, файл перечитывается мгновенно.
-        """
-        if not can_edit:
-            return ""
-
-        def one(filename: str, title: str, hint: str, text: str) -> str:
-            return (
-                f'<div class="listcard"><h3>{escape(title)}</h3>'
-                f'<p class="role">{escape(hint)}</p>'
-                f'<form method="post" action="/stats/save/{escape(filename, quote=True)}">'
-                f'<textarea name="text" rows="6" spellcheck="false" '
-                f'placeholder="имя на строке, # — комментарий">{escape(text)}</textarea>'
-                f'<button type="submit" class="primary">сохранить</button>'
-                f"</form></div>"
-            )
-
-        group_titles = {
-            "text": "Только текст",
-            "vision": "Vision (с картинками)",
-            "tools": "Tools (с инструментами)",
-            "vision-tools": "Vision + Tools",
-        }
-        group_hints = {
-            "text": "для role-based задач и дешёвого текста",
-            "vision": "отвечают на картинки",
-            "tools": "вызывают инструменты, coding",
-            "vision-tools": "и картинки, и инструменты",
-        }
-        white_cards = "".join(
-            one(
-                f"whitelist-{group}.txt",
-                group_titles[group],
-                group_hints[group],
-                whitelist.get(group, ""),
-            )
-            for group in ("text", "vision", "tools", "vision-tools")
-            if group in whitelist
-        )
-        if not white_cards:
-            white_cards = one("whitelist-text.txt", "Белый список", "подтверждённые успехом", "")
-
-        return (
-            '<h2>Списки приставки</h2>'
-            '<p class="role">Имя на строке, <code>#</code> — комментарий; правка '
-            'файла действует сразу, без перезапуска. Заполняются автоматикой, '
-            'руки нужны не всегда. Цепочка: белый (своей группы первым) → '
-            'неизвестный → проснувшийся серый → чёрный.</p>'
-            '<h3 class="listgroup">Белый список — по группам</h3>'
-            '<div class="lists">'
-            + white_cards
-            + "</div>"
-            + grey_timer_html()
-            + '<div class="lists">'
-            + one(
-                "greylist.txt",
-                "Серый список (ваш)",
-                "спит сутки после мягкого отказа (лимит/кредиты) — провайдер "
-                "целиком, со всеми моделями; просыпается попробовать себя; "
-                "3 цикла подряд — в чёрный",
-                greylist,
-            )
-            + one(
-                "blacklist.txt",
-                "Чёрный список",
-                "после жёсткого отказа; только последний шанс, когда больше некому",
-                blacklist,
-            )
-            + one(
-                "novision.txt",
-                "Доказано без vision",
-                "модели, доказавшие, что не умеют картинки — при запросе "
-                "с картинкой приставка их пропускает",
-                novision,
-            )
-            + one(
-                "notools.txt",
-                "Доказано без tools",
-                "модели, доказавшие, что не умеют инструменты — при запросе "
-                "с tools приставка их пропускает",
-                notools,
-            )
-            + one(
-                "paid.txt",
-                "Доказано платные",
-                "модели, вернувшие 402 при тесте — при маршрутизации идут "
-                "последними (бесплатные предпочтительнее), но не исключаются",
-                paid,
-            )
-            + "</div>"
-        )
 
     def cell(row: dict) -> str:
         requests = int(row.get("requests", 0))
@@ -1570,24 +1390,6 @@ def stats_page(
   .ok-warn {{ color: #b08c14; font-weight: 600; }}
   .ok-bad {{ color: var(--bad); font-weight: 600; }}
   h2 {{ margin-bottom: .2rem; }}
-  .listgroup {{ margin: 1.2rem 0 .4rem; font-size: .95rem; color: var(--muted);
-    text-transform: uppercase; letter-spacing: .04em; }}
-  .lists {{ display: flex; gap: 1rem; flex-wrap: wrap; }}
-  .listcard {{ flex: 1 1 18rem; background: var(--card); border: 1px solid var(--line);
-    border-radius: 1rem; padding: .7rem .9rem; box-shadow: 0 1px 3px rgba(0, 0, 0, .05); }}
-  .listcard h3 {{ margin: 0 0 .1rem; font-size: .95rem; }}
-  .listcard textarea {{ width: 100%; font-family: ui-monospace, monospace;
-    font-size: .82rem; border: 1px solid var(--line); border-radius: .5rem;
-    background: var(--bg); color: var(--text); padding: .5rem; resize: vertical; }}
-  .listcard button {{ margin-top: .5rem; }}
-  .listcard pre.listfile {{ background: var(--bg); border: 1px solid var(--line);
-    border-radius: .6rem; padding: .5rem .7rem; font-size: .85rem;
-    white-space: pre-wrap; word-break: break-word; margin: .4rem 0 0; }}
-  /* Таблица таймера серого списка: кто спит и сколько осталось. */
-  table.greytimer {{ margin: .6rem 0 1rem; border-collapse: collapse; width: 100%; }}
-  table.greytimer th, table.greytimer td {{ text-align: left; padding: .35rem .55rem;
-    border-bottom: 1px solid var(--line); font-size: .88rem; }}
-  table.greytimer th {{ font-size: .78rem; color: var(--muted); }}
 </style>
 </head>
 <body>
@@ -1614,8 +1416,6 @@ def stats_page(
 {body}
 </table>
 </div>
-{lists_html()}
-{code_lists_html()}
 {paused_html()}
 {LOCAL_TIME_SCRIPT}
 </body>
