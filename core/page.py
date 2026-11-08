@@ -301,6 +301,7 @@ def _nav(*, can_edit: bool) -> str:
         f'<a href="/">{t("nav.catalogue")}</a>',
         f'<a href="/stats">{t("nav.stats")}</a>',
         f'<a href="/sql">{t("nav.sql")}</a>',
+        f'<a href="/builder">{t("nav.builder")}</a>',
         f'<a href="/tokens">{t("nav.tokens")}</a>',
     ]
     if can_edit:
@@ -1601,8 +1602,8 @@ def sql_playground_page(
   <section class="sql-hero"><h1>SQL Playground</h1>
     <p>{"Полный доступ: админ — любая база, пользователь — своя." if is_admin else "Доступ только к вашей базе данных."}</p></section>
   {notice_html}
-  <div class="sql-layout">
-    <section class="card"><h2>SQL-запрос</h2>
+    <div class="sql-layout">
+    <section class="card"><h2>SQL-запрос <a href="/builder" class="ghost pill" style="font-size:.8rem">📐 визуальный конструктор</a></h2>
       <p class="role">{"Разрешены все команды SQL." if is_admin else "Только SELECT."} Ограничение по времени и объёму ответа.</p>
       {query_form}
     </section>

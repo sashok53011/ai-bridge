@@ -33,6 +33,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "nav.catalogue": {"ru": "каталог", "en": "catalogue", "de": "Katalog"},
     "nav.stats": {"ru": "статистика", "en": "stats", "de": "Statistik"},
     "nav.sql": {"ru": "SQL Playground", "en": "SQL Playground", "de": "SQL Playground"},
+    "nav.builder": {"ru": "конструктор", "en": "builder", "de": "Konstruktor"},
     "nav.tokens": {"ru": "приложения и токены", "en": "apps & tokens", "de": "Apps & Tokens"},
     "nav.logs": {"ru": "журнал", "en": "journal", "de": "Journal"},
     "nav.users": {"ru": "пользователи", "en": "users", "de": "Benutzer"},

@@ -32,6 +32,7 @@ from typing import Callable
 
 from core.accounts import ROLE_ADMIN, make_session
 from core.catalogue import set_model as set_model_data
+from core.builder_page import builder_page
 from core.page import (
     add_page,
     catalogue_page,
@@ -180,6 +181,52 @@ def _rule_at(store, where: str, index: int) -> str:
     action = actions.get(str(rule.get("action") or ""), str(rule.get("action") or ""))
     head = str(rule.get("provider") or _WHERE_TITLES.get(where, where))
     return f"{head}: {describe(rule)} → {action}"
+
+
+
+def _chat_body(text: str) -> bytes:
+    """Тело OpenAI-совместимого запроса с одним user-сообщением."""
+    import json as _json
+    return _json.dumps(
+        {"messages": [{"role": "user", "content": text}], "temperature": 0},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _extract_answer(raw: str) -> str:
+    """Достать текст ответа из потокового/обычного ответа шлюза."""
+    import json as _json
+    raw = raw.strip()
+    if not raw:
+        return ""
+    # Обычный JSON.
+    try:
+        data = _json.loads(raw)
+        if isinstance(data, dict):
+            choices = data.get("choices") or []
+            if choices and isinstance(choices[0], dict):
+                msg = choices[0].get("message") or choices[0].get("delta") or {}
+                return str(msg.get("content") or "")
+    except (ValueError, TypeError):
+        pass
+    # SSE: строки "data: {...}".
+    out = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if not line or line == "[DONE]":
+            continue
+        try:
+            d = _json.loads(line)
+            ch = (d.get("choices") or [{}])[0]
+            delta = ch.get("delta") or ch.get("message") or {}
+            piece = delta.get("content")
+            if piece:
+                out.append(str(piece))
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
+    return "".join(out)
 
 
 class WebUi:
@@ -808,6 +855,34 @@ class WebUi:
                 stats_page(
                     rows, can_edit=True, notice=notice, penalized=penalized,
                 ),
+            )
+            return
+
+        if clean == "/builder":
+            from storage.user_db import available_dbs
+            from core.schema_viz import load_schema
+            from pathlib import Path as _P
+            import os as _os
+            _root = _P(_os.environ.get("AI_BRIDGE_HOME", ".").strip() or ".")
+            _dbs = available_dbs(_root, is_admin=is_admin, user_id=str(viewer["id"]))
+            _sel = (params.get("db") or [""])[0]
+            if _sel not in {d["path"] for d in _dbs}:
+                _sel = _dbs[0]["path"] if _dbs else ""
+            _tables = []
+            if _sel:
+                try:
+                    _tables = load_schema(_sel, include_data=True).get("tables") or []
+                except Exception as _exc:  # noqa: BLE001
+                    _sel = ""
+            self._send_html(
+                handler, 200,
+                builder_page(
+                    schema={"tables": _tables},
+                    selected_db=_sel,
+                    dbs=_dbs,
+                    is_admin=is_admin,
+                ),
+                cache_control="no-store",
             )
             return
 
@@ -1529,6 +1604,55 @@ class WebUi:
         is_admin = role == ROLE_ADMIN
         user_id = str(viewer["id"])
         space = self._spaces.for_user(user_id)
+
+        if clean == "/builder/ai":
+            action = field("action")
+            prompt = field("prompt").strip()
+            sql = field("sql")
+            table = field("table")
+            db = field("db")
+            if not prompt:
+                self._send_json(handler, 400, {"error": "промпт не может быть пустым"})
+                return
+            # Опционально подмешиваем схему таблицы, о которой спрашивают.
+            schema_note = ""
+            if db and table:
+                try:
+                    from core.schema_viz import load_schema
+                    for t in load_schema(db, include_data=False).get("tables", []):
+                        if t["name"] == table:
+                            cols = ", ".join(c["name"] for c in t["columns"])
+                            schema_note = f"Таблица {table}: {cols}"
+                            break
+                except Exception:  # noqa: BLE001
+                    pass
+            hints = {
+                "explain": "Объясни ошибку последнего запроса. Отвечай коротко и по делу.",
+                "fix": "Исправь SQL-запрос. Ответ — только исправленный SQL, без пояснений.",
+                "gen": "Напиши SQL по описанию. Ответ — только SQL.",
+            }
+            user_text = (
+                f"{hints.get(action, hints['gen'])}\n"
+                f"{('Схема: ' + schema_note) if schema_note else ''}\n"
+                f"Запрос:\n{sql}\nПромпт пользователя: {prompt}"
+            )
+            gateway = getattr(handler.server, "gateway", None)
+            if gateway is None:
+                self._send_json(handler, 503, {"error": "шлюз не подключён"})
+                return
+            try:
+                status, _, chunks, _, _ = gateway.chat(
+                    _chat_body(user_text), "qwen3", str(viewer["id"])
+                )
+                answer = "".join(
+                    c.decode("utf-8", errors="replace") for c in chunks
+                )
+                # Вырезаем SSE-обёртку, если шлюз вернул поток.
+                answer = _extract_answer(answer)
+                self._send_json(handler, 200, {"answer": answer, "status": status})
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(handler, 500, {"error": str(exc)[:300]})
+            return
 
         if clean == "/sql/run":
             query = field("query")
