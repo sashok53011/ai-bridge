@@ -310,9 +310,22 @@ def _nav(*, can_edit: bool) -> str:
 
     # Переключатель языка — ссылки с параметром ?lang=xx.
     lang_links = " · ".join(
-        f'<a href="?lang={code}" class="lang-link"{" style=\"font-weight:700\"" if code == lang else ""}>{LANG_NAMES[code]}</a>'
+        f'<a href="?lang={code}" data-lang="{code}" class="lang-link"'
+        f'{" style=\"font-weight:700\"" if code == lang else ""}>{LANG_NAMES[code]}</a>'
         for code in LANGS
     )
+    # На страницах с параметрами (db, notice…) ссылка ?lang=xx затёрла бы
+    # их — скрипт переписывает href, сохраняя текущий запрос.
+    lang_script = """<script>
+(function(){
+  if(!location.search) return;
+  document.querySelectorAll(".lang-link").forEach(function(a){
+    var p=new URLSearchParams(location.search);
+    p.set("lang",a.getAttribute("data-lang"));
+    a.href=location.pathname+"?"+p.toString();
+  });
+})();
+</script>"""
 
     # Вид шапки живёт в браузере: тема и свои цвета (кнопки, полоса)
     # хранятся в localStorage, применяются сразу, без перезагрузки.
@@ -452,7 +465,7 @@ def _nav(*, can_edit: bool) -> str:
     return (
         f'{theme_script}<header class="topnav"><a class="brand" href="/">AI-приставка</a>'
         f'<nav>{" ".join(links)}</nav>'
-        f'<span class="lang-switch">{lang_links}</span></header>'
+        f'<span class="lang-switch">{lang_links}</span></header>{lang_script}'
     )
 
 def _footer(visits: int) -> str:
@@ -1448,6 +1461,27 @@ def token_created_page(token: str, name: str, *, can_edit: bool = False) -> str:
 </html>"""
 
 
+def db_label(d: dict) -> str:
+    """Подпись базы в селекте — на текущем языке.
+
+    Системная база и «своя» подписываются переводом; остальные (id
+    пользователей) тоже через шаблоны, чтобы нигде не оставалось
+    русского текста на английской странице.
+    """
+    from core.i18n import t
+
+    path = str(d.get("path") or "")
+    owner = str(d.get("owner") or "")
+    label = str(d.get("label") or "")
+    if owner == "system" or path.endswith("catalogue.db"):
+        return t("sql.db_catalogue")
+    if label.endswith("(ваша)"):
+        return t("sql.db_yours").format(id=owner or path)
+    if owner:
+        return t("sql.db_user").format(id=owner)
+    return label
+
+
 def sql_playground_page(
     *,
     schema: dict | None = None,
@@ -1462,6 +1496,8 @@ def sql_playground_page(
     viz_html: str = "",
 ) -> str:
     """SQL Playground: выбор базы, схема, визуальная диаграмма, запросы."""
+    from core.i18n import get_lang, t
+
     schema = schema or {"tables": [], "relations": []}
     tables = schema.get("tables") or []
     notice_html = (
@@ -1473,25 +1509,36 @@ def sql_playground_page(
     db_options = "".join(
         f'<option value="{escape(d["path"], quote=True)}"'
         f'{" selected" if d["path"] == selected_db else ""}>'
-        f'{escape(d["label"])}</option>'
+        f'{escape(db_label(d))}</option>'
         for d in dbs
     )
+    def _rows(n: int) -> str:
+        """«5 строк» / «1 строка» / «2 строки» — на текущем языке."""
+        if n % 10 == 1 and n % 100 != 11:
+            word = t("sql.rows_one")
+        elif n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+            word = t("sql.rows_few")
+        else:
+            word = t("sql.rows_n")
+        return f"{n} {word}"
+
     db_selector = (
-        f'<label class="sql-check"><b>База:</b> '
+        f'<label class="sql-check"><b>{escape(t("sql.db"))}</b> '
         f'<select name="db" onchange="this.form.submit()">{db_options}</select></label>'
         if dbs
-        else '<p class="role">Базы данных не найдены.</p>'
+        else f'<p class="role">{escape(t("sql.no_dbs"))}</p>'
     )
 
     def render_table(table: dict) -> str:
         name = str(table.get("name") or "")
         columns = table.get("columns") or []
+        yes, no = t("common.yes"), t("common.no")
         fields = "".join(
             "<tr>"
             f'<td><code>{escape(str(column.get("name") or ""))}</code></td>'
             f'<td>{escape(str(column.get("type") or "—"))}</td>'
             f'<td>{"PK" if column.get("primary_key") else ""}</td>'
-            f'<td>{"да" if column.get("not_null") else "нет"}</td>'
+            f'<td>{yes if column.get("not_null") else no}</td>'
             "</tr>"
             for column in columns
         )
@@ -1499,23 +1546,26 @@ def sql_playground_page(
         fks = table.get("fks") or []
         if fks:
             fk_html = "".join(
-                f'<p class="role">FK: {escape(f["from"])} → {escape(f["table"])}.{escape(f["to"])}</p>'
+                '<p class="role">' +
+                escape(t("sql.fk").format(a=f["from"], b=f"{f['table']}.{f['to']}")) +
+                "</p>"
                 for f in fks
             )
         return (
             '<details class="sql-table">'
             f"<summary><strong>{escape(name)}</strong>"
-            f'<span class="role">{len(columns)} полей</span>'
+            f'<span class="role">{escape(t("sql.fields").format(n=len(columns)))}</span>'
             "</summary>"
             '<div class="sql-scroll"><table class="sql-fields"><thead><tr>'
-            "<th>поле</th><th>тип</th><th>PK</th><th>NN</th>"
+            f"<th>{escape(t('sql.f'))}</th><th>{escape(t('sql.t'))}</th>"
+            "<th>PK</th><th>NN</th>"
             f"</tr></thead><tbody>{fields}</tbody></table></div>"
             f"{fk_html}</details>"
         )
 
     schema_html = "".join(render_table(table) for table in tables)
     if not schema_html:
-        schema_html = '<p class="role">Схема пока недоступна.</p>'
+        schema_html = f'<p class="role">{escape(t("sql.schema_unavailable"))}</p>'
     n_relations = sum(len(table.get("fks") or []) for table in tables)
 
     result_html = ""
@@ -1523,9 +1573,9 @@ def sql_playground_page(
         columns = result.get("columns") or []
         rows = result.get("rows") or []
         result_html = (
-            '<section class="card sql-result"><h2>Результат запроса</h2>'
-            f'<p class="role">{len(rows)} строк'
-            f'{" · показана первая часть" if result.get("truncated") else ""}</p>'
+            f'<section class="card sql-result"><h2>{escape(t("sql.result"))}</h2>'
+            f'<p class="role">{escape(_rows(len(rows)))}'
+            f'{escape(t("sql.truncated")) if result.get("truncated") else ""}</p>'
             '<div class="sql-scroll"><table><thead><tr>'
             + "".join(f"<th>{escape(str(column))}</th>" for column in columns)
             + "</tr></thead><tbody>"
@@ -1538,7 +1588,7 @@ def sql_playground_page(
             + "</tbody></table></div>"
             + (
                 '<p class="role">'
-                + ("Превышен лимит объёма ответа." if result.get("truncated") else "Запрос не вернул строк.")
+                + escape(t("sql.too_big") if result.get("truncated") else t("sql.no_rows"))
                 + "</p>"
                 if not rows
                 else ""
@@ -1548,22 +1598,22 @@ def sql_playground_page(
 
     query_form = (
         '<form method="post" action="/sql/run" class="sql-query">'
-        '<label for="sql-query">SQL-запрос</label>'
+        f'<label for="sql-query">{escape(t("sql.query"))}</label>'
         f'<textarea id="sql-query" name="query" rows="9" spellcheck="false" '
         f'placeholder="SELECT name FROM providers;">'
         f"{escape(query)}</textarea>"
         '<label class="sql-check"><input type="checkbox" name="include_data" '
         f'value="1"{" checked" if include_data else ""}>'
-        "Показывать примеры записей</label>"
+        f'{escape(t("sql.include_data"))}</label>'
         f'{db_selector}'
         f'<button type="submit" class="primary"{" disabled" if not configured else ""}>'
-        "выполнить запрос</button>"
+        f'{escape(t("sql.run"))}</button>'
         "</form>"
         if configured
-        else '<p class="role">База данных не настроена.</p>'
+        else f'<p class="role">{escape(t("sql.not_configured"))}</p>'
     )
     return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="{get_lang()}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SQL Playground — AI Bridge</title>
 <style>
 {_style()}
@@ -1601,15 +1651,15 @@ def sql_playground_page(
 {_nav(can_edit=True)}
 <main>
   <section class="sql-hero"><h1>SQL Playground</h1>
-    <p>{"Полный доступ: админ — любая база, пользователь — своя." if is_admin else "Доступ только к вашей базе данных."}</p></section>
+    <p>{escape(t("sql.hero_admin") if is_admin else t("sql.hero_user"))}</p></section>
   {notice_html}
-  {"<section class=\"card\"><h2>Связи между таблицами</h2><div class='sql-viz'>" + viz_html + "</div></section>" if viz_html else ""}
+  {"<section class=\"card\"><h2>" + escape(t("sql.diagram")) + "</h2><div class='sql-viz'>" + viz_html + "</div></section>" if viz_html else ""}
     <div class="sql-layout">
-    <section class="card"><h2>SQL-запрос <a href="/builder" class="ghost pill" style="font-size:.8rem">📐 визуальный конструктор</a></h2>
-      <p class="role">{"Разрешены все команды SQL." if is_admin else "Только SELECT."} Ограничение по времени и объёму ответа.</p>
+    <section class="card"><h2>{escape(t("sql.query"))} <a href="/builder" class="ghost pill" style="font-size:.8rem">{escape(t("sql.constructor"))}</a></h2>
+      <p class="role">{escape(t("sql.admin_hint") if is_admin else t("sql.user_hint"))} {escape(t("sql.time_limit"))}</p>
       {query_form}
     </section>
-    <section class="card"><h2>Схема базы · {len(tables)} таблиц · {n_relations} связей</h2>
+    <section class="card"><h2>{escape(t("sql.schema"))} · {len(tables)} {escape(t("sql.tables_n"))} · {n_relations} {escape(t("sql.rels_n"))}</h2>
       <div class="sql-tables">{schema_html}</div>
     </section>
   </div>

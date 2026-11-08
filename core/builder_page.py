@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from html import escape
 
-from core.page import _nav, _style
+from core.page import _nav, _style, db_label
 
 
 def builder_page(
@@ -18,34 +18,38 @@ def builder_page(
     error: str = "",
 ) -> str:
     """Конструктор запросов: холст ComfyUI, ноды SQL, скрипт живёт рядом."""
+    from core.i18n import get_lang, strings_for, t
+
     schema = schema or {}
     tables = schema.get("tables") or []
     dbs = dbs or []
 
     schema_json = json.dumps(tables, ensure_ascii=False)
     dbs_json = json.dumps(
-        [{"path": d["path"], "label": d["label"]} for d in dbs],
+        [{"path": d["path"], "label": db_label(d)} for d in dbs],
         ensure_ascii=False,
     )
+    # Переводы для JavaScript: меню, подсказки, описания команд.
+    lang_json = json.dumps(strings_for(("bld.", "common.")), ensure_ascii=False)
 
     db_options = "".join(
         f'<option value="{escape(d["path"], quote=True)}"'
         f'{" selected" if d["path"] == selected_db else ""}>'
-        f'{escape(d["label"])}</option>'
+        f'{escape(db_label(d))}</option>'
         for d in dbs
     )
     db_select = (
         f'<select id="db-sel" onchange="switchDb(this.value)">{db_options}</select>'
         if dbs
-        else "<span class='role'>нет баз</span>"
+        else f'<span class="role">{escape(t("bld.no_bases"))}</span>'
     )
 
     notice_html = f'<p class="notice bad">{escape(error)}</p>' if error else ""
 
     return f"""<!doctype html>
-<html lang="ru"><head><meta charset="utf-8">
+<html lang="{get_lang()}"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Конструктор SQL — AI Bridge</title>
+<title>{escape(t("bld.doc_title"))}</title>
 <style>
 {_style()}
   body {{ max-width: none; padding-top: .5rem; }}
@@ -214,13 +218,13 @@ def builder_page(
 </style></head><body>
 {_nav(can_edit=True)}
 <div class="builder-top">
-  <b>Конструктор SQL</b>
-  <label>База: {db_select}</label>
+  <b>{escape(t("bld.title"))}</b>
+  <label>{escape(t("bld.db"))} {db_select}</label>
   <a href="/sql" class="ghost pill">← SQL Playground</a>
-  <span class="role">ПКМ или двойной клик — новая нода · Ctrl+колесо — масштаб · пробел+тяни — панорама</span>
+  <span class="role">{escape(t("bld.hints"))}</span>
   <span class="top-spacer"></span>
-  <button id="export-btn" class="ghost pill" type="button">⤓ экспорт workflow</button>
-  <button id="import-btn" class="ghost pill" type="button">⤒ импорт workflow</button>
+  <button id="export-btn" class="ghost pill" type="button">{escape(t("bld.export"))}</button>
+  <button id="import-btn" class="ghost pill" type="button">{escape(t("bld.import"))}</button>
   <input type="file" id="import-file" accept=".json,application/json" hidden>
 </div>
 {notice_html}
@@ -229,44 +233,44 @@ def builder_page(
     <div id="world"><svg id="edges" width="6000" height="4000"></svg></div>
     <div id="marquee"></div>
     <div id="zoombar">
-      <button id="zoom-out" type="button" title="уменьшить">−</button>
+      <button id="zoom-out" type="button" title="{escape(t("bld.zoom_out"))}">−</button>
       <span id="zoom-label">100%</span>
-      <button id="zoom-in" type="button" title="увеличить">+</button>
-      <button id="zoom-fit" type="button" title="вместить всё">⛶</button>
+      <button id="zoom-in" type="button" title="{escape(t("bld.zoom_in"))}">+</button>
+      <button id="zoom-fit" type="button" title="{escape(t("bld.zoom_fit"))}">⛶</button>
     </div>
-    <div id="canvas-hint">тяни от зелёного выхода ко входу · ПКМ — меню ноды</div>
+    <div id="canvas-hint">{escape(t("bld.canvas_hint"))}</div>
   </div>
   <div class="side">
     <section class="card">
-      <h2>Скрипт</h2>
+      <h2>{escape(t("bld.script"))}</h2>
       <textarea id="script" spellcheck="false">{escape(initial_sql)}</textarea>
       <div class="ai-bar" style="margin-top:.5rem">
-        <button class="primary" id="run-btn">▶ выполнить</button>
-        <button class="ghost pill" id="clear-btn">очистить</button>
-        <button class="ghost pill" id="copy-btn">копировать</button>
+        <button class="primary" id="run-btn">{escape(t("bld.run"))}</button>
+        <button class="ghost pill" id="clear-btn">{escape(t("bld.clear"))}</button>
+        <button class="ghost pill" id="copy-btn">{escape(t("common.copy"))}</button>
       </div>
       <div class="role" style="margin-top:.4rem">
-        скрипт собирается из нод; ручные правки живут до следующего изменения графа
+        {escape(t("bld.script_hint"))}
       </div>
     </section>
     <section class="card" id="cmd-card" style="display:none">
-      <h2>Команда <span class="role" id="cmd-hint">выбрана в меню ⌘ у ноды</span></h2>
+      <h2>{escape(t("bld.cmd_card"))} <span class="role" id="cmd-hint">{escape(t("bld.cmd_hint"))}</span></h2>
       <div id="cmd-detail"></div>
     </section>
     <section class="card">
-      <h2>AI</h2>
+      <h2>{escape(t("bld.ai"))}</h2>
       <div class="ai-bar">
-        <input id="ai-prompt" placeholder="промпт — не может быть пустым">
+        <input id="ai-prompt" placeholder="{escape(t("bld.ai_prompt"), quote=True)}">
       </div>
       <div class="ai-bar" style="margin-top:.4rem">
-        <button data-ai="explain">объяснить ошибку</button>
-        <button data-ai="fix">исправить ошибку</button>
-        <button data-ai="gen">сгенерировать код по промпту</button>
+        <button data-ai="explain">{escape(t("bld.ai_explain"))}</button>
+        <button data-ai="fix">{escape(t("bld.ai_fix"))}</button>
+        <button data-ai="gen">{escape(t("bld.ai_gen"))}</button>
       </div>
       <div id="ai-out" class="ai-out" style="margin-top:.5rem;display:none"></div>
     </section>
     <section class="card" id="result-card" style="display:none">
-      <h2>Результат</h2>
+      <h2>{escape(t("bld.result"))}</h2>
       <div id="result"></div>
     </section>
   </div>
@@ -275,6 +279,7 @@ def builder_page(
 <script>
 const TABLES = {schema_json};
 const DBS = {dbs_json};
+const L = {lang_json};
 </script>
 {BUILD_JS}
 </body></html>"""
@@ -299,35 +304,44 @@ const TYPE_COLOR = "#4ade80";
 
 function esc(s) { return String(s ?? "").replace(/[&<>"]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[m])); }
 
+// Переводы: L заполняется на сервере (core/i18n), msg подставляет {поля}.
+function msg(key, args) {
+  let s = Object.prototype.hasOwnProperty.call(L, key) ? L[key] : key;
+  if (args) Object.keys(args).forEach(k => {
+    s = s.split("{" + k + "}").join(String(args[k]));
+  });
+  return s;
+}
+
 // ============================ типы нод ============================
 const NODE_TYPES = {
-  SQLTable: { label: "Таблица", cat: "Источники", inputs: [], outputs: ["rows"],
-    widgets: [{ key: "table", label: "таблица", kind: "select" }],
-    hint: "источник: клик по столбцу вставляет имя в скрипт" },
-  SQLSelect: { label: "SELECT", cat: "Выборка", inputs: ["table"], outputs: ["rows"],
-    widgets: [{ key: "cols", label: "столбцы", kind: "text", def: "*" }],
-    hint: "какие столбцы вернуть" },
-  SQLFilter: { label: "WHERE", cat: "Выборка", inputs: ["table"], outputs: ["rows"],
-    widgets: [{ key: "cond", label: "условие", kind: "text", def: "1 = 1" }],
-    hint: "фильтр строк" },
-  SQLGroup: { label: "GROUP BY", cat: "Выборка", inputs: ["table"], outputs: ["rows"],
-    widgets: [{ key: "by", label: "группировка", kind: "text", def: "" },
-              { key: "agg", label: "агрегат", kind: "text", def: "COUNT(*)" }],
-    hint: "группировка + агрегат" },
-  SQLSort: { label: "ORDER BY", cat: "Выборка", inputs: ["table"], outputs: ["rows"],
-    widgets: [{ key: "col", label: "столбец", kind: "text", def: "" },
-              { key: "dir", label: "порядок", kind: "select", options: ["ASC", "DESC"] }],
-    hint: "сортировка строк" },
-  SQLLimit: { label: "LIMIT", cat: "Выборка", inputs: ["table"], outputs: ["rows"],
-    widgets: [{ key: "n", label: "строк", kind: "number", def: 10 }],
-    hint: "сколько строк вернуть" },
-  SQLJoin: { label: "JOIN", cat: "Соединения", inputs: ["main", "join"], outputs: ["rows"],
-    widgets: [{ key: "how", label: "тип", kind: "select",
+  SQLTable: { label: msg("bld.type.table"), cat: msg("bld.cat.sources"), inputs: [], outputs: ["rows"],
+    widgets: [{ key: "table", label: msg("bld.w.table"), kind: "select" }],
+    hint: msg("bld.hint.table") },
+  SQLSelect: { label: "SELECT", cat: msg("bld.cat.selection"), inputs: ["table"], outputs: ["rows"],
+    widgets: [{ key: "cols", label: msg("bld.w.cols"), kind: "text", def: "*" }],
+    hint: msg("bld.hint.select") },
+  SQLFilter: { label: "WHERE", cat: msg("bld.cat.selection"), inputs: ["table"], outputs: ["rows"],
+    widgets: [{ key: "cond", label: msg("bld.w.cond"), kind: "text", def: "1 = 1" }],
+    hint: msg("bld.hint.filter") },
+  SQLGroup: { label: "GROUP BY", cat: msg("bld.cat.selection"), inputs: ["table"], outputs: ["rows"],
+    widgets: [{ key: "by", label: msg("bld.w.by"), kind: "text", def: "" },
+              { key: "agg", label: msg("bld.w.agg"), kind: "text", def: "COUNT(*)" }],
+    hint: msg("bld.hint.group") },
+  SQLSort: { label: "ORDER BY", cat: msg("bld.cat.selection"), inputs: ["table"], outputs: ["rows"],
+    widgets: [{ key: "col", label: msg("bld.w.col"), kind: "text", def: "" },
+              { key: "dir", label: msg("bld.w.dir"), kind: "select", options: ["ASC", "DESC"] }],
+    hint: msg("bld.hint.sort") },
+  SQLLimit: { label: "LIMIT", cat: msg("bld.cat.selection"), inputs: ["table"], outputs: ["rows"],
+    widgets: [{ key: "n", label: msg("bld.w.n"), kind: "number", def: 10 }],
+    hint: msg("bld.hint.limit") },
+  SQLJoin: { label: "JOIN", cat: msg("bld.cat.joins"), inputs: ["main", "join"], outputs: ["rows"],
+    widgets: [{ key: "how", label: msg("bld.w.how"), kind: "select",
                 options: ["INNER", "LEFT", "RIGHT", "FULL"] },
-              { key: "on", label: "условие", kind: "text", def: "" }],
-    hint: "два источника соединяются по ключу" },
-  SQLOutput: { label: "Результат", cat: "Вывод", inputs: ["table"], outputs: [],
-    widgets: [], hint: "отсюда собирается финальный SQL" },
+              { key: "on", label: msg("bld.w.on"), kind: "text", def: "" }],
+    hint: msg("bld.hint.join") },
+  SQLOutput: { label: msg("bld.type.output"), cat: msg("bld.cat.output"), inputs: ["table"], outputs: [],
+    widgets: [], hint: msg("bld.hint.output") },
 };
 
 // ============================ состояние ============================
@@ -451,7 +465,7 @@ function socketRow(side, name, slot) {
   sock.className = "socket " + side;
   sock.dataset.side = side;
   sock.dataset.slot = slot;
-  sock.title = (side === "in" ? "вход: " : "выход: ") + name;
+  sock.title = (side === "in" ? msg("bld.in") : msg("bld.out")) + name;
   const label = document.createElement("span");
   label.className = "socket-label";
   label.textContent = name;
@@ -519,7 +533,7 @@ function columnsList(n) {
     const d = document.createElement("div");
     d.className = "data";
     d.textContent = Object.values(t.sample_rows[0]).map(v => String(v).slice(0, 10)).join(", ");
-    d.title = "первая строка-пример";
+    d.title = msg("bld.sample_row");
     wrap.appendChild(d);
   }
   return wrap;
@@ -539,13 +553,13 @@ function renderNode(n) {
 
   const title = document.createElement("div");
   title.className = "node-title";
-  title.innerHTML = '<span class="collapse" title="свернуть/развернуть">' +
+  title.innerHTML = '<span class="collapse" title="' + esc(msg("bld.collapse_title")) + '">' +
     (n.collapsed ? "▸" : "▾") + "</span>" +
     '<span class="nlabel">' + esc(n.title) + "</span>" +
     '<span class="btns">' +
     (n.type === "SQLTable"
-      ? '<span class="ai" title="AI по этой таблице">🤖</span>' +
-        '<span class="cmd" title="команды SQL">⌘</span>'
+      ? '<span class="ai" title="' + esc(msg("bld.node_ai_title")) + '">🤖</span>' +
+        '<span class="cmd" title="' + esc(msg("bld.cmd_btn_title")) + '">⌘</span>'
       : '<span class="ntype" title="' + esc(def.hint) + '">' + esc(def.label) + "</span>") +
     "</span>";
   el.appendChild(title);
@@ -558,7 +572,7 @@ function renderNode(n) {
   if (n.type === "SQLOutput") {
     const p = document.createElement("div");
     p.className = "kind";
-    p.textContent = "запрос отсюда уходит в скрипт";
+    p.textContent = msg("bld.result_note");
     body.appendChild(p);
   }
   def.outputs.forEach((name, i) => body.appendChild(socketRow("out", name, i)));
@@ -696,7 +710,7 @@ function refreshPlaceholders() {
   graph.nodes.forEach(n => {
     if (n.type !== "SQLJoin" || !n.el) return;
     const f = n.el.querySelector('input[data-key="on"]');
-    if (f) f.placeholder = "авто: " + joinOn(n);
+    if (f) f.placeholder = msg("bld.auto") + joinOn(n);
   });
 }
 
@@ -994,7 +1008,7 @@ function openAddMenu(cx, cy) {
   m.className = "gmenu add-menu";
   const input = document.createElement("input");
   input.type = "text";
-  input.placeholder = "поиск ноды…";
+  input.placeholder = msg("bld.search");
   m.appendChild(input);
   const list = document.createElement("div");
   m.appendChild(list);
@@ -1026,7 +1040,7 @@ function openAddMenu(cx, cy) {
         list.appendChild(it);
       });
     });
-    if (!list.children.length) list.innerHTML = '<div class="cat">ничего не найдено</div>';
+    if (!list.children.length) list.innerHTML = '<div class="cat">' + esc(msg("bld.not_found")) + "</div>";
   };
   draw("");
   input.addEventListener("input", () => draw(input.value.trim().toLowerCase()));
@@ -1051,30 +1065,30 @@ function openNodeMenu(id, cx, cy) {
     it.onclick = () => { closeMenus(); fn(); };
     m.appendChild(it);
   };
-  add("Клонировать", "Ctrl+D", () => {
+  add(msg("bld.clone"), "Ctrl+D", () => {
     const c = addNode(n.type, n.x + 28, n.y + 28,
       { title: n.title, widgets: Object.assign({}, n.widgets), color: n.color });
     selectOnly(c.id);
     drawLinks();
     scheduleRebuild();
   });
-  add(n.collapsed ? "Развернуть" : "Свернуть", "", () => {
+  add(n.collapsed ? msg("bld.expand") : msg("bld.collapse"), "", () => {
     n.collapsed = !n.collapsed;
     renderNode(n);
     drawLinks();
   });
   if (n.type === "SQLTable") {
-    add("SELECT * FROM …", "вставить в скрипт", () => {
+    add(msg("bld.insert_select"), msg("bld.insert_hint"), () => {
       insertAtCursor("SELECT * FROM " + n.widgets.table + ";");
     });
-    add("AI: объяснить ошибку", "", () => openNodeAi(n.el.querySelector(".ai"), n.widgets.table));
+    add(msg("bld.ai_node"), "", () => openNodeAi(n.el.querySelector(".ai"), n.widgets.table));
   }
   const sep = document.createElement("div");
   sep.className = "sep";
   m.appendChild(sep);
   const cat = document.createElement("div");
   cat.className = "cat";
-  cat.textContent = "цвет ноды";
+  cat.textContent = msg("bld.color");
   m.appendChild(cat);
   const sw = document.createElement("div");
   sw.className = "swatches";
@@ -1082,7 +1096,7 @@ function openNodeMenu(id, cx, cy) {
     const b = document.createElement("span");
     b.className = "swatch";
     b.style.background = c || "#353535";
-    b.title = c ? c : "по умолчанию";
+    b.title = c ? c : msg("bld.by_default");
     b.onclick = () => { n.color = c; closeMenus(); renderNode(n); };
     sw.appendChild(b);
   });
@@ -1090,7 +1104,7 @@ function openNodeMenu(id, cx, cy) {
   const sep2 = document.createElement("div");
   sep2.className = "sep";
   m.appendChild(sep2);
-  add("Удалить", "Delete", () => deleteNodes([id]));
+  add(msg("bld.delete"), "Delete", () => deleteNodes([id]));
   placeMenu(m, cx, cy);
 }
 
@@ -1207,7 +1221,7 @@ function toWorkflow() {
 }
 
 function importWorkflow(data) {
-  if (!data || !Array.isArray(data.nodes)) throw new Error("нет поля nodes — не workflow");
+  if (!data || !Array.isArray(data.nodes)) throw new Error(msg("bld.no_nodes_field"));
   graph.nodes.forEach(n => { if (n.el) n.el.remove(); });
   graph.nodes = [];
   graph.links = [];
@@ -1266,7 +1280,7 @@ document.getElementById("export-btn").onclick = () => {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 3000);
-  flash("workflow сохранён: " + graph.nodes.length + " нод, " + graph.links.length + " линий");
+  flash(msg("bld.exported", { n: graph.nodes.length, l: graph.links.length }));
 };
 document.getElementById("import-btn").onclick = () =>
   document.getElementById("import-file").click();
@@ -1277,9 +1291,9 @@ document.getElementById("import-file").addEventListener("change", ev => {
   rd.onload = () => {
     try {
       importWorkflow(JSON.parse(rd.result));
-      flash("workflow загружен: " + graph.nodes.length + " нод");
+      flash(msg("bld.imported", { n: graph.nodes.length }));
     } catch (err) {
-      flash("импорт не удался: " + err.message, true);
+      flash(msg("bld.import_fail", { e: err.message }), true);
     }
     ev.target.value = "";
   };
@@ -1343,7 +1357,7 @@ function nval(v) {
 }
 function grid(rows, cols, cap) {
   cap = cap || 6;
-  if (!rows || !rows.length) return '<p class="role">строк нет</p>';
+  if (!rows || !rows.length) return '<p class="role">' + esc(msg("bld.no_rows")) + "</p>";
   cols = cols || Object.keys(rows[0]);
   const cell = v => esc(v === null || v === undefined ? "NULL" : (v === "" ? "''" : String(v)));
   return '<div class="ba-scroll"><table class="ba-t"><thead><tr>' +
@@ -1381,13 +1395,13 @@ function numCol(tb, rows) {
 const COMMANDS = [
   { name: "SELECT * FROM t",
     tpl: t => "SELECT * FROM " + t,
-    desc: "Возвращает все столбцы и все строки таблицы.",
+    desc: msg("bld.d0"),
     ex: t => "SELECT * FROM " + t + "\nLIMIT 10;",
     after: rows => ({ rows: rows.slice(0, 6) }) },
 
-  { name: "SELECT столбцы…",
+  { name: msg("bld.select_cols"),
     tpl: t => "SELECT " + t + ".col FROM " + t,
-    desc: "Оставляет только нужные столбцы (проекция) — остальное отбрасывается.",
+    desc: msg("bld.d1"),
     ex: (t, tb) => "SELECT " + t + "." + (colsOf(tb)[0] || "id") + ", " + t + "." + (colsOf(tb)[1] || "name") +
                    "\nFROM " + t + "\nLIMIT 10;",
     after: (rows, tb) => { const c = colsOf(tb).slice(0, 3);
@@ -1395,16 +1409,16 @@ const COMMANDS = [
 
   { name: "DISTINCT",
     tpl: t => "SELECT DISTINCT " + t + ".col FROM " + t,
-    desc: "Убирает повторы: остаются только разные значения.",
+    desc: msg("bld.d2"),
     ex: (t, tb) => "SELECT DISTINCT " + t + "." + (colsOf(tb)[0] || "id") + "\nFROM " + t + ";",
     after: (rows, tb) => { const c = colsOf(tb).slice(0, 3);
       const seen = new Set(); const out = [];
       rows.forEach(r => { const k = JSON.stringify(pick(r, c)); if (!seen.has(k)) { seen.add(k); out.push(pick(r, c)); } });
-      return { rows: out, cols: c, note: "было " + rows.length + " строк → стало " + out.length }; } },
+      return { rows: out, cols: c, note: msg("bld.note.distinct", { a: rows.length, b: out.length }) }; } },
 
   { name: "JOIN … ON",
     tpl: t => "SELECT *\nFROM " + t + "\nJOIN other_table ON " + t + ".id = other_table.id",
-    desc: "Соединяет таблицу с другой по общей колонке: связь 1:N.",
+    desc: msg("bld.d3"),
     ex: (t, tb) => { const fk = (tb.fks || [])[0];
       return fk
         ? "SELECT " + t + ".*, " + fk.table + ".*\nFROM " + t + "\nJOIN " + fk.table +
@@ -1423,11 +1437,11 @@ const COMMANDS = [
       }).filter(Boolean);
       return { rows: merged, cols: cols,
                note: merged.length ? fk.from + " → " + fk.table + "." + fk.to
-                                   : "в примере нет строк с совпадающим ключом" }; } },
+                                   : msg("bld.note.join_none") }; } },
 
   { name: "WHERE col = ''",
     tpl: t => "WHERE " + t + ".col = ''",
-    desc: "Фильтрует строки: остаются только те, где колонка равна значению.",
+    desc: msg("bld.d4"),
     ex: (t, tb) => { const c = colsOf(tb)[0] || "id";
       const v = (tb.sample_rows || [])[0] ? String((tb.sample_rows || [])[0][c]) : "";
       return "SELECT *\nFROM " + t + "\nWHERE " + t + "." + c + " = '" + v + "';"; },
@@ -1435,28 +1449,28 @@ const COMMANDS = [
       if (!rows.length) return { rows: [] };
       const v = rows[0][c];
       return { rows: rows.filter(r => String(r[c]) === String(v)), cols: colsOf(tb).slice(0, 4),
-               note: "условие: " + c + " = '" + v + "'" }; } },
+               note: msg("bld.note.where_eq", { c: c, v: v }) }; } },
 
   { name: "WHERE a > b AND …",
     tpl: () => "WHERE col > 0 AND col2 = ''",
-    desc: "Несколько условий через AND/OR: строка проходит, если выполнены все.",
+    desc: msg("bld.d5"),
     ex: (t, tb) => "SELECT *\nFROM " + t + "\nWHERE " + t + "." + (colsOf(tb)[0] || "id") +
                    " > ''\n  AND " + t + "." + (colsOf(tb)[1] || "id") + " IS NOT NULL;",
     after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
       return { rows: rows.filter(r => r[c] !== null && r[c] !== undefined && String(r[c]) !== ""),
-               cols: colsOf(tb).slice(0, 4), note: "убраны пустые значения " + c }; } },
+               cols: colsOf(tb).slice(0, 4), note: msg("bld.note.where_gt", { c: c }) }; } },
 
   { name: "ORDER BY col",
     tpl: t => "ORDER BY " + t + ".col",
-    desc: "Сортирует строки по колонке (ASC по умолчанию, DESC — по убыванию).",
+    desc: msg("bld.d6"),
     ex: (t, tb) => "SELECT *\nFROM " + t + "\nORDER BY " + t + "." + (colsOf(tb)[0] || "id") + " ASC;",
     after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
       const sorted = rows.slice().sort((a, b) => String(a[c]).localeCompare(String(b[c])));
-      return { rows: sorted, cols: colsOf(tb).slice(0, 4), note: "сортировка по " + c + " ↑" }; } },
+      return { rows: sorted, cols: colsOf(tb).slice(0, 4), note: msg("bld.note.order", { c: c }) }; } },
 
   { name: "GROUP BY col",
     tpl: t => "GROUP BY " + t + ".col",
-    desc: "Складывает строки в группы с одинаковым значением колонки.",
+    desc: msg("bld.d7"),
     ex: (t, tb) => { const c = groupCol(tb, tb.sample_rows || []);
       return "SELECT " + t + "." + c + ", COUNT(*)\nFROM " + t + "\nGROUP BY " + t + "." + c + ";"; },
     after: (rows, tb) => { const c = groupCol(tb, rows);
@@ -1464,37 +1478,37 @@ const COMMANDS = [
 
   { name: "HAVING COUNT(*) > n",
     tpl: () => "HAVING COUNT(*) > 1",
-    desc: "Фильтр уже по группам (WHERE — по строкам, HAVING — по агрегатам).",
+    desc: msg("bld.d8"),
     ex: (t, tb) => { const c = groupCol(tb, tb.sample_rows || []);
       return "SELECT " + t + "." + c + ", COUNT(*) AS n\nFROM " + t +
              "\nGROUP BY " + t + "." + c + "\nHAVING COUNT(*) > 1;"; },
     after: (rows, tb) => { const c = groupCol(tb, rows);
       const groups = groupCount(rows, c).filter(g => g["count"] > 1);
       return { rows: groups, cols: [c, "count"],
-               note: groups.length ? "" : "ни одна группа не проходит COUNT(*) > 1 — в примере все значения разные" }; } },
+               note: groups.length ? "" : msg("bld.note.having") }; } },
 
   { name: "LIMIT n",
     tpl: () => "LIMIT 10",
-    desc: "Обрезает результат: возвращается только первых n строк.",
+    desc: msg("bld.d9"),
     ex: t => "SELECT *\nFROM " + t + "\nLIMIT 3;",
-    after: rows => ({ rows: rows.slice(0, 3), note: "было " + rows.length + " строк → оставлены первые 3" }) },
+    after: rows => ({ rows: rows.slice(0, 3), note: msg("bld.note.limit", { n: rows.length, k: 3 }) }) },
 
   { name: "COUNT(*)",
     tpl: t => "COUNT(" + t + ".id)",
-    desc: "Считает количество строк (всегда одна итоговая строка).",
+    desc: msg("bld.d10"),
     ex: t => "SELECT COUNT(*) AS total\nFROM " + t + ";",
     after: rows => ({ rows: [{ count: rows.length }], cols: ["count"] }) },
 
   { name: "COUNT(DISTINCT col)",
     tpl: t => "COUNT(DISTINCT " + t + ".col)",
-    desc: "Считает, сколько разных значений встречается в колонке.",
+    desc: msg("bld.d11"),
     ex: (t, tb) => "SELECT COUNT(DISTINCT " + t + "." + (colsOf(tb)[0] || "id") + ") AS uniq\nFROM " + t + ";",
     after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
       return { rows: [{ distinct: new Set(rows.map(r => String(r[c]))).size }], cols: ["distinct"] }; } },
 
   { name: "MAX / MIN",
     tpl: t => "MAX(" + t + ".col), MIN(" + t + ".col)",
-    desc: "Максимальное и минимальное значение колонки.",
+    desc: msg("bld.d12"),
     ex: (t, tb) => { const c = numCol(tb, tb.sample_rows || []);
       return "SELECT MAX(" + t + "." + c + "), MIN(" + t + "." + c + ")\nFROM " + t + ";"; },
     after: (rows, tb) => { const c = numCol(tb, rows);
@@ -1503,11 +1517,11 @@ const COMMANDS = [
       const nums = vals.map(nval).filter(v => v !== null);
       const hi = nums.length ? Math.max.apply(null, nums) : vals.slice().sort().slice(-1)[0];
       const lo = nums.length ? Math.min.apply(null, nums) : vals.slice().sort()[0];
-      return { rows: [{ max: hi, min: lo }], cols: ["max", "min"], note: "по колонке " + c }; } },
+      return { rows: [{ max: hi, min: lo }], cols: ["max", "min"], note: msg("bld.note.maxmin", { c: c }) }; } },
 
   { name: "AVG / SUM",
     tpl: t => "AVG(" + t + ".col), SUM(" + t + ".col)",
-    desc: "Среднее и сумма по числовой колонке.",
+    desc: msg("bld.d13"),
     ex: (t, tb) => { const c = numCol(tb, tb.sample_rows || []);
       return "SELECT AVG(" + t + "." + c + "), SUM(" + t + "." + c + ")\nFROM " + t + ";"; },
     after: (rows, tb) => { const c = colsOf(tb).find(col => rows.filter(r => nval(r[col]) !== null).length >= 2);
@@ -1515,36 +1529,36 @@ const COMMANDS = [
       const nums = rows.map(r => nval(r[c])).filter(v => v !== null);
       const sum = nums.reduce((a, b) => a + b, 0);
       return { rows: [{ sum: sum, avg: +(sum / nums.length).toFixed(2) }], cols: ["sum", "avg"],
-               note: "по числовой колонке " + c }; } },
+               note: msg("bld.note.avgsum", { c: c }) }; } },
 
   { name: "INSERT INTO",
     tpl: t => "INSERT INTO " + t + " (col) VALUES ('')",
-    desc: "Добавляет новую строку: перечислите колонки и их значения.",
+    desc: msg("bld.d14"),
     ex: (t, tb) => "INSERT INTO " + t + " (" + colsOf(tb).slice(0, 2).join(", ") + ")\nVALUES ('', '');",
     after: (rows, tb) => { const c = colsOf(tb);
       const fresh = {}; c.forEach((name, i) => { fresh[name] = i === 0 ? "'new_id'" : "''"; });
       return { rows: rows.slice(0, 4).concat([fresh]), cols: c.slice(0, 4),
-               note: "строка добавлена в конец (VALUES нужно заполнить своими значениями)" }; } },
+               note: msg("bld.note.insert") }; } },
 
   { name: "UPDATE … SET",
     tpl: t => "UPDATE " + t + " SET col = ''",
-    desc: "Меняет значения в существующих строках (обычно с условием WHERE).",
-    ex: (t, tb) => "UPDATE " + t + "\nSET " + editCol(tb) + " = 'новое'\nWHERE " +
+    desc: msg("bld.d15"),
+    ex: (t, tb) => "UPDATE " + t + "\nSET " + editCol(tb) + " = '" + msg("bld.new_value") + "'\nWHERE " +
                    (colsOf(tb)[0] || "id") + " = '...';",
     after: (rows, tb) => { const c = colsOf(tb); const col = editCol(tb);
-      const out = rows.map((r, i) => { const o = Object.assign({}, r); if (i === 0) o[col] = "новое"; return o; });
-      return { rows: out, cols: c.slice(0, 4), note: "первая строка: " + col + " → 'новое'" }; } },
+      const out = rows.map((r, i) => { const o = Object.assign({}, r); if (i === 0) o[col] = msg("bld.new_value"); return o; });
+      return { rows: out, cols: c.slice(0, 4), note: msg("bld.note.update", { c: col, v: nv }) }; } },
 
   { name: "DELETE FROM",
     tpl: t => "DELETE FROM " + t,
-    desc: "Удаляет строки; без WHERE удаляет всю таблицу (осторожно!).",
+    desc: msg("bld.d16"),
     ex: (t, tb) => "DELETE FROM " + t + "\nWHERE " + (colsOf(tb)[0] || "id") + " = '...';",
     after: (rows, tb) => ({ rows: rows.slice(1), cols: colsOf(tb).slice(0, 4),
-                           note: "первая строка удалена" }) },
+                           note: msg("bld.note.delete") }) },
 
   { name: "GROUP BY + COUNT",
     tpl: t => "SELECT " + t + ".col, COUNT(*)\nFROM " + t + "\nGROUP BY " + t + ".col",
-    desc: "Классика аналитики: сколько строк в каждой группе.",
+    desc: msg("bld.d17"),
     ex: (t, tb) => { const c = groupCol(tb, tb.sample_rows || []);
       return "SELECT " + t + "." + c + ", COUNT(*) AS n\nFROM " + t +
              "\nGROUP BY " + t + "." + c + "\nORDER BY n DESC;"; },
@@ -1565,13 +1579,13 @@ function showCmdDetail(cmd, name) {
   detail.innerHTML =
     '<p class="cmd-name">' + esc(cmd.name) + "</p>" +
     '<p class="role">' + esc(cmd.desc) + "</p>" +
-    '<div class="ex"><b>Пример использования · ' + esc(name) + "</b>" +
+    '<div class="ex"><b>' + esc(msg("bld.example_of", { t: name })) + "</b>" +
     "<pre>" + esc(cmd.ex(name, tb)) + "</pre></div>" +
     '<div class="ba">' +
-      "<div><b>до — таблица " + esc(name) + "</b>" + grid(before, colsOf(tb).slice(0, 4)) + "</div>" +
-      "<div><b>после — результат команды</b>" +
+      "<div><b>" + esc(msg("bld.before", { t: name })) + "</b>" + grid(before, colsOf(tb).slice(0, 4)) + "</div>" +
+      "<div><b>" + esc(msg("bld.after")) + "</b>" +
       (res ? grid(res.rows, res.cols)
-           : '<p class="role">' + esc(err || "для этой команды сравнение не показывается") + "</p>") +
+           : '<p class="role">' + esc(err || msg("bld.no_compare")) + "</p>") +
       "</div></div>" +
     (res && res.note ? '<p class="role">' + esc(res.note) + "</p>" : "");
   card.style.display = "";
@@ -1688,12 +1702,12 @@ async function runSql(sql, live) {
         document.getElementById("result").innerHTML = err
           ? '<p class="notice bad">' + esc(err.textContent) + "</p>"
           : '<p class="role">' + esc(doc.querySelector(".sql-result p")
-              ? doc.querySelector(".sql-result p").textContent : "нет результатов") + "</p>";
+              ? doc.querySelector(".sql-result p").textContent : msg("bld.no_results")) + "</p>";
       }
     }
     lastSql = sql;
   } catch (e) {
-    if (!live) document.getElementById("result").textContent = "Ошибка сети: " + e.message;
+    if (!live) document.getElementById("result").textContent = msg("bld.net_error", { e: e.message });
   }
 }
 document.getElementById("run-btn").onclick = () => runSql(scriptEl.value.trim(), false);
@@ -1704,8 +1718,8 @@ document.getElementById("clear-btn").onclick = () => {
 };
 document.getElementById("copy-btn").onclick = function () {
   navigator.clipboard.writeText(scriptEl.value).then(() => {
-    this.textContent = "скопировано";
-    setTimeout(() => { this.textContent = "копировать"; }, 1200);
+    this.textContent = msg("common.copied");
+    setTimeout(() => { this.textContent = msg("common.copy"); }, 1200);
   });
 };
 
@@ -1718,16 +1732,16 @@ function stripFences(s) {
 async function callAi(action, prompt, table, out) {
   if (!prompt) {
     out.style.display = "block"; out.style.color = "var(--bad)";
-    out.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
+    out.textContent = msg("bld.ai_empty");
     return false;
   }
-  out.style.display = "block"; out.style.color = ""; out.textContent = "AI думает…";
+  out.style.display = "block"; out.style.color = ""; out.textContent = msg("bld.ai_thinking");
   try {
     const res = await fetch("/builder/ai", { method: "POST",
       body: new URLSearchParams({ action: action, prompt: prompt, sql: scriptEl.value.trim(),
                                  db: DBSEL.value, table: table || "" }) });
     const data = await res.json();
-    const ans = stripFences(data.answer || data.error || "пустой ответ");
+    const ans = stripFences(data.answer || data.error || msg("bld.ai_no_answer"));
     out.textContent = ans;
     if (action === "fix" && /^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP)\b/i.test(ans)) {
       scriptEl.value = ans;
@@ -1735,7 +1749,7 @@ async function callAi(action, prompt, table, out) {
     }
     return true;
   } catch (e) {
-    out.textContent = "Ошибка связи: " + e.message;
+    out.textContent = msg("bld.ai_conn", { e: e.message });
     return false;
   }
 }
@@ -1748,11 +1762,11 @@ function openNodeAi(btn, table) {
   aiPanel.className = "node-ai";
   aiPanel.innerHTML =
     '<div class="t">🤖 ' + esc(table) + "</div>" +
-    '<input id="node-ai-prompt" placeholder="промпт — не может быть пустым">' +
+    '<input id="node-ai-prompt" placeholder="' + esc(msg("bld.ai_prompt")) + '">' +
     '<div class="row">' +
-    '<button data-a="explain">объяснить ошибку</button>' +
-    '<button data-a="fix">исправить ошибку</button>' +
-    '<button data-a="gen">сгенерировать код</button>' +
+    '<button data-a="explain">' + esc(msg("bld.ai_explain")) + "</button>" +
+    '<button data-a="fix">' + esc(msg("bld.ai_fix")) + "</button>" +
+    '<button data-a="gen">' + esc(msg("bld.ai_gen_node")) + "</button>" +
     '</div><div class="out"></div>';
   document.body.appendChild(aiPanel);
   const r = btn.getBoundingClientRect();
@@ -1765,7 +1779,7 @@ function openNodeAi(btn, table) {
       const prompt = input.value.trim();
       if (!prompt) {
         out.style.display = "block"; out.style.color = "#f87171";
-        out.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
+        out.textContent = msg("bld.ai_empty");
         input.focus();
         return;
       }
@@ -1788,7 +1802,7 @@ document.querySelectorAll("[data-ai]").forEach(b => {
     const prompt = document.getElementById("ai-prompt").value.trim();
     if (!prompt) {
       aiOut.style.display = "block"; aiOut.style.color = "var(--bad)";
-      aiOut.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
+      aiOut.textContent = msg("bld.ai_empty");
       document.getElementById("ai-prompt").focus();
       return;
     }

@@ -91,8 +91,10 @@ def render_schema_svg(schema: dict, *, include_data: bool = False) -> str:
     даже на базе с десятками таблиц связи не пересекают карточки.
     """
     tables = schema.get("tables") or []
+    from core.i18n import t
+
     if not tables:
-        return '<p class="role">Схема пуста.</p>'
+        return f'<p class="role">{escape(t("sql.empty_schema"))}</p>'
 
     by_name = {t["name"]: t for t in tables}
     # Ребро: ссылающаяся таблица → ссылаемся на неё (parent ссылается на child? нет:)
@@ -145,12 +147,18 @@ def render_schema_svg(schema: dict, *, include_data: bool = False) -> str:
         h = card_height(table)
         rows_html = []
         for idx, col in enumerate(table["columns"]):
-            tags = []
-            if col.get("pk"):
-                tags.append("PK")
-            if any(f["from"] == col["name"] for f in table.get("fks") or []):
-                tags.append("FK")
-            meta = " ".join(f"<b>{escape(str(t))}</b>" for t in tags)
+            # Внутри SVG нельзя использовать <b>/<i>/<p> — это breakout-теги
+            # HTML-парсера: они выкидывают содержимое <svg> наружу, и названия
+            # столбцов падают под диаграмму обычным текстом. Только <tspan>.
+            badges = []
+            for tag in (["PK"] if col.get("pk") else []) + (
+                ["FK"] if any(f["from"] == col["name"] for f in table.get("fks") or []) else []
+            ):
+                color = "#fbbf24" if tag == "PK" else "#4ade80"
+                badges.append(
+                    f'<tspan font-weight="bold" fill="{color}">{escape(tag)}</tspan>'
+                )
+            meta = " ".join(badges)
             rows_html.append(
                 f'<text x="{px + 10}" y="{py + header_h + (idx + 1) * row_h - 4}" '
                 f'font-size="12" font-family="monospace" fill="#d7e3ee">'
@@ -174,7 +182,7 @@ def render_schema_svg(schema: dict, *, include_data: bool = False) -> str:
                 f'font-family="monospace">N:M</text>'
             )
         parts.append(
-            f'<g><title>{escape(name)} · {len(table["columns"])} полей</title>'
+            f'<g><title>{escape(name)} · {escape(t("sql.fields").format(n=len(table["columns"])))}</title>'
             f'<rect x="{px}" y="{py}" width="{card_w}" height="{h}" rx="8" '
             f'fill="#101a24" stroke="#2d4a6f" stroke-width="1.5"/>'
             f'<rect x="{px}" y="{py}" width="{card_w}" height="{header_h}" rx="8" fill="#1e3a5f"/>'
@@ -227,11 +235,11 @@ def render_schema_svg(schema: dict, *, include_data: bool = False) -> str:
         '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;'
         'margin-bottom:.5rem;font-size:.82rem;color:var(--muted)">'
         '<span><b style="color:#7dd3fc">1</b> ──<b style="color:#34d399">▶</b>── '
-        '<b style="color:#fbbf24">N</b> &nbsp;один-ко-многим (1:N)</span>'
+        f'<b style="color:#fbbf24">N</b> &nbsp;{escape(t("sql.legend_1n"))}</span>'
         '<span><b style="color:#7dd3fc">1</b> ──<b style="color:#34d399">▶</b>── '
-        '<b style="color:#fbbf24">M</b> &nbsp;через связующую таблицу (N:M)</span>'
-        f'<span>таблиц: {len(tables)} · связей: {n_relations} · '
-        f'связующих (N:M): {len(junctions)}</span></div>'
+        f'<b style="color:#fbbf24">M</b> &nbsp;{escape(t("sql.legend_nm"))}</span>'
+        f'<span>{escape(t("sql.legend_counts").format(t=len(tables), r=n_relations, j=len(junctions)))}</span>'
+        "</div>"
     )
     svg = (
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(total_w)}" '
