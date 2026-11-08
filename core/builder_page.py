@@ -73,11 +73,15 @@ def builder_page(
     border-radius: .4rem; padding: 0 .35rem; font-size: .7rem; cursor: pointer; }}
   .cmd-menu {{ position: absolute; z-index: 40; background: var(--card);
     border: 1px solid var(--accent); border-radius: .5rem; padding: .3rem;
-    min-width: 13rem; max-height: 18rem; overflow: auto;
+    min-width: 13rem; max-height: 24rem; overflow: auto;
     box-shadow: 0 8px 24px rgba(0,0,0,.45); }}
   .cmd-menu div {{ padding: .25rem .5rem; cursor: pointer; border-radius: .3rem;
     font-size: .78rem; white-space: nowrap; }}
   .cmd-menu div:hover {{ background: var(--accent-soft); }}
+  .cmd-menu .cmd-item b {{ display: block; font-size: .78rem; font-family: monospace;
+    font-weight: 700; color: var(--text); }}
+  .cmd-menu .cmd-item span {{ display: block; color: var(--muted); font-size: .67rem;
+    white-space: normal; max-width: 17rem; line-height: 1.3; margin-top: .1rem; }}
   .node-ai {{ position: fixed; z-index: 60; width: 19rem; background: #101a24;
     border: 1.5px solid #38bdf8; border-radius: .7rem; padding: .55rem;
     display: grid; gap: .45rem; font-size: .8rem;
@@ -92,6 +96,24 @@ def builder_page(
   .node-ai .row button:hover {{ background: #123528; }}
   .node-ai .out {{ white-space: pre-wrap; max-height: 11rem; overflow: auto;
     color: #d7e3ee; font-family: monospace; font-size: .72rem; display: none; }}
+  .cmd-name {{ font-family: monospace; font-weight: 700; color: var(--accent);
+    margin: 0 0 .3rem; font-size: .92rem; }}
+  .ex {{ background: var(--bg); border: 1px solid var(--line); border-radius: .5rem;
+    padding: .45rem .55rem; margin: .5rem 0; }}
+  .ex b {{ font-size: .72rem; color: var(--muted); text-transform: uppercase;
+    letter-spacing: .05em; }}
+  .ex pre {{ margin: .3rem 0 0; white-space: pre-wrap; word-break: break-word;
+    font: .78rem/1.45 ui-monospace, monospace; }}
+  .ba {{ display: grid; grid-template-columns: 1fr 1fr; gap: .55rem; margin-top: .5rem; }}
+  .ba > div > b {{ font-size: .74rem; color: var(--muted); }}
+  .ba-scroll {{ overflow-x: auto; }}
+  .ba-t {{ width: 100%; border-collapse: collapse; font-size: .7rem;
+    font-family: monospace; margin-top: .25rem; }}
+  .ba-t th, .ba-t td {{ border: 1px solid var(--line); padding: .16rem .3rem;
+    text-align: left; max-width: 7rem; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }}
+  .ba-t th {{ color: var(--muted); background: var(--bg); }}
+  @media (max-width: 42rem) {{ .ba {{ grid-template-columns: 1fr; }} }}
   .node ul {{ margin: 0; padding: .3rem .5rem .45rem; list-style: none;
     font-family: monospace; color: #d7e3ee; }}
   .node li {{ display: flex; gap: .4rem; justify-content: space-between; cursor: pointer;
@@ -139,6 +161,10 @@ def builder_page(
       <div id="ai-per-node" class="role" style="margin-top:.4rem">
         AI живёт в ноде: « объяснить ошибку » / « исправить ошибку » / « по промпту »
       </div>
+    </section>
+    <section class="card" id="cmd-card" style="display:none">
+      <h2>Команда <span class="role" id="cmd-hint">выбрана в меню ⌘ у ноды</span></h2>
+      <div id="cmd-detail"></div>
     </section>
     <section class="card">
       <h2>AI</h2>
@@ -265,25 +291,255 @@ canvas.addEventListener("click", (e) => {
   insertAtCursor(table + "." + li.dataset.col);
 });
 
+// ---- команды: вставка в скрипт + разбор «что делает» с примером «до/после» ----
+function tableObj(name) { return TABLES.find(x => x.name === name) || { name, columns: [], sample_rows: [] }; }
+function colsOf(tb) { return (tb.columns || []).map(c => c.name); }
+function pick(r, names) { const o = {}; names.forEach(n => { o[n] = r[n]; }); return o; }
+function nval(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function grid(rows, cols, cap) {
+  cap = cap || 6;
+  if (!rows || !rows.length) return '<p class="role">строк нет</p>';
+  cols = cols || Object.keys(rows[0]);
+  const cell = v => esc(v === null || v === undefined || v === "" ? (v === "" ? "''" : "NULL") : String(v));
+  return '<div class="ba-scroll"><table class="ba-t"><thead><tr>' +
+    cols.map(c => `<th>${esc(c)}</th>`).join("") + '</tr></thead><tbody>' +
+    rows.slice(0, cap).map(r => '<tr>' + cols.map(c => `<td>${cell(r[c])}</td>`).join("") + '</tr>').join("") +
+    '</tbody></table></div>';
+}
+
+function groupCount(rows, col) {
+  const g = {};
+  rows.forEach(r => { const k = String(r[col]); g[k] = (g[k] || 0) + 1; });
+  return Object.entries(g).map(([k, n]) => { const o = {}; o[col] = k; o["count"] = n; return o; });
+}
+
+// Колонка для группировки: не PK, заполненная во всех строках и с повторами
+// (иначе GROUP BY бессмыслен: все значения пустые или уникальные).
+function groupCol(tb, rows) {
+  const cols = colsOf(tb);
+  const pks = new Set((tb.columns || []).filter(c => c.pk).map(c => c.name));
+  const plain = cols.filter(c => !pks.has(c));
+  const filled = plain.filter(c => rows.every(r => r[c] !== null && r[c] !== undefined && r[c] !== ""));
+  const pool = filled.length ? filled : plain;
+  const withRepeats = pool.find(c => {
+    const uniq = new Set(rows.map(r => String(r[c]))).size;
+    return uniq > 1 && uniq < rows.length;
+  });
+  return withRepeats || pool[0] || plain[0] || cols[0] || "col";
+}
+
+// Колонка, которую безопасно менять в UPDATE: не PK и не FK.
+function editCol(tb) {
+  const cols = colsOf(tb);
+  const pks = new Set((tb.columns || []).filter(c => c.pk).map(c => c.name));
+  const fks = new Set((tb.fks || []).map(f => f.from));
+  return cols.find(c => !pks.has(c) && !fks.has(c)) || cols.find(c => !pks.has(c)) || cols[0] || "col";
+}
+
+// Колонка, в которой есть числа — для MAX/MIN, AVG/SUM.
+function numCol(tb, rows) {
+  return colsOf(tb).find(col => rows.some(r => nval(r[col]) !== null)) || colsOf(tb)[0] || "id";
+}
+
 const COMMANDS = [
-  ["SELECT * FROM t", t => `SELECT * FROM ${t}`],
-  ["SELECT cols…", t => `SELECT ${t}.col FROM ${t}`],
-  ["JOIN … ON", t => `SELECT *\nFROM ${t}\nJOIN other_table ON ${t}.id = other_table.id`],
-  ["WHERE col = ''", t => `WHERE ${t}.col = ''`],
-  ["WHERE a > b AND …", () => `WHERE col > 0 AND col2 = ''`],
-  ["ORDER BY col", t => `ORDER BY ${t}.col`],
-  ["GROUP BY col", t => `GROUP BY ${t}.col`],
-  ["HAVING COUNT(*) > n", () => `HAVING COUNT(*) > 1`],
-  ["LIMIT n", () => `LIMIT 10`],
-  ["COUNT(*)", t => `COUNT(${t}.id)`],
-  ["COUNT(DISTINCT col)", t => `COUNT(DISTINCT ${t}.col)`],
-  ["MAX/MIN", t => `MAX(${t}.col), MIN(${t}.col)`],
-  ["AVG/SUM", t => `AVG(${t}.col), SUM(${t}.col)`],
-  ["INSERT INTO", t => `INSERT INTO ${t} (col) VALUES ('')`],
-  ["UPDATE … SET", t => `UPDATE ${t} SET col = ''`],
-  ["DELETE FROM", t => `DELETE FROM ${t}`],
-  ["GROUP BY + COUNT", t => `SELECT ${t}.col, COUNT(*)\nFROM ${t}\nGROUP BY ${t}.col`],
+  { name: "SELECT * FROM t",
+    tpl: t => `SELECT * FROM ${t}`,
+    desc: "Возвращает все столбцы и все строки таблицы.",
+    ex: t => `SELECT * FROM ${t}\nLIMIT 10;`,
+    after: rows => ({ rows: rows.slice(0, 6) }) },
+
+  { name: "SELECT столбцы…",
+    tpl: t => `SELECT ${t}.col FROM ${t}`,
+    desc: "Оставляет только нужные столбцы (проекция) — остальное отбрасывается.",
+    ex: (t, tb) => `SELECT ${t}.${colsOf(tb)[0] || "id"}, ${t}.${colsOf(tb)[1] || "name"}\nFROM ${t}\nLIMIT 10;`,
+    after: (rows, tb) => { const c = colsOf(tb).slice(0, 3);
+      return { rows: rows.map(r => pick(r, c)), cols: c }; } },
+
+  { name: "DISTINCT",
+    tpl: t => `SELECT DISTINCT ${t}.col FROM ${t}`,
+    desc: "Убирает повторы: остаются только разные значения.",
+    ex: (t, tb) => `SELECT DISTINCT ${t}.${colsOf(tb)[0] || "id"}\nFROM ${t};`,
+    after: (rows, tb) => { const c = colsOf(tb).slice(0, 3);
+      const seen = new Set(); const out = [];
+      rows.forEach(r => { const k = JSON.stringify(pick(r, c)); if (!seen.has(k)) { seen.add(k); out.push(pick(r, c)); } });
+      return { rows: out, cols: c, note: `было ${rows.length} строк → стало ${out.length}` }; } },
+
+  { name: "JOIN … ON",
+    tpl: t => `SELECT *\nFROM ${t}\nJOIN other_table ON ${t}.id = other_table.id`,
+    desc: "Соединяет таблицу с другой по общей колонке: связь 1:N (один родитель — много детей).",
+    ex: (t, tb) => { const fk = (tb.fks || [])[0];
+      return fk ? `SELECT ${t}.*, ${fk.table}.*\nFROM ${t}\nJOIN ${fk.table}\n  ON ${t}.${fk.from} = ${fk.table}.${fk.to};`
+                : `SELECT *\nFROM ${t}\nJOIN other_table ON ${t}.id = other_table.id;`; },
+    after: (rows, tb) => { const fk = (tb.fks || [])[0];
+      if (!fk) return null;
+      const parent = tableObj(fk.table);
+      const pr = parent.sample_rows || [];
+      if (!pr.length) return null;
+      const childCols = colsOf(tb), parentCols = colsOf(parent);
+      const cols = [...childCols, ...parentCols.filter(c => !childCols.includes(c))].slice(0, 6);
+      const merged = rows.map(r => {
+        const m = pr.find(p => String(p[fk.to]) === String(r[fk.from]));
+        return m ? { ...r, ...m } : null;
+      }).filter(Boolean);
+      return { rows: merged, cols,
+               note: merged.length ? `${fk.from} → ${fk.table}.${fk.to}`
+                                   : "в примере нет строк с совпадающим ключом" }; } },
+
+  { name: "WHERE col = ''",
+    tpl: t => `WHERE ${t}.col = ''`,
+    desc: "Фильтрует строки: остаются только те, где колонка равна значению.",
+    ex: (t, tb) => { const c = colsOf(tb)[0] || "id";
+      const v = (tb.sample_rows || [])[0] ? String((tb.sample_rows || [])[0][c]) : "";
+      return `SELECT *\nFROM ${t}\nWHERE ${t}.${c} = '${v}';`; },
+    after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
+      if (!rows.length) return { rows: [] };
+      const v = rows[0][c];
+      return { rows: rows.filter(r => String(r[c]) === String(v)), cols: colsOf(tb).slice(0, 4),
+               note: `условие: ${c} = '${v}'` }; } },
+
+  { name: "WHERE a > b AND …",
+    tpl: () => `WHERE col > 0 AND col2 = ''`,
+    desc: "Несколько условий через AND/OR: строка проходит, если выполнены все.",
+    ex: (t, tb) => { const c = colsOf(tb)[0] || "id";
+      return `SELECT *\nFROM ${t}\nWHERE ${t}.${c} > ''\n  AND ${t}.${colsOf(tb)[1] || c} IS NOT NULL;`; },
+    after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
+      return { rows: rows.filter(r => r[c] !== null && r[c] !== undefined && String(r[c]) !== ""),
+               cols: colsOf(tb).slice(0, 4), note: `убраны пустые значения ${c}` }; } },
+
+  { name: "ORDER BY col",
+    tpl: t => `ORDER BY ${t}.col`,
+    desc: "Сортирует строки по колонке (ASC по умолчанию, DESC — по убыванию).",
+    ex: (t, tb) => `SELECT *\nFROM ${t}\nORDER BY ${t}.${colsOf(tb)[0] || "id"} ASC;`,
+    after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
+      const sorted = [...rows].sort((a, b) => String(a[c]).localeCompare(String(b[c])));
+      return { rows: sorted, cols: colsOf(tb).slice(0, 4), note: `сортировка по ${c} ↑` }; } },
+
+  { name: "GROUP BY col",
+    tpl: t => `GROUP BY ${t}.col`,
+    desc: "Складывает строки в группы с одинаковым значением колонки.",
+    ex: (t, tb) => { const c = groupCol(tb, tb.sample_rows || []);
+      return `SELECT ${t}.${c}, COUNT(*)\nFROM ${t}\nGROUP BY ${t}.${c};`; },
+    after: (rows, tb) => { const c = groupCol(tb, rows);
+      return { rows: groupCount(rows, c), cols: [c, "count"] }; } },
+
+  { name: "HAVING COUNT(*) > n",
+    tpl: () => `HAVING COUNT(*) > 1`,
+    desc: "Фильтр уже по группам (WHERE — по строкам, HAVING — по агрегатам).",
+    ex: (t, tb) => { const c = groupCol(tb, tb.sample_rows || []);
+      return `SELECT ${t}.${c}, COUNT(*) AS n\nFROM ${t}\nGROUP BY ${t}.${c}\nHAVING COUNT(*) > 1;`; },
+    after: (rows, tb) => { const c = groupCol(tb, rows);
+      const groups = groupCount(rows, c).filter(g => g["count"] > 1);
+      return { rows: groups, cols: [c, "count"],
+               note: groups.length ? "" : "ни одна группа не проходит COUNT(*) > 1 — в примере все значения разные" }; } },
+
+  { name: "LIMIT n",
+    tpl: () => `LIMIT 10`,
+    desc: "Обрезает результат: возвращается только первых n строк.",
+    ex: t => `SELECT *\nFROM ${t}\nLIMIT 3;`,
+    after: rows => ({ rows: rows.slice(0, 3), note: `было ${rows.length} строк → оставлены первые 3` }) },
+
+  { name: "COUNT(*)",
+    tpl: t => `COUNT(${t}.id)`,
+    desc: "Считает количество строк (всегда одна итоговая строка).",
+    ex: t => `SELECT COUNT(*) AS total\nFROM ${t};`,
+    after: rows => ({ rows: [{ count: rows.length }], cols: ["count"] }) },
+
+  { name: "COUNT(DISTINCT col)",
+    tpl: t => `COUNT(DISTINCT ${t}.col)`,
+    desc: "Считает, сколько разных значений встречается в колонке.",
+    ex: (t, tb) => `SELECT COUNT(DISTINCT ${t}.${colsOf(tb)[0] || "id"}) AS uniq\nFROM ${t};`,
+    after: (rows, tb) => { const c = colsOf(tb)[0] || "id";
+      return { rows: [{ distinct: new Set(rows.map(r => String(r[c]))).size }], cols: ["distinct"] }; } },
+
+  { name: "MAX / MIN",
+    tpl: t => `MAX(${t}.col), MIN(${t}.col)`,
+    desc: "Максимальное и минимальное значение колонки.",
+    ex: (t, tb) => { const c = numCol(tb, tb.sample_rows || []);
+      return `SELECT MAX(${t}.${c}), MIN(${t}.${c})\nFROM ${t};`; },
+    after: (rows, tb) => { const c = numCol(tb, rows);
+      const vals = rows.map(r => r[c]).filter(v => v !== null && v !== undefined && v !== "");
+      if (!vals.length) return null;
+      const nums = vals.map(nval).filter(v => v !== null);
+      const hi = nums.length ? Math.max(...nums) : vals.slice().sort().slice(-1)[0];
+      const lo = nums.length ? Math.min(...nums) : vals.slice().sort()[0];
+      return { rows: [{ max: hi, min: lo }], cols: ["max", "min"], note: `по колонке ${c}` }; } },
+
+  { name: "AVG / SUM",
+    tpl: t => `AVG(${t}.col), SUM(${t}.col)`,
+    desc: "Среднее и сумма по числовой колонке.",
+    ex: (t, tb) => { const c = numCol(tb, tb.sample_rows || []);
+      return `SELECT AVG(${t}.${c}), SUM(${t}.${c})\nFROM ${t};`; },
+    after: (rows, tb) => { const c = colsOf(tb).find(col => rows.filter(r => nval(r[col]) !== null).length >= 2);
+      if (!c) return null;
+      const nums = rows.map(r => nval(r[c])).filter(v => v !== null);
+      const sum = nums.reduce((a, b) => a + b, 0);
+      return { rows: [{ sum, avg: +(sum / nums.length).toFixed(2) }], cols: ["sum", "avg"],
+               note: `по числовой колонке ${c}` }; } },
+
+  { name: "INSERT INTO",
+    tpl: t => `INSERT INTO ${t} (col) VALUES ('')`,
+    desc: "Добавляет новую строку: перечислите колонки и их значения.",
+    ex: (t, tb) => `INSERT INTO ${t} (${colsOf(tb).slice(0, 2).join(", ")})\nVALUES ('', '');`,
+    after: (rows, tb) => { const c = colsOf(tb);
+      const fresh = {}; c.forEach((name, i) => { fresh[name] = i === 0 ? "'new_id'" : "''"; });
+      return { rows: [...rows.slice(0, 4), fresh], cols: c.slice(0, 4),
+               note: "строка добавлена в конец (VALUES нужно заполнить своими значениями)" }; } },
+
+  { name: "UPDATE … SET",
+    tpl: t => `UPDATE ${t} SET col = ''`,
+    desc: "Меняет значения в существующих строках (обычно с условием WHERE).",
+    ex: (t, tb) => `UPDATE ${t}\nSET ${editCol(tb)} = 'новое'\nWHERE ${colsOf(tb)[0] || "id"} = '...';`,
+    after: (rows, tb) => { const c = colsOf(tb); const col = editCol(tb);
+      const out = rows.map((r, i) => { const o = { ...r }; if (i === 0) o[col] = "новое"; return o; });
+      return { rows: out, cols: c.slice(0, 4), note: `первая строка: ${col} → 'новое'` }; } },
+
+  { name: "DELETE FROM",
+    tpl: t => `DELETE FROM ${t}`,
+    desc: "Удаляет строки; без WHERE удаляет всю таблицу (осторожно!).",
+    ex: (t, tb) => `DELETE FROM ${t}\nWHERE ${colsOf(tb)[0] || "id"} = '...';`,
+    after: (rows, tb) => ({ rows: rows.slice(1), cols: colsOf(tb).slice(0, 4),
+                           note: "первая строка удалена" }) },
+
+  { name: "GROUP BY + COUNT",
+    tpl: t => `SELECT ${t}.col, COUNT(*)\nFROM ${t}\nGROUP BY ${t}.col`,
+    desc: "Классика аналитики: сколько строк в каждой группе.",
+    ex: (t, tb) => { const c = groupCol(tb, tb.sample_rows || []);
+      return `SELECT ${t}.${c}, COUNT(*) AS n\nFROM ${t}\nGROUP BY ${t}.${c}\nORDER BY n DESC;`; },
+    after: (rows, tb) => { const c = groupCol(tb, rows);
+      const g = groupCount(rows, c).sort((a, b) => b["count"] - a["count"]);
+      return { rows: g, cols: [c, "count"] }; } },
 ];
+
+// Карточка «Команда»: объяснение, полный пример и данные до/после.
+function showCmdDetail(cmd, name) {
+  const tb = tableObj(name);
+  const card = document.getElementById("cmd-card");
+  const detail = document.getElementById("cmd-detail");
+  const before = (tb.sample_rows || []).slice(0, 8);
+  let res = null, err = "";
+  if (cmd.after && before.length) {
+    try { res = cmd.after(before, tb); } catch (e) { err = String(e); }
+  }
+  detail.innerHTML =
+    `<p class="cmd-name">${esc(cmd.name)}</p>` +
+    `<p class="role">${esc(cmd.desc)}</p>` +
+    `<div class="ex"><b>Пример использования · ${esc(name)}</b>` +
+    `<pre>${esc(cmd.ex(name, tb))}</pre></div>` +
+    `<div class="ba">` +
+      `<div><b>до — таблица ${esc(name)}</b>${grid(before, colsOf(tb).slice(0, 4))}</div>` +
+      `<div><b>после — результат команды</b>` +
+      (res ? grid(res.rows, res.cols)
+           : `<p class="role">${esc(err || "для этой команды сравнение не показывается")}</p>`) +
+      `</div></div>` +
+    (res && res.note ? `<p class="role">${esc(res.note)}</p>` : "");
+  card.style.display = "";
+  card.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
 
 canvas.addEventListener("click", (e) => {
   const btn = e.target.closest(".cmd");
@@ -297,10 +553,15 @@ canvas.addEventListener("click", (e) => {
   const r = btn.getBoundingClientRect(), cr = canvas.getBoundingClientRect();
   menu.style.left = (r.left - cr.left + canvas.scrollLeft) + "px";
   menu.style.top = (r.bottom - cr.top + canvas.scrollTop) + "px";
-  COMMANDS.forEach(([name, tpl]) => {
+  COMMANDS.forEach(cmd => {
     const item = document.createElement("div");
-    item.textContent = name;
-    item.onclick = () => { insertAtCursor(tpl(table)); menu.remove(); };
+    item.className = "cmd-item";
+    item.innerHTML = `<b>${esc(cmd.name)}</b><span>${esc(cmd.desc)}</span>`;
+    item.onclick = () => {
+      insertAtCursor(cmd.tpl(table));
+      menu.remove();
+      showCmdDetail(cmd, table);
+    };
     menu.appendChild(item);
   });
   canvas.appendChild(menu);
