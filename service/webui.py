@@ -737,8 +737,15 @@ class WebUi:
         from core.i18n import set_lang, LANGS
         lang = (params.get("lang") or [""])[0]
         if lang in LANGS:
+            # Уходим с ?lang= в куку, но сохраняем остальные параметры
+            # запроса (db, notice…). clean уже содержит ведущий слэш —
+            # раньше здесь получался «//sql» и браузер уходил на чужой хост.
+            rest = {k: v for k, v in params.items() if k != "lang"}
+            target = clean or "/"
+            if rest:
+                target += "?" + urllib.parse.urlencode(rest, doseq=True)
             handler.send_response(302)
-            handler.send_header("Location", f"/{clean}" if clean != "/" else "/")
+            handler.send_header("Location", target)
             handler.send_header(
                 "Set-Cookie",
                 f"ai_lang={lang}; Path=/; Max-Age=31536000; SameSite=Strict",
