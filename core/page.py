@@ -1516,6 +1516,7 @@ def sql_playground_page(
     schema_html = "".join(render_table(table) for table in tables)
     if not schema_html:
         schema_html = '<p class="role">Схема пока недоступна.</p>'
+    n_relations = sum(len(table.get("fks") or []) for table in tables)
 
     result_html = ""
     if result is not None:
@@ -1602,16 +1603,16 @@ def sql_playground_page(
   <section class="sql-hero"><h1>SQL Playground</h1>
     <p>{"Полный доступ: админ — любая база, пользователь — своя." if is_admin else "Доступ только к вашей базе данных."}</p></section>
   {notice_html}
+  {"<section class=\"card\"><h2>Связи между таблицами</h2><div class='sql-viz'>" + viz_html + "</div></section>" if viz_html else ""}
     <div class="sql-layout">
     <section class="card"><h2>SQL-запрос <a href="/builder" class="ghost pill" style="font-size:.8rem">📐 визуальный конструктор</a></h2>
       <p class="role">{"Разрешены все команды SQL." if is_admin else "Только SELECT."} Ограничение по времени и объёму ответа.</p>
       {query_form}
     </section>
-    <section class="card"><h2>Схема базы · {len(tables)} таблиц</h2>
+    <section class="card"><h2>Схема базы · {len(tables)} таблиц · {n_relations} связей</h2>
       <div class="sql-tables">{schema_html}</div>
     </section>
   </div>
-  {"<section><h2>Диаграмма связей</h2><div class='sql-viz'>" + viz_html + "</div></section>" if viz_html else ""}
   {result_html}
 </main></body></html>"""
 

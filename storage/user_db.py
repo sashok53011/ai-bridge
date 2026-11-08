@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -69,6 +70,12 @@ CREATE TABLE IF NOT EXISTS routing_lists (
     defaultModel TEXT,
     ownerId TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS list_models (
+    listId TEXT NOT NULL REFERENCES routing_lists(id) ON DELETE CASCADE,
+    modelId TEXT NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    PRIMARY KEY (listId, modelId)
+);
 """
 
 
@@ -105,6 +112,83 @@ def available_dbs(root: str | Path, *, is_admin: bool, user_id: str = "") -> lis
     return result
 
 
+def _read_users(src: sqlite3.Connection) -> dict[str, tuple]:
+    """Пользователи из ``users`` **и** ``_superusers`` — иначе FK падает.
+
+    Токены и списки маршрутизации ссылаются на людей из обеих коллекций
+    PocketBase, а админ-аккаунты живут только в ``_superusers``. Без них
+    вставка ``app_tokens`` нарушала FOREIGN KEY и вся синхронизация
+    откатывалась (в логе: FOREIGN KEY constraint failed).
+    """
+    found: dict[str, tuple] = {}
+    for table, fallback_role in (("users", "user"), ("_superusers", "admin")):
+        try:
+            cols = [row[1] for row in src.execute(f"PRAGMA table_info({table})")]
+        except sqlite3.Error:
+            continue
+        if not cols or "id" not in cols or "email" not in cols:
+            continue
+        name_c = "name" if "name" in cols else "''"
+        role_c = (
+            f"COALESCE(NULLIF(role, ''), '{fallback_role}')" if "role" in cols
+            else f"'{fallback_role}'"
+        )
+        ver_c = "verified" if "verified" in cols else "0"
+        created_c = "created" if "created" in cols else "''"
+        updated_c = "updated" if "updated" in cols else "''"
+        try:
+            rows = src.execute(
+                f"SELECT id, email, {name_c}, {role_c}, {ver_c}, {created_c}, {updated_c} "
+                f"FROM {table}"
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for row in rows:
+            found.setdefault(
+                str(row[0]),
+                (row[0], row[1], row[2] or "", row[3], row[4], row[5], row[6]),
+            )
+    return found
+
+
+def _fill_list_models(conn: sqlite3.Connection) -> None:
+    """Связь N:M «список маршрутизации ↔ модели» из поля ``models``.
+
+    В ``routing_lists.models`` лежит список идентификаторов моделей
+    (JSON-массив или строка через запятую); каждая строка, которая
+    находит свою модель, попадает в связующую таблицу ``list_models``.
+    Непонятные значения молча пропускаем — база не должна падать из-за
+    мусора в старых записях.
+    """
+    conn.execute("DELETE FROM list_models")
+    for list_id, raw in conn.execute(
+        "SELECT id, models FROM routing_lists"
+    ).fetchall():
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        items: list[str] = []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                items = [str(x) for x in parsed]
+        if not items:
+            items = [part.strip() for part in text.split(",") if part.strip()]
+        for item in items:
+            found = conn.execute(
+                "SELECT id FROM models WHERE id = ? OR name = ? LIMIT 1",
+                (item, item),
+            ).fetchone()
+            if found:
+                conn.execute(
+                    "INSERT OR IGNORE INTO list_models (listId, modelId) VALUES (?, ?)",
+                    (list_id, found[0]),
+                )
+
+
 def sync_user_db(
     db_file: Path,
     providers: list[dict],
@@ -119,7 +203,9 @@ def sync_user_db(
         try:
             conn.executescript(_SCHEMA)
 
-            # Providers + models.
+            # Сначала «дети», потом «родители»: иначе FK падает и весь
+            # набор откатывается (в логе было FOREIGN KEY constraint failed).
+            conn.execute("DELETE FROM list_models")
             conn.execute("DELETE FROM models")
             conn.execute("DELETE FROM providers")
             for entry in providers:
@@ -161,18 +247,38 @@ def sync_user_db(
             if source_db and source_db.is_file():
                 src = sqlite3.connect(f"file:{source_db}?mode=ro", uri=True)
                 try:
-                    conn.execute("DELETE FROM users")
-                    for row in src.execute("SELECT id, email, name, verified, created, updated FROM users"):
-                        conn.execute(
-                            "INSERT INTO users VALUES (?,?,?,?,?,?,?)",
-                            (row[0], row[1], row[2] or "", "user", row[3], row[4], row[5]),
-                        )
+                    owners = _read_users(src)
+                    conn.execute("DELETE FROM list_models")
                     conn.execute("DELETE FROM app_tokens")
-                    for row in src.execute("SELECT id, token, userId, name, tail, created FROM app_tokens"):
-                        conn.execute("INSERT INTO app_tokens VALUES (?,?,?,?,?,?)", row)
                     conn.execute("DELETE FROM routing_lists")
-                    for row in src.execute("SELECT id, code, name, models, defaultModel, ownerId FROM routing_lists"):
+                    conn.execute("DELETE FROM users")
+                    for row in owners.values():
+                        conn.execute("INSERT INTO users VALUES (?,?,?,?,?,?,?)", row)
+                    skipped_tokens = 0
+                    for row in src.execute(
+                        "SELECT id, token, userId, name, tail, created FROM app_tokens"
+                    ):
+                        # Токен без владельца (нет ни в users, ни в _superusers)
+                        # ломает FK — не вставляем его, а не роняем всю синхронизацию.
+                        if str(row[2]) not in owners:
+                            skipped_tokens += 1
+                            continue
+                        conn.execute("INSERT INTO app_tokens VALUES (?,?,?,?,?,?)", row)
+                    skipped_lists = 0
+                    for row in src.execute(
+                        "SELECT id, code, name, models, defaultModel, ownerId FROM routing_lists"
+                    ):
+                        if str(row[5]) not in owners:
+                            skipped_lists += 1
+                            continue
                         conn.execute("INSERT INTO routing_lists VALUES (?,?,?,?,?,?)", row)
+                    _fill_list_models(conn)
+                    if skipped_tokens or skipped_lists:
+                        print(
+                            f"sync_user_db {db_file.name}: пропущено без владельца — "
+                            f"токенов: {skipped_tokens}, списков: {skipped_lists}",
+                            flush=True,
+                        )
                 finally:
                     src.close()
 

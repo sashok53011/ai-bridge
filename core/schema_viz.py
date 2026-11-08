@@ -32,7 +32,7 @@ def load_schema(db_path: str | Path, *, include_data: bool = False) -> dict[str,
             sample_rows = []
             if include_data:
                 try:
-                    cur = conn.execute(f"SELECT * FROM {q} LIMIT 3")
+                    cur = conn.execute(f"SELECT * FROM {q} LIMIT 12")
                     cols = [c[0] for c in cur.description] if cur.description else []
                     while True:
                         r = cur.fetchone()
@@ -50,95 +50,196 @@ def load_schema(db_path: str | Path, *, include_data: bool = False) -> dict[str,
         conn.close()
 
 
+def _junction_names(tables: list[dict]) -> set[str]:
+    """Связующие таблицы — признак N:M.
+
+    Считаем таблицу связующей, если в ней два и больше FK и почти все
+    поля участвуют в связях (обычно PK = пара FK). Такая таблица
+    разворачивает «многие ко многим» в два ребра 1:N.
+    """
+    out: set[str] = set()
+    for table in tables:
+        fks = table.get("fks") or []
+        if len(fks) < 2:
+            continue
+        fk_cols = {f["from"] for f in fks}
+        pk_cols = {c["name"] for c in table["columns"] if c.get("pk")}
+        other = [c for c in table["columns"] if c["name"] not in fk_cols]
+        if (pk_cols and pk_cols <= fk_cols) or len(other) <= 1:
+            out.add(table["name"])
+    return out
+
+
+def _levels(names: set[str], edges: list[tuple[str, str]]) -> dict[str, int]:
+    """Уровни таблиц: ссылки всегда правее ссылающихся (циклы упираются в потолок)."""
+    level = {name: 0 for name in names}
+    for _ in range(len(names) + 1):
+        changed = False
+        for parent, child in edges:
+            if level[child] < level[parent] + 1 and level[parent] + 1 <= len(names):
+                level[child] = level[parent] + 1
+                changed = True
+        if not changed:
+            break
+    return level
+
+
 def render_schema_svg(schema: dict, *, include_data: bool = False) -> str:
-    """Рисует SVG-диаграмму: таблицы — карточки, FK — стрелки."""
+    """ER-диаграмма: карточки таблиц, связи с кардинальностью 1:N и N:M.
+
+    Раскладка — по уровням связей (корни слева, «дети» справа), поэтому
+    даже на базе с десятками таблиц связи не пересекают карточки.
+    """
     tables = schema.get("tables") or []
     if not tables:
         return '<p class="role">Схема пуста.</p>'
 
-    # Размещаем таблицы сеткой: 3 колонки.
-    card_w, card_h_min, gap, cols = 240, 80, 40, 3
+    by_name = {t["name"]: t for t in tables}
+    # Ребро: ссылающаяся таблица → ссылаемся на неё (parent ссылается на child? нет:)
+    # (parent — на кого ссылаются, child — у кого FK).
+    edges: list[tuple[str, str, dict]] = []
+    for table in tables:
+        for fk in table.get("fks") or []:
+            target = str(fk.get("table") or "")
+            if target in by_name and target != table["name"]:
+                edges.append((target, table["name"], fk))
+
+    junctions = _junction_names(tables)
+    level = _levels(set(by_name), [(p, c) for p, c, _ in edges])
+
+    card_w, header_h, row_h, sample_h = 250, 24, 18, 14
+    h_gap, v_gap, margin = 140, 44, 24
+
+    def card_height(table: dict) -> float:
+        n = len(table["columns"])
+        extra = 6
+        if include_data and table.get("sample_rows"):
+            extra = 10 + min(len(table["sample_rows"]), 3) * sample_h
+        return header_h + n * row_h + extra
+
+    # Колонки по уровням, внутри — по алфавиту.
+    columns: dict[int, list[str]] = {}
+    for name in sorted(by_name, key=lambda n: (level[n], n.lower())):
+        columns.setdefault(level[name], []).append(name)
+
     positions: dict[str, tuple[float, float]] = {}
-    row_max_h: list[float] = []
-    for i, t in enumerate(tables):
-        r, c = divmod(i, cols)
-        n_cols = max(len(t["columns"]), 2)
-        h = 40 + n_cols * 18 + 10 + (len(t.get("sample_rows", [])) * 16 if include_data else 0)
-        x = c * (card_w + gap)
-        y = sum(row_max_h[:r]) + r * gap
-        positions[t["name"]] = (x, y)
-        if r >= len(row_max_h):
-            row_max_h.append(h)
-        else:
-            row_max_h[r] = max(row_max_h[r], h)
+    bottoms: dict[str, float] = {}
+    x = float(margin)
+    total_h = 0.0
+    for lv in sorted(columns):
+        y = float(margin)
+        for name in columns[lv]:
+            positions[name] = (x, y)
+            h = card_height(by_name[name])
+            bottoms[name] = y + h
+            y += h + v_gap
+        total_h = max(total_h, y)
+        x += card_w + h_gap
+    total_w = x - h_gap + margin + 40
 
-    total_w = cols * (card_w + gap)
-    total_h = sum(row_max_h) + len(row_max_h) * gap + 20
-    # Небольшой отступ для стрелок.
-    total_w += 60
+    parts: list[str] = []
 
-    svg_parts: list[str] = []
-    # Таблицы.
-    for t in tables:
-        x, y = positions[t["name"]]
-        n = len(t["columns"])
-        h = 40 + n * 18 + 10 + (len(t.get("sample_rows", [])) * 16 if include_data else 0)
-        rows = []
-        for col in t["columns"]:
+    # Карточки таблиц.
+    for name, table in by_name.items():
+        px, py = positions[name]
+        h = card_height(table)
+        rows_html = []
+        for idx, col in enumerate(table["columns"]):
             tags = []
-            if col["pk"]:
+            if col.get("pk"):
                 tags.append("PK")
-            if any(f["from"] == col["name"] for f in t["fks"]):
+            if any(f["from"] == col["name"] for f in table.get("fks") or []):
                 tags.append("FK")
-            meta = " ".join(f"<b>{escape(str(x))}</b>" for x in tags)
-            rows.append(
-                f'<text x="{x + 10}" y="{y + 24 + (t["columns"].index(col) + 1) * 18}" '
+            meta = " ".join(f"<b>{escape(str(t))}</b>" for t in tags)
+            rows_html.append(
+                f'<text x="{px + 10}" y="{py + header_h + (idx + 1) * row_h - 4}" '
                 f'font-size="12" font-family="monospace" fill="#d7e3ee">'
-                f'{escape(col["name"])} : {escape(col["type"])} {meta}</text>'
+                f'{escape(str(col["name"]))} : {escape(str(col.get("type") or ""))} {meta}</text>'
             )
         sample_html = ""
-        if include_data and t.get("sample_rows"):
-            sy = y + 24 + n * 18 + 14
-            for sr in t["sample_rows"][:2]:
-                vals = ", ".join(str(v)[:12] for v in sr.values())
+        if include_data and table.get("sample_rows"):
+            sy = py + header_h + len(table["columns"]) * row_h + 12
+            for sample in table["sample_rows"][:3]:
+                vals = ", ".join(str(v)[:12] for v in sample.values())
                 sample_html += (
-                    f'<text x="{x + 10}" y="{sy}" font-size="10" font-family="monospace" '
-                    f'fill="#8899aa">{escape(vals[:36])}</text>'
+                    f'<text x="{px + 10}" y="{sy}" font-size="10" font-family="monospace" '
+                    f'fill="#8899aa">{escape(vals[:40])}</text>'
                 )
-                sy += 14
-        svg_parts.append(
-            f'<g>'
-            f'<rect x="{x}" y="{y}" width="{card_w}" height="{h}" rx="8" '
+                sy += sample_h
+        badge = ""
+        if name in junctions:
+            badge = (
+                f'<text x="{px + card_w - 10}" y="{py + 16}" font-size="11" '
+                f'font-weight="bold" text-anchor="end" fill="#fbbf24" '
+                f'font-family="monospace">N:M</text>'
+            )
+        parts.append(
+            f'<g><title>{escape(name)} · {len(table["columns"])} полей</title>'
+            f'<rect x="{px}" y="{py}" width="{card_w}" height="{h}" rx="8" '
             f'fill="#101a24" stroke="#2d4a6f" stroke-width="1.5"/>'
-            f'<rect x="{x}" y="{y}" width="{card_w}" height="22" rx="8" fill="#1e3a5f"/>'
-            f'<text x="{x + 10}" y="{y + 15}" font-size="13" font-weight="bold" '
-            f'fill="#7dd3fc" font-family="monospace">{escape(t["name"])}</text>'
-            f'{"".join(rows)}'
-            f'{sample_html}'
+            f'<rect x="{px}" y="{py}" width="{card_w}" height="{header_h}" rx="8" fill="#1e3a5f"/>'
+            f'<text x="{px + 10}" y="{py + 16}" font-size="13" font-weight="bold" '
+            f'fill="#7dd3fc" font-family="monospace">{escape(name)}</text>'
+            f'{badge}{"".join(rows_html)}{sample_html}</g>'
+        )
+
+    # Связи: «1» у ссылаемся, «N» (у связующей — «M») у ссылающегося.
+    # У связующей таблицы первое ребро помечаем N, остальные — M (это и есть N:M).
+    many_label: dict[tuple[str, str], str] = {}
+    for junction in sorted(junctions):
+        parents = sorted({p for p, c, _ in edges if c == junction})
+        for idx, parent in enumerate(parents):
+            many_label[(parent, junction)] = "M" if idx else "N"
+    n_relations = 0
+    for parent, child, fk in edges:
+        n_relations += 1
+        px, py = positions[parent]
+        cx, cy = positions[child]
+        x1, y1 = px + card_w, py + header_h + 8
+        x2, y2 = cx, cy + header_h + 8
+        if parent in junctions:
+            many = "M"
+        else:
+            many = many_label.get((parent, child), "N")
+        label = f'{parent} 1:{many} {child} ({fk.get("from")} → {fk.get("table")}.{fk.get("to")})'
+        if x2 > x1 + 20:
+            mx = (x1 + x2) / 2
+            d = f"M{x1},{y1} C{mx},{y1} {mx},{y2} {x2},{y2}"
+        else:
+            # Обратная/петляющая связь — ведём ниже карточек.
+            yb = max(bottoms[parent], bottoms[child]) + 26
+            d = (
+                f"M{x1},{y1} L{x1 + 34},{y1} L{x1 + 34},{yb} "
+                f"L{x2 - 34},{yb} L{x2 - 34},{y2} L{x2},{y2}"
+            )
+        parts.append(
+            f'<g><title>{escape(label)}</title>'
+            f'<path d="{d}" fill="none" stroke="#34d399" stroke-width="1.6" '
+            f'stroke-linejoin="round" marker-end="url(#crow)" opacity=".85"/>'
+            f'<text x="{x1 + 8}" y="{y1 - 7}" font-size="12" font-weight="bold" '
+            f'fill="#7dd3fc" font-family="monospace">1</text>'
+            f'<text x="{x2 - 10}" y="{y2 - 7}" font-size="12" font-weight="bold" '
+            f'text-anchor="end" fill="#fbbf24" font-family="monospace">{many}</text>'
             f'</g>'
         )
 
-    # Стрелки FK.
-    for t in tables:
-        for fk in t["fks"]:
-            src = positions.get(t["name"])
-            dst = positions.get(fk["table"])
-            if not src or not dst:
-                continue
-            x1, y1 = src[0] + card_w, src[1] + 30
-            x2, y2 = dst[0], dst[1] + 30
-            mx = (x1 + x2) / 2
-            svg_parts.append(
-                f'<path d="M{x1},{y1} C{mx},{y1} {mx},{y2} {x2},{y2}" '
-                f'fill="none" stroke="#34d399" stroke-width="1.5" '
-                f'marker-end="url(#arrow)"/>'
-            )
-
-    return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{total_w}" height="{total_h}" '
-        f'style="background:#0d121f;border-radius:8px;max-width:100%;overflow:auto">'
-        f'<defs><marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" '
-        f'orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#34d399"/></marker></defs>'
-        f'{"".join(svg_parts)}'
-        f'</svg>'
+    legend = (
+        '<div style="display:flex;gap:1rem;flex-wrap:wrap;align-items:center;'
+        'margin-bottom:.5rem;font-size:.82rem;color:var(--muted)">'
+        '<span><b style="color:#7dd3fc">1</b> ──<b style="color:#34d399">▶</b>── '
+        '<b style="color:#fbbf24">N</b> &nbsp;один-ко-многим (1:N)</span>'
+        '<span><b style="color:#7dd3fc">1</b> ──<b style="color:#34d399">▶</b>── '
+        '<b style="color:#fbbf24">M</b> &nbsp;через связующую таблицу (N:M)</span>'
+        f'<span>таблиц: {len(tables)} · связей: {n_relations} · '
+        f'связующих (N:M): {len(junctions)}</span></div>'
     )
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{int(total_w)}" '
+        f'height="{int(total_h)}" '
+        f'style="background:#0d121f;border-radius:8px;max-width:100%;overflow:auto">'
+        f'<defs><marker id="crow" markerWidth="10" markerHeight="10" refX="9" refY="5" '
+        f'orient="auto"><path d="M9,5 L1,1 M9,5 L1,5 M9,5 L1,9" fill="none" '
+        f'stroke="#34d399" stroke-width="1.4"/></marker></defs>'
+        f'{"".join(parts)}</svg>'
+    )
+    return legend + svg
