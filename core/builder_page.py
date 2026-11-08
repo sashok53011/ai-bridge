@@ -68,6 +68,30 @@ def builder_page(
     display: flex; justify-content: space-between; gap: .4rem; align-items: center; }}
   .node header .cmd {{ background: #0f172a; border: 1px solid #34d399; color: #34d399;
     border-radius: .4rem; padding: 0 .35rem; font-size: .7rem; cursor: pointer; }}
+  .node header .btns {{ display: flex; gap: .3rem; align-items: center; }}
+  .node header .ai {{ background: #0f172a; border: 1px solid #38bdf8; color: #38bdf8;
+    border-radius: .4rem; padding: 0 .35rem; font-size: .7rem; cursor: pointer; }}
+  .cmd-menu {{ position: absolute; z-index: 40; background: var(--card);
+    border: 1px solid var(--accent); border-radius: .5rem; padding: .3rem;
+    min-width: 13rem; max-height: 18rem; overflow: auto;
+    box-shadow: 0 8px 24px rgba(0,0,0,.45); }}
+  .cmd-menu div {{ padding: .25rem .5rem; cursor: pointer; border-radius: .3rem;
+    font-size: .78rem; white-space: nowrap; }}
+  .cmd-menu div:hover {{ background: var(--accent-soft); }}
+  .node-ai {{ position: fixed; z-index: 60; width: 19rem; background: #101a24;
+    border: 1.5px solid #38bdf8; border-radius: .7rem; padding: .55rem;
+    display: grid; gap: .45rem; font-size: .8rem;
+    box-shadow: 0 12px 32px rgba(0,0,0,.55); }}
+  .node-ai .t {{ color: #7dd3fc; font-family: monospace; font-weight: 700; }}
+  .node-ai input {{ width: 100%; padding: .35rem .5rem; border-radius: .4rem;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }}
+  .node-ai .row {{ display: flex; gap: .3rem; flex-wrap: wrap; }}
+  .node-ai .row button {{ font-size: .72rem; padding: .25rem .45rem; border-radius: .4rem;
+    border: 1px solid #34d399; background: #0f172a; color: #34d399; cursor: pointer;
+    font-family: inherit; }}
+  .node-ai .row button:hover {{ background: #123528; }}
+  .node-ai .out {{ white-space: pre-wrap; max-height: 11rem; overflow: auto;
+    color: #d7e3ee; font-family: monospace; font-size: .72rem; display: none; }}
   .node ul {{ margin: 0; padding: .3rem .5rem .45rem; list-style: none;
     font-family: monospace; color: #d7e3ee; }}
   .node li {{ display: flex; gap: .4rem; justify-content: space-between; cursor: pointer;
@@ -87,7 +111,7 @@ def builder_page(
     border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }}
   .ai-out {{ background: var(--card); border: 1px solid var(--line); border-radius: .6rem;
     padding: .6rem; font-size: .83rem; white-space: pre-wrap; max-height: 16rem; overflow: auto; }}
-  #hints {{ position: absolute; background: var(--card); border: 1px solid var(--accent);
+  #hints {{ position: fixed; background: var(--card); border: 1px solid var(--accent);
     border-radius: .5rem; padding: .3rem; display: none; z-index: 30; min-width: 13rem; }}
   #hints div {{ padding: .2rem .5rem; cursor: pointer; border-radius: .3rem; font-size: .8rem; }}
   #hints div:hover, #hints div.sel {{ background: var(--accent-soft); }}
@@ -102,7 +126,7 @@ def builder_page(
 </div>
 {notice_html}
 <div class="builder-wrap">
-  <div id="canvas"><svg id="edges"></svg><div id="hints"></div></div>
+  <div id="canvas"><svg id="edges"></svg></div>
   <div class="side">
     <section class="card">
       <h2>Скрипт</h2>
@@ -134,6 +158,7 @@ def builder_page(
     </section>
   </div>
 </div>
+<div id="hints"></div>
 <script>
 const TABLES = {schema_json};
 const DBS = {dbs_json};
@@ -151,6 +176,7 @@ const canvas = document.getElementById("canvas");
 const edgesSvg = document.getElementById("edges");
 const scriptEl = document.getElementById("script");
 const hints = document.getElementById("hints");
+const DBSEL = document.getElementById("db-sel") || { value: "" };
 const includeData = true;
 
 const COLS = 3, NW = 272;
@@ -181,7 +207,9 @@ function renderNodes() {
       const vals = Object.values(t.sample_rows[0] || {}).map(v => String(v).slice(0, 10));
       dataHtml = `<div class="data">${esc(vals.join(", "))}</div>`;
     }
-    el.innerHTML = `<header><span>${esc(t.name)}</span><span class="cmd" title="команды">⌘</span></header><ul>${rows}</ul>${dataHtml}`;
+    el.innerHTML = `<header><span>${esc(t.name)}</span><span class="btns">` +
+      `<span class="ai" title="AI по этой таблице">🤖</span>` +
+      `<span class="cmd" title="команды">⌘</span></span></header><ul>${rows}</ul>${dataHtml}`;
     canvas.appendChild(el);
   });
   drawEdges();
@@ -206,7 +234,7 @@ let drag = null;
 canvas.addEventListener("pointerdown", (e) => {
   const header = e.target.closest("header");
   const node = e.target.closest(".node");
-  if (!node || !header) return;
+  if (!node || !header || e.target.closest(".cmd, .ai")) return;
   drag = { node, dx: e.clientX - node.offsetLeft, dy: e.clientY - node.offsetTop };
   node.setPointerCapture(e.pointerId);
 });
@@ -282,6 +310,13 @@ canvas.addEventListener("click", (e) => {
   }, 0);
 });
 
+canvas.addEventListener("click", (e) => {
+  const btn = e.target.closest(".ai");
+  if (!btn) return;
+  e.stopPropagation();
+  openNodeAi(btn, btn.closest(".node").dataset.table);
+});
+
 const KEYWORDS = ["SELECT","FROM","WHERE","JOIN","LEFT","RIGHT","INNER","OUTER","ON","AND","OR","NOT","NULL","IS",
   "GROUP","BY","ORDER","HAVING","LIMIT","OFFSET","INSERT","INTO","VALUES","UPDATE","SET","DELETE","CREATE","TABLE",
   "DROP","ALTER","ADD","PRIMARY","KEY","FOREIGN","REFERENCES","UNIQUE","CHECK","DEFAULT","DISTINCT","AS","CASE",
@@ -295,20 +330,46 @@ function showHints() {
   const q = tok[0].toLowerCase();
   const cols = new Set();
   TABLES.forEach(t => (t.columns || []).forEach(c => cols.add(t.name + "." + c.name)));
-  const items = [...cols.filter(x => x.toLowerCase().includes(q)),
+  const items = [...[...cols].filter(x => x.toLowerCase().includes(q)),
                  ...TABLES.map(t => t.name).filter(x => x.toLowerCase().includes(q)),
                  ...KEYWORDS.filter(x => x.toLowerCase().startsWith(q))].slice(0, 12);
   if (!items.length) { hints.style.display = "none"; return; }
   const start = caret - tok[0].length;
   hints.innerHTML = items.map(x =>
     `<div data-v="${esc(x)}" data-s="${start}" data-e="${caret}">${esc(x)}</div>`).join("");
-  const er = scriptEl.getBoundingClientRect();
+  const cr = caretRect();
   hints.style.display = "block";
-  hints.style.left = (er.left + window.scrollX) + "px";
-  hints.style.top = (er.top + window.scrollY + 24) + "px";
+  hints.style.left = Math.min(cr.left, window.innerWidth - 220) + "px";
+  hints.style.top = Math.min(cr.bottom + 4, window.innerHeight - 40) + "px";
+}
+
+// Прямоугольник каретки: рисуем копию текста до курсора и меряем маркер.
+function caretRect() {
+  const cs = getComputedStyle(scriptEl);
+  const box = document.createElement("div");
+  ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing",
+   "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+   "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth",
+   "boxSizing", "textAlign"].forEach(p => { box.style[p] = cs[p]; });
+  box.style.position = "fixed";
+  box.style.visibility = "hidden";
+  box.style.whiteSpace = "pre-wrap";
+  box.style.wordWrap = "break-word";
+  box.style.width = scriptEl.clientWidth + "px";
+  box.textContent = scriptEl.value.slice(0, scriptEl.selectionStart);
+  const mark = document.createElement("span");
+  mark.textContent = "\u200b";
+  box.appendChild(mark);
+  document.body.appendChild(box);
+  const r = mark.getBoundingClientRect();
+  const er = scriptEl.getBoundingClientRect();
+  const out = { left: Math.max(er.left + 4, r.left), bottom: r.bottom || er.top + 24 };
+  box.remove();
+  return out;
 }
 scriptEl.addEventListener("input", () => { onScriptChange(); showHints(); });
 scriptEl.addEventListener("click", showHints);
+scriptEl.addEventListener("blur", () => { setTimeout(() => { hints.style.display = "none"; }, 150); });
 hints.addEventListener("mousedown", (e) => {
   const d = e.target.closest("div[data-v]");
   if (!d) return;
@@ -322,11 +383,34 @@ hints.addEventListener("mousedown", (e) => {
   onScriptChange();
 });
 
+// Стрелки/Tab/Enter выбирают подсказку, Esc закрывает.
+scriptEl.addEventListener("keydown", (e) => {
+  if (hints.style.display !== "block" || !hints.children.length) return;
+  const items = [...hints.children];
+  let idx = items.findIndex(d => d.classList.contains("sel"));
+  if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    e.preventDefault();
+    idx = e.key === "ArrowDown"
+      ? Math.min(idx + 1, items.length - 1)
+      : Math.max(idx - 1, 0);
+    items.forEach(d => d.classList.remove("sel"));
+    items[idx].classList.add("sel");
+    items[idx].scrollIntoView({ block: "nearest" });
+  } else if (e.key === "Tab" || (e.key === "Enter" && idx >= 0)) {
+    e.preventDefault();
+    items[idx >= 0 ? idx : 0].dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+  } else if (e.key === "Escape") {
+    hints.style.display = "none";
+  }
+});
+
 let timer = null, lastSql = "";
+// В live-режиме выполняем только читающие запросы — запись только по кнопке.
+function isReadOnly(sql) { return /^\s*(select|with|pragma|explain|describe|show)\b/i.test(sql); }
 function onScriptChange() {
   if (timer) clearTimeout(timer);
   const sql = scriptEl.value.trim();
-  if (!sql || sql === lastSql) return;
+  if (!sql || sql === lastSql || !isReadOnly(sql)) return;
   timer = setTimeout(() => runSql(sql, true), 700);
 }
 async function runSql(sql, live) {
@@ -360,27 +444,98 @@ document.getElementById("copy-btn").onclick = function () {
 };
 
 const aiOut = document.getElementById("ai-out");
-async function askAi(action, nodeTable) {
-  const prompt = document.getElementById("ai-prompt").value.trim();
+
+// Убираем markdown-обёртку ```sql … ``` из ответа AI.
+function stripFences(s) {
+  const m = String(s).match(/```[a-zA-Z]*\s*([\s\S]*?)```/);
+  return (m ? m[1] : s).trim();
+}
+
+// Общий вызов AI: action, prompt, таблица ноды, куда писать ответ.
+async function callAi(action, prompt, table, out) {
   if (!prompt) {
-    aiOut.style.display = "block"; aiOut.style.color = "var(--bad)";
-    aiOut.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
-    document.getElementById("ai-prompt").focus();
-    return;
+    out.style.display = "block"; out.style.color = "var(--bad)";
+    out.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
+    return false;
   }
-  const sql = scriptEl.value.trim();
-  aiOut.style.display = "block"; aiOut.style.color = ""; aiOut.textContent = "AI думает…";
+  out.style.display = "block"; out.style.color = ""; out.textContent = "AI думает…";
   try {
     const res = await fetch("/builder/ai", { method: "POST",
-      body: new URLSearchParams({ action, prompt, sql, db: DBSEL.value, table: nodeTable || "" }) });
+      body: new URLSearchParams({ action, prompt, sql: scriptEl.value.trim(),
+                                 db: DBSEL.value, table: table || "" }) });
     const data = await res.json();
-    aiOut.textContent = data.answer || data.error || "пустой ответ";
-    if (action === "fix" && data.answer && /^\s*(SELECT|WITH)/i.test(data.answer)) {
-      scriptEl.value = data.answer.trim(); onScriptChange();
+    const ans = stripFences(data.answer || data.error || "пустой ответ");
+    out.textContent = ans;
+    if (action === "fix" && /^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP)\b/i.test(ans)) {
+      scriptEl.value = ans; onScriptChange();
     }
-  } catch (e) { aiOut.textContent = "Ошибка связи: " + e.message; }
+    return true;
+  } catch (e) {
+    out.textContent = "Ошибка связи: " + e.message;
+    return false;
+  }
 }
-document.querySelectorAll("[data-ai]").forEach(b => b.onclick = () => askAi(b.dataset.ai, ""));
+
+// Кнопка AI в ноде: панель с полем prompt и тремя действиями.
+let aiPanel = null;
+function closeNodeAi() {
+  if (aiPanel) { aiPanel.remove(); aiPanel = null; }
+}
+function openNodeAi(btn, table) {
+  closeNodeAi();
+  aiPanel = document.createElement("div");
+  aiPanel.className = "node-ai";
+  aiPanel.innerHTML =
+    `<div class="t">🤖 ${esc(table)}</div>` +
+    `<input id="node-ai-prompt" placeholder="промпт — не может быть пустым">` +
+    `<div class="row">` +
+    `<button data-a="explain">объяснить ошибку</button>` +
+    `<button data-a="fix">исправить ошибку</button>` +
+    `<button data-a="gen">сгенерировать код</button>` +
+    `</div><div class="out"></div>`;
+  document.body.appendChild(aiPanel);
+  const r = btn.getBoundingClientRect();
+  aiPanel.style.left = Math.max(8, Math.min(r.left - 240, window.innerWidth - 320)) + "px";
+  aiPanel.style.top = (r.bottom + 8) + "px";
+  const out = aiPanel.querySelector(".out");
+  const input = aiPanel.querySelector("input");
+  aiPanel.querySelectorAll("button").forEach(b => {
+    b.onclick = async () => {
+      const prompt = input.value.trim();
+      if (!prompt) {
+        out.style.display = "block"; out.style.color = "var(--bad)";
+        out.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
+        input.focus();
+        return;
+      }
+      await callAi(b.dataset.a, prompt, table, out);
+    };
+  });
+  input.focus();
+  setTimeout(() => {
+    const close = (ev) => {
+      if (aiPanel && !aiPanel.contains(ev.target) && ev.target !== btn) {
+        closeNodeAi();
+        document.removeEventListener("click", close, true);
+      }
+    };
+    document.addEventListener("click", close, true);
+  }, 0);
+}
+
+// Кнопки в боковой панели AI.
+document.querySelectorAll("[data-ai]").forEach(b => {
+  b.onclick = async () => {
+    const prompt = document.getElementById("ai-prompt").value.trim();
+    if (!prompt) {
+      aiOut.style.display = "block"; aiOut.style.color = "var(--bad)";
+      aiOut.textContent = "Промпт не может быть пустым — напишите вопрос для AI.";
+      document.getElementById("ai-prompt").focus();
+      return;
+    }
+    await callAi(b.dataset.ai, prompt, "", aiOut);
+  };
+});
 
 function switchDb(p) { location.href = "/builder?db=" + encodeURIComponent(p); }
 renderNodes();
