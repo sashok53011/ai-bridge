@@ -286,6 +286,20 @@ def _copy_line(value: str, node_id: str) -> str:
     )
 
 
+def _brand() -> str:
+    """Название продукта на текущем языке: RU — «AI-приставка», EN/DE — AI-Bridge."""
+    from core.i18n import t
+
+    return escape(t("brand.name"))
+
+
+def _lang() -> str:
+    """Код текущего языка для <html lang>."""
+    from core.i18n import get_lang
+
+    return get_lang()
+
+
 def _nav(*, can_edit: bool) -> str:
     """Шапка страницы: логотип-ссылка слева, разделы справа, «выйти» far right.
 
@@ -463,7 +477,7 @@ def _nav(*, can_edit: bool) -> str:
         f'<button class="out" type="submit">{t("nav.logout")}</button></form>'
     )
     return (
-        f'{theme_script}<header class="topnav"><a class="brand" href="/">AI-приставка</a>'
+        f'{theme_script}<header class="topnav"><a class="brand" href="/">{_brand()}</a>'
         f'<nav>{" ".join(links)}</nav>'
         f'<span class="lang-switch">{lang_links}</span></header>{lang_script}'
     )
@@ -671,11 +685,11 @@ def catalogue_page(
     add_html = f'<p class="add"><a class="btn-ghost" href="/add">{t("cat.add_provider")}</a></p>'
 
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AI-приставка</title>
+<title>{_brand()}</title>
 <style>
 {_style()}
   table {{ border-collapse: separate; border-spacing: 0; width: 100%; }}
@@ -937,10 +951,10 @@ def edit_page(
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
 
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
-<title>Правка — {escape(str(entry.get("name") or ""))}</title>
+<title>Правка — {escape(str(entry.get("name") or ""))} — {_brand()}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 {_style()}
@@ -990,10 +1004,10 @@ def oauth_page(
     link = _safe_url(verify_url) or "https://github.com/login/device"
     poll_ms = max(int(interval), 1) * 1000
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
-<title>Вход через GitHub — {escape(provider_name)}</title>
+<title>Вход через GitHub — {escape(provider_name)} — {_brand()}</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 {_style()}
@@ -1080,11 +1094,11 @@ def add_page(
     notice_html = f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
 
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Новый провайдер — AI-приставка</title>
+<title>Новый провайдер — {_brand()}</title>
 <style>
 {_style()}
   body {{ max-width: 100%; }}
@@ -1130,11 +1144,11 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
         else ""
     )
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{t("login.title")} — AI-приставка</title>
+<title>{t("login.title")} — {_brand()}</title>
 <style>
 {_style()}
   input {{ width: 100%; margin: .3rem 0; font-family: monospace; }}
@@ -1143,7 +1157,7 @@ def login_page(notice: str = "", *, signup_open: bool = True) -> str:
 </style>
 </head>
 <body>
-<header class="topnav plain"><span class="brand">AI-приставка</span></header>
+<header class="topnav plain"><span class="brand">{_brand()}</span></header>
 <h1>{t("login.title")}</h1>
 {notice_html}
 <div class="card">
@@ -1172,11 +1186,11 @@ def signup_page(notice: str = "") -> str:
         f'<p class="notice bad">{escape(notice)}</p>' if notice else ""
     )
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Регистрация — AI-приставка</title>
+<title>Регистрация — {_brand()}</title>
 <style>
 {_style()}
   input {{ width: 100%; margin: .3rem 0; font-family: monospace; }}
@@ -1184,7 +1198,7 @@ def signup_page(notice: str = "") -> str:
 </style>
 </head>
 <body>
-<header class="topnav plain"><a class="brand" href="/login">AI-приставка</a></header>
+<header class="topnav plain"><a class="brand" href="/login">{_brand()}</a></header>
 <h1>Регистрация</h1>
 {notice_html}
 <div class="card">
@@ -1236,11 +1250,11 @@ def tokens_page(
 <p>{_copy_line(app_address, "v1big")}</p>"""
 
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Приложения и токены — AI-приставка</title>
+<title>Приложения и токены — {_brand()}</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; }}
@@ -1370,12 +1384,12 @@ def stats_page(
     )
     paused_count = len(penalized or [])
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="30">
-<title>Статистика — AI-приставка</title>
+<title>Статистика — {_brand()}</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; }}
@@ -1439,11 +1453,11 @@ def stats_page(
 def token_created_page(token: str, name: str, *, can_edit: bool = False) -> str:
     """Один раз показать новый токен: скопируй и уходи."""
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Новый токен — AI-приставка</title>
+<title>Новый токен — {_brand()}</title>
 <style>
 {_style()}
   input {{ width: 100%; font-family: monospace; }}
@@ -1614,7 +1628,7 @@ def sql_playground_page(
     )
     return f"""<!doctype html>
 <html lang="{get_lang()}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SQL Playground — AI Bridge</title>
+<title>SQL Playground — {escape(t("brand.name"))}</title>
 <style>
 {_style()}
   .sql-hero {{ padding: 1.25rem 1.4rem; margin: 1.2rem 0; border-radius: 1.2rem;
@@ -1806,11 +1820,11 @@ def logs_page(
     notice_html = f'<p class="notice">{escape(notice)}</p>' if notice else ""
     summary_html = _log_summary(events)
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{t("logs.title")} — AI-приставка</title>
+<title>{t("logs.title")} — {_brand()}</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; font-size: .9rem; }}
@@ -1966,11 +1980,11 @@ def users_page(users: list[dict], *, current_id: str = "", notice: str = "") -> 
     else:
         rows_html = f'<tr><td colspan="4" class="empty">{t("users.empty")}</td></tr>'
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{t("users.title")} — AI-приставка</title>
+<title>{t("users.title")} — {_brand()}</title>
 <style>
 {_style()}
   table {{ border-collapse: collapse; width: 100%; }}
@@ -2074,11 +2088,11 @@ def pick_model_page(
             f'у «{escape(provider_name)}»</p>'
         )
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Модель — {escape(provider_name)}</title>
+<title>Модель — {escape(provider_name)} — {_brand()}</title>
 <style>
 {_style()}
   label {{ display: block; margin: .2rem 0; }}
@@ -2481,7 +2495,7 @@ def test_page(
         voices_datalist = f'<datalist id="voices">{options}</datalist>'
 
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2560,11 +2574,11 @@ def key_page(
   <span class="role">вместо вставки ключа: GitHub выдаст код, вы введёте его на github.com/login/device</span>
 </form>"""
     return f"""<!doctype html>
-<html lang="ru">
+<html lang="{_lang()}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ключ — {escape(provider_name)}</title>
+<title>Ключ — {escape(provider_name)} — {_brand()}</title>
 <style>
 {_style()}
   input {{ width: 100%; font-family: monospace; }}

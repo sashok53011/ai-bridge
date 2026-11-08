@@ -29,6 +29,8 @@ def get_lang() -> str:
 
 #: Словари переводов: ключ → {язык: строка}.
 _STRINGS: dict[str, dict[str, str]] = {
+    # --- название продукта ---
+    "brand.name": {"ru": "AI-приставка", "en": "AI-Bridge", "de": "AI-Bridge"},
     # --- навигация ---
     "nav.catalogue": {"ru": "каталог", "en": "catalogue", "de": "Katalog"},
     "nav.stats": {"ru": "статистика", "en": "stats", "de": "Statistik"},
@@ -222,7 +224,7 @@ _STRINGS: dict[str, dict[str, str]] = {
         "de": "Tabellen: {t} · Beziehungen: {r} · Verknüpfungen (N:M): {j}",
     },
     # --- конструктор (SQL builder) ---
-    "bld.doc_title": {"ru": "Конструктор SQL — AI Bridge", "en": "SQL builder — AI Bridge", "de": "SQL-Konstruktor — AI Bridge"},
+    "bld.doc_title": {"ru": "Конструктор SQL — AI-приставка", "en": "SQL builder — AI-Bridge", "de": "SQL-Konstruktor — AI-Bridge"},
     "bld.title": {"ru": "Конструктор SQL", "en": "SQL builder", "de": "SQL-Konstruktor"},
     "bld.db": {"ru": "База:", "en": "Database:", "de": "Datenbank:"},
     "bld.no_bases": {"ru": "нет баз", "en": "no databases", "de": "keine Datenbanken"},
