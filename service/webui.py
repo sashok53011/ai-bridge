@@ -65,7 +65,6 @@ from service.gateway import (
     test_chat,
 )
 from service.space import Spaces
-from storage.sqlplayground import SqlPlaygroundError
 from storage.sessions import SessionStore
 from storage.usertokens import UserTokens
 from storage.users import UserStore
@@ -970,218 +969,46 @@ class WebUi:
             )
             return
 
+        if clean.startswith("/key/"):
+            provider_id = urllib.parse.unquote(clean[len("/key/") :])
+            entry = self._find(viewer, provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
+            self._send_html(
+                handler,
+                200,
+                key_page(
+                    entry["name"],
+                    provider_id=provider_id,
+                    has_key=bool(space.keys.get(provider_id)),
+                    notice=notice if notice_bad else "",
+                    can_edit=is_admin,
+                    login_url=entry.get("loginUrl", ""),
+                    key_url=entry.get("getApiKeyUrl", ""),
+                    oauth=copilot.is_copilot_url(entry.get("url")),
+                ),
+            )
+            return
+
         if clean.startswith("/edit/"):
             if not is_admin:
                 self._forbidden(handler, "правка определений — только администратору")
                 return
             provider_id = urllib.parse.unquote(clean[len("/edit/") :])
-            error = ""
-            if self._sql_playground is None:
-                error = "SQL Playground не настроен."
-            elif query:
-                try:
-                    result = self._sql_playground.execute(query)
-                except SqlPlaygroundError as exc:
-                    error = str(exc)
+            entry = self._find(viewer, provider_id)
+            if entry is None:
+                self._not_found(handler)
+                return
             self._send_html(
                 handler,
                 200,
-                self._sql_page(
-                    query=query,
-                    result=result,
-                    error=error,
-                    include_data=include_data,
+                edit_page(
+                    entry,
+                    notice=notice if notice_bad else "",
+                    has_key=bool(space.keys.get(provider_id)),
+                    oauth=copilot.is_copilot_url(entry.get("url")),
                 ),
-                cache_control="no-store",
-            )
-            return
-
-        if clean.startswith("/toggle/"):
-            provider_id = urllib.parse.unquote(clean[len("/toggle/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            result = ops.set_enabled(
-                self._server,
-                self._entries_for(viewer),
-                [provider_id],
-                enabled=not entry.get("enabled"),
-                can_edit=is_admin,
-                snapshot=space.snapshot,
-                sync=False,
-            )
-            word = "включён" if not entry.get("enabled") else "выключен"
-            notice = f"{entry['name']}: {word}"
-            if result["error"]:
-                notice = result["error"]
-            self._event("тумблер", str(viewer.get("email") or ""), notice)
-            self._redirect(handler, notice)
-            return
-
-        if clean.startswith("/test/"):
-            provider_id = urllib.parse.unquote(clean[len("/test/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            key = space.keys.get(provider_id)
-            kwargs = (
-                {} if self._make_provider is None
-                else {"make_provider": self._make_provider}
-            )
-            # Свой промпт приходит из формы на странице; пустой — как всегда,
-            # крошечный вопрос по умолчанию.
-            question = field("question").strip()
-            chat_kwargs = dict(kwargs)
-            if question:
-                chat_kwargs["question"] = question
-            image_url = field("image_url").strip()
-            if image_url:
-                chat_kwargs["image_url"] = image_url
-            picked = field("test_model").strip()
-            if picked:
-                chat_kwargs["model"] = picked
-            outcome = test_chat(entry, key, **chat_kwargs)
-            # Тест — главная проверка провайдера: настоящий ответ модели
-            # засчитывается в статистику сообщества под именем человека.
-            ops.report_chat(self._server, entry, outcome, report_for=str(viewer["id"]))
-            self._event(
-                "тест",
-                str(viewer.get("email") or ""),
-                f"{entry['name']}: "
-                + (f"ответ от {entry.get('model', '')}" if not outcome["error"] else outcome["error"]),
-            )
-            self._send_html(
-                handler, 200,
-                self._test_page_html(
-                    entry, key, is_admin, question=outcome["question"],
-                    answer=outcome["answer"], error=outcome["error"],
-                ),
-            )
-            return
-
-        if clean.startswith("/imgtest/"):
-            provider_id = urllib.parse.unquote(clean[len("/imgtest/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            key = space.keys.get(provider_id)
-            kwargs = (
-                {} if self._make_provider is None
-                else {"make_provider": self._make_provider}
-            )
-            result = generate_image(entry, key, prompt=field("prompt"),
-                                    model=field("model"), **kwargs)
-            self._note_media(viewer, entry, "картинка",
-                             prompt=str(result.get("prompt") or ""),
-                             model=str(result.get("model") or ""),
-                             error=str(result.get("error") or ""))
-            self._send_html(
-                handler, 200,
-                self._test_page_html(entry, key, is_admin, image_result=result),
-            )
-            return
-
-        # Озвучка, музыка, 3D, вектор, распознавание и обработка звука —
-        # по тому же шаблону, свой маршрут на тип.
-        media_kind = ""
-        tail = ""
-        if clean.startswith("/audiotest/"):
-            media_kind, tail = "audio", clean[len("/audiotest/") :]
-        elif clean.startswith("/3dtest/"):
-            media_kind, tail = "3d", clean[len("/3dtest/") :]
-        elif clean.startswith("/embedtest/"):
-            media_kind, tail = "embedding", clean[len("/embedtest/") :]
-        elif clean.startswith("/stttest/"):
-            media_kind, tail = "stt", clean[len("/stttest/") :]
-        elif clean.startswith("/voicetest/"):
-            media_kind, tail = "voice", clean[len("/voicetest/") :]
-        if media_kind:
-            provider_id = urllib.parse.unquote(tail)
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            key = space.keys.get(provider_id)
-            kwargs = (
-                {} if self._make_provider is None
-                else {"make_provider": self._make_provider}
-            )
-            if media_kind == "audio":
-                result = generate_audio(
-                    entry, key, text=field("text"), model=field("model"),
-                    voice=field("voice"), **kwargs,
-                )
-                # Музыка — тот же маршрут, но свой результат и своя секция.
-                if field("kind") == "music":
-                    result_key, what = "music_result", "музыка"
-                else:
-                    result_key, what = "audio_result", "озвучка"
-            elif media_kind == "3d":
-                result = generate_3d(
-                    entry, key, image=field("image"), model=field("model"),
-                    resolution=field("resolution") or "low",
-                    prompt=field("prompt"), **kwargs,
-                )
-                result_key, what = "three_result", "3D"
-            elif media_kind == "stt":
-                # Свой файл; пусто — тестовый тон (без звука тест бессмыслен).
-                audio = None
-                audio_name = "test-tone.wav"
-                mime = "audio/wav"
-                uploaded = file_field("audio")
-                if uploaded is not None and uploaded[1]:
-                    import mimetypes as _mt
-
-                    audio_name = uploaded[0] or "sample.wav"
-                    audio = uploaded[1]
-                    mime = _mt.guess_type(audio_name)[0] or "application/octet-stream"
-                else:
-                    audio = _test_tone()
-                result = generate_transcript(
-                    entry, key, model=field("model"), audio=audio,
-                    audio_name=audio_name, mime=mime, **kwargs,
-                )
-                result_key, what = "transcript_result", "распознавание"
-            elif media_kind == "voice":
-                # Значение select — «действие|модель»; файл — свой или тон.
-                raw_model = field("model")
-                action, sep, model = raw_model.partition("|")
-                if not sep:
-                    action, model = "isolator", raw_model
-                audio = None
-                audio_name = "test-tone.wav"
-                mime = "audio/wav"
-                uploaded = file_field("audio")
-                if uploaded is not None and uploaded[1]:
-                    import mimetypes as _mt
-
-                    audio_name = uploaded[0] or "sample.wav"
-                    audio = uploaded[1]
-                    mime = _mt.guess_type(audio_name)[0] or "application/octet-stream"
-                else:
-                    audio = _test_tone()
-                result = process_audio(
-                    entry, key, action=action, model=model, audio=audio,
-                    audio_name=audio_name, mime=mime, voice=field("voice"),
-                    **kwargs,
-                )
-                result_key, what = "voice_result", "обработка звука"
-            else:
-                result = embed_text(
-                    entry, key, text=field("text"), model=field("model"), **kwargs,
-                )
-                result_key, what = "embed_result", "вектор"
-            self._note_media(viewer, entry, what,
-                             prompt=str(result.get("text")
-                                        or result.get("image") or ""),
-                             model=str(result.get("model") or ""),
-                             error=str(result.get("error") or ""))
-            self._send_html(
-                handler, 200,
-                self._test_page_html(entry, key, is_admin, **{result_key: result}),
             )
             return
 
@@ -1191,341 +1018,26 @@ class WebUi:
             if entry is None:
                 self._not_found(handler)
                 return
-            model = field("model")
-            if not model:
-                self._redirect(handler, "модель не выбрана", bad=True)
-                return
-            updated, error = set_model_data(self._entries_for(viewer), provider_id, model)
-            if updated is None:
-                self._redirect(handler, error or "не получилось", bad=True)
-                return
-            # Отметка личного выбора: переживёт обновление каталога.
-            updated = [
-                {**item, "picked": True} if item["id"] == provider_id else item
-                for item in updated
-            ]
-            space.snapshot.save(updated)
-            self._event("модель", str(viewer.get("email") or ""), f"{entry['name']} -> {model}")
-            self._redirect(handler, f"{entry['name']}: модель {model}")
-            return
-
-        if clean == "/key":
-            provider_id = field("id")
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            space.keys.set(provider_id, field("api_key"))
-            self._event("ключ", str(viewer.get("email") or ""), f"{entry['name']}: сохранён")
-            self._redirect(handler, f"{entry['name']}: ключ сохранён в вашем пространстве")
-            return
-
-        if clean.startswith("/oauth/"):
-            provider_id = urllib.parse.unquote(clean[len("/oauth/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            key_to = f"/key/{urllib.parse.quote(provider_id)}"
-            oauth_to = f"/oauth/{urllib.parse.quote(provider_id)}"
-            state = (user_id, provider_id)
-            if field("action") != "check":
-                # Начало входа: GitHub выдаёт одноразовый код и ссылку.
-                if not copilot.is_copilot_url(entry.get("url")):
-                    self._redirect(handler, "этот провайдер входит через GitHub только "
-                                   "по адресу Copilot", bad=True, to=key_to)
-                    return
-                flow = copilot.start_device_flow()
-                if flow.get("error"):
-                    self._redirect(handler, f"вход не начался: {flow['error']}", bad=True,
-                                   to=key_to)
-                    return
-                self._oauth_pending[state] = {
-                    "device_code": flow["device_code"],
-                    "user_code": flow["user_code"],
-                    "url": flow["url"],
-                    "interval": int(flow.get("interval") or 5),
-                    "deadline": time.time() + int(flow.get("expires_in") or 900),
-                }
-                self._event("вход", str(viewer.get("email") or ""),
-                            f"{entry['name']}: начат вход через GitHub")
-                self._redirect(handler, "", to=oauth_to)
-                return
-            # Проверка: один опрос GitHub — готов ли токен.
-            pending = self._oauth_pending.get(state)
-            if pending is None:
-                self._redirect(handler, "вход через GitHub не начат", bad=True, to=key_to)
-                return
-            if time.time() > pending["deadline"]:
-                del self._oauth_pending[state]
-                self._redirect(handler, "код истёк — начните вход заново", bad=True, to=key_to)
-                return
-            kind, value = copilot.poll_device_flow(pending["device_code"])
-            if kind == "done":
-                del self._oauth_pending[state]
-                space.keys.set(provider_id, value)
-                self._event("ключ", str(viewer.get("email") or ""),
-                            f"{entry['name']}: вход через GitHub выполнен, ключ сохранён")
-                self._redirect(handler, f"{entry['name']}: вход через GitHub выполнен, "
-                               "ключ сохранён", to=key_to)
-                return
-            if kind == "error":
-                del self._oauth_pending[state]
-                self._event("вход", str(viewer.get("email") or ""),
-                            f"{entry['name']}: вход через GitHub не состоялся ({value})")
-                self._redirect(handler, value, bad=True, to=key_to)
-                return
-            # Ещё не подтверждено — возвращаемся на страницу ожидания,
-            # её скрипт сам спросит GitHub через несколько секунд.
-            if value == "slow_down":
-                # GitHub просит опрашивать реже (RFC 8628).
-                pending["interval"] = int(pending.get("interval") or 5) + 5
-            self._redirect(handler, "", to=oauth_to)
-            return
-
-        if clean == "/tokens/api":
-            turned_on = not self._users.api_enabled(user_id)
-            self._users.set_api(user_id, turned_on)
-            self._event(
-                "доступ приложений",
-                str(viewer.get("email") or ""),
-                "включён" if turned_on else "выключен",
+            models = self._models_of(entry, space.keys.get(provider_id))
+            # Список моделей получен — провайдер жив: засчитать проверку.
+            ops.report_models(self._server, entry, models, report_for=str(viewer["id"]))
+            facts = " · ".join(
+                str(entry[key])
+                for key in ("context", "pricing", "capabilities")
+                if entry.get(key)
             )
-            self._redirect(
-                handler,
-                "доступ приложений включён — токены работают"
-                if turned_on
-                else "доступ приложений выключен — токены не пройдут",
-            )
-            return
-
-        if clean == "/tokens/create":
-            name = field("name")
-            if not name:
-                self._redirect(handler, "назовите токен", bad=True)
-                return
-            token = self._user_tokens.create(user_id, name)
-            self._event("токен", str(viewer.get("email") or ""), f"создан «{name}»")
             self._send_html(
-                handler, 200, token_created_page(token, name, can_edit=is_admin)
+                handler,
+                200,
+                pick_model_page(
+                    entry["name"], provider_id, models,
+                    current=entry.get("model", ""),
+                    notice=notice if notice_bad else "",
+                    can_edit=is_admin,
+                    facts=facts,
+                ),
             )
             return
-
-        if clean == "/tokens/revoke":
-            tail = field("tail")
-            # Название токена — до отзыва, иначе в журнале останется хвост.
-            name = next(
-                (str(t.get("name") or "") for t in self._user_tokens.list_for(user_id)
-                 if str(t.get("tail") or "") == tail),
-                "",
-            )
-            if self._user_tokens.revoke(user_id, tail):
-                self._event(
-                    "токен", str(viewer.get("email") or ""),
-                    f"отозван «{name}»" if name else f"отозван (…{tail})",
-                )
-                self._redirect(handler, "токен отозван")
-            else:
-                self._redirect(handler, "такого токена нет", bad=True)
-            return
-
-        if clean == "/add":
-            values = {
-                name: field(name)
-                for name in (
-                    "name", "url", "model", "api_key", "loginUrl", "getApiKeyUrl",
-                    "logoUrl", "infoUrl", "pricing", "context", "capabilities",
-                )
-            }
-            if field("action") == "fetch":
-                models: list[str] = []
-                error = ""
-                if not values["url"]:
-                    error = "введите адрес провайдера — по нему запросим модели"
-                else:
-                    factory = self._make_provider or Provider
-                    try:
-                        models = [
-                            item["name"]
-                            for item in factory(values["url"], timeout=15.0).fetch_models(
-                                values["api_key"]
-                            )
-                        ]
-                        if not models:
-                            error = "провайдер не вернул ни одной модели"
-                    except NeedsKeyError:
-                        error = (
-                            "без ключа список недоступен — введите API-ключ "
-                            "и нажмите кнопку ещё раз"
-                        )
-                    except Exception as exc:  # noqa: BLE001 — причина уходит в подсказку
-                        error = f"список не получился ({exc})"
-                self._send_html(
-                    handler,
-                    200,
-                    add_page(
-                        values=values,
-                        models=models if models else None,
-                        models_error=error,
-                        is_admin=is_admin,
-                    ),
-                )
-                return
-            result = ops.add(
-                self._server,
-                self._entries_for(viewer),
-                self._providers_source(),
-                name=values["name"],
-                url=values["url"],
-                model=values["model"],
-                key=values["api_key"],
-                login_url=values["loginUrl"],
-                key_url=values["getApiKeyUrl"],
-                details={
-                    key: values[key]
-                    for key in ("logoUrl", "infoUrl", "pricing", "context", "capabilities")
-                },
-                can_edit=is_admin,
-                snapshot=space.snapshot,
-                key_store=space.keys,
-                sync=is_admin,
-                author_id="" if is_admin else user_id,
-            )
-            if result["entry"] is None:
-                self._redirect(handler, result["error"] or "не получилось", bad=True)
-                return
-            if is_admin:
-                self._refresh_now()  # запись ушла на сервер — свежий каталог
-            self._event(
-                "провайдер",
-                str(viewer.get("email") or ""),
-                f"добавлен {result['entry']['name']}: {result['note'] or result['error']}",
-                url=values["url"],
-            )
-            # Каталог — общее дело: кто бы ни добавил, админу в Telegram.
-            self._push(
-                self._admin_id,
-                f"Новый провайдер: {result['entry']['name']} — "
-                f"добавил {str(viewer.get('email') or '—')}\n"
-                f"{self._site_link(handler)}/",
-            )
-            self._redirect(handler, f"{result['entry']['name']}: {result['note'] or result['error']}")
-            return
-
-        # ------------------------------------------------------- доска багов
-        # Общий разговор для всех вошедших: сообщение, комментарий,
-        # статус с обязательным пояснением. Удаление — только админу,
-        # но проверяется оно здесь же, ниже, а не общим шлагбаумом.
-        # письма администратору — ящик остаётся открытым, власть полная.
-        # («узнать» читает getUpdates), тест — живой вызов API.
-        # -------------------------------------------------------- только админ
-        if not is_admin:
-            self._forbidden(handler, "это действие — только администратору")
-            return
-
-        admin_space = self._spaces.for_user(str(viewer["id"]))
-        if clean.startswith("/remove/"):
-            provider_id = urllib.parse.unquote(clean[len("/remove/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            result = ops.remove(
-                self._server, self._entries_for(viewer), self._providers_source(),
-                provider_id, can_edit=True,
-                snapshot=admin_space.snapshot, key_store=admin_space.keys,
-            )
-            if result["code"] == 0:
-                # Кэш каталога устарел при push — обновляем сразу, иначе
-                # следующая перерисовка вернёт запись из старого кэша.
-                self._refresh_now()
-            notice = (result["note"] and f"{entry['name']}: {result['note']}") or ""
-            self._event("провайдер", str(viewer.get("email") or ""), notice or result["error"])
-            self._redirect(handler, result["error"] or notice)
-            return
-
-        if clean.startswith("/edit/"):
-            provider_id = urllib.parse.unquote(clean[len("/edit/") :])
-            entry = self._find(viewer, provider_id)
-            if entry is None:
-                self._not_found(handler)
-                return
-            changes = {
-                name: field(name)
-                for name in (
-                    "name", "url", "model", "fallbackPriority",
-                    "getApiKeyUrl",
-                )
-            }
-            if field("action") == "fetch":
-                # Показать модели: ничего не сохраняем, только перерисовать
-                # форму со списком. Ключ — введённый сейчас, иначе сохранённый.
-                key = field("api_key") or admin_space.keys.get(provider_id)
-                models: list[str] = []
-                error = ""
-                if not changes["url"]:
-                    error = "введите адрес провайдера — по нему запросим модели"
-                else:
-                    factory = self._make_provider or Provider
-                    try:
-                        models = [
-                            item["name"]
-                            for item in factory(changes["url"], timeout=15.0).fetch_models(key)
-                        ]
-                        if not models:
-                            error = "провайдер не вернул ни одной модели"
-                    except NeedsKeyError:
-                        error = (
-                            "без ключа список недоступен — введите API-ключ "
-                            "и нажмите кнопку ещё раз"
-                        )
-                    except Exception as exc:  # noqa: BLE001 — причина уходит в подсказку
-                        error = f"список не получился ({exc})"
-                values = {name: field(name) for name in (
-                    "name", "url", "model", "fallbackPriority",
-                    "getApiKeyUrl", "api_key",
-                )}
-                self._send_html(
-                    handler,
-                    200,
-                    edit_page(
-                        entry,
-                        values=values,
-                        models=models if models else None,
-                        models_error=error,
-                        has_key=bool(admin_space.keys.get(provider_id)),
-                        oauth=copilot.is_copilot_url(changes["url"] or entry.get("url")),
-                    ),
-                )
-                return
-            # Ключ живёт на устройстве (хранилище), поля определения — в каталоге.
-            key_note = ""
-            if field("api_key"):
-                admin_space.keys.set(provider_id, field("api_key"))
-                key_note = " · ключ обновлён"
-                self._event(
-                    "ключ", str(viewer.get("email") or ""),
-                    f"{entry['name']}: сохранён при правке",
-                )
-            result = ops.edit(
-                self._server, self._entries_for(viewer), self._providers_source(),
-                provider_id, changes, can_edit=True, snapshot=admin_space.snapshot,
-            )
-            if result["error"] is None:
-                self._refresh_now()  # кэш устарел при push — свежий каталог
-            notice = f"{entry['name']}: сохранено" if result["error"] is None else result["error"]
-            if result["error"] is None and result.get("note"):
-                notice += f" · {result['note']}"
-            notice += key_note
-            self._event(
-                "правка",
-                str(viewer.get("email") or ""),
-                notice,
-                **{key: value for key, value in changes.items() if value},
-            )
-            self._redirect(handler, notice, to=f"/edit/{urllib.parse.quote(provider_id)}")
-            return
-
 
         if clean == "/sql":
             from storage.user_db import sync_user_db, db_path_for
@@ -1549,13 +1061,6 @@ class WebUi:
                 ),
                 cache_control="no-store",
             )
-            return
-
-        if clean == "/logs/clear":
-            if self._log is not None:
-                self._log.clear()
-            self._event("журнал", str(viewer.get("email") or ""), "очищен")
-            self._redirect(handler, "журнал очищен", to="/logs")
             return
 
         self._not_found(handler)
@@ -2143,6 +1648,12 @@ class WebUi:
         # Общий разговор для всех вошедших: сообщение, комментарий,
         # статус с обязательным пояснением. Удаление — только админу,
         # но проверяется оно здесь же, ниже, а не общим шлагбаумом.
+        if not is_admin:
+            self._forbidden(handler, "это действие — только администратору")
+            return
+
+        # Ключи и снапшот админа: правки каталога живут в его пространстве.
+        admin_space = space
         if clean.startswith("/remove/"):
             provider_id = urllib.parse.unquote(clean[len("/remove/") :])
             entry = self._find(viewer, provider_id)
