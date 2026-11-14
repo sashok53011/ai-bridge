@@ -2393,6 +2393,13 @@ class _Handler(BaseHTTPRequestHandler):
         method» с мусором из JSON-тела (страница падает с 501).
         """
         self.send_response(status)
+        origin = self.headers.get("Origin", "")
+        allowed = origin in ("https://aistudio.devhorizon.online", "https://docs-chat.devhorizon.online")
+        if allowed:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Content-Type", content_type)
         for name, value in (extra_headers or {}).items():
             self.send_header(name, value)
@@ -2489,6 +2496,22 @@ class _Handler(BaseHTTPRequestHandler):
             )
             return
         self._send(404, "application/json", [_error_body(f"нет пути {path}", code="unknown_path")])
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 - имя задано http.server
+        origin = self.headers.get("Origin", "")
+        allowed = origin in ("https://aistudio.devhorizon.online", "https://docs-chat.devhorizon.online")
+        if allowed:
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self.send_response(403)
+            self.end_headers()
+        return
 
     def do_POST(self) -> None:  # noqa: N802 - имя задано http.server
         path = self.path.split("?", 1)[0]
